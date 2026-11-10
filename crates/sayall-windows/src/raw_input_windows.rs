@@ -81,7 +81,7 @@ thread_local! {
 #[derive(Debug)]
 pub struct RawInputRuntime {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    engine: Mutex<Option<Sender<EngineMessage>>>,
+    engine: Sender<EngineMessage>,
     control: Mutex<Option<ListenerControl>>,
 }
 
@@ -91,7 +91,7 @@ impl RawInputRuntime {
         // 直接投递（见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）。
         Self {
             snapshot,
-            engine: Mutex::new(Some(engine)),
+            engine,
             control: Mutex::new(None),
         }
     }
@@ -128,12 +128,9 @@ impl RawInputRuntime {
         let snapshot = Arc::clone(&self.snapshot);
         let thread_stop = Arc::clone(&stop_requested);
         let thread_hwnd = Arc::clone(&hwnd);
-        let engine = self
-            .engine
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| mpsc::channel().0);
+        // Each listener run shares the same mapping worker, including after a
+        // failed startup or an explicit stop and restart.
+        let engine = self.engine.clone();
         let join = thread::Builder::new()
             .name("sayall-raw-input".to_owned())
             .spawn(move || {
@@ -1453,7 +1450,32 @@ pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_descriptor_cast_report, voice_f5_wake_edge};
+    use super::{is_descriptor_cast_report, voice_f5_wake_edge, RawInputRuntime};
+    use crate::button_mapping::EngineMessage;
+    use crate::raw_input::RawInputSnapshot;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    #[test]
+    fn listener_restarts_keep_the_mapping_engine_channel() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let (engine, events) = mpsc::channel();
+        let runtime =
+            RawInputRuntime::new(Arc::new(Mutex::new(RawInputSnapshot::default())), engine);
+        for attempt in 1..=2 {
+            // The Windows listener uses a process-local message-only window.
+            // Observe only cleanup through an inert channel, with no key input.
+            runtime.start().expect("listener starts without a remote");
+            runtime.stop().expect("listener stops before restarting");
+            assert_eq!(
+                events
+                    .try_iter()
+                    .filter(|event| matches!(event, EngineMessage::ListenerStopped))
+                    .count(),
+                1,
+                "attempt {attempt} must notify the same mapping engine when it releases input"
+            );
+        }
+    }
 
     #[test]
     fn chromecast_descriptor_decoder_only_handles_three_byte_report_one() {

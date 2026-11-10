@@ -5566,6 +5566,10 @@ const CHROMECAST_PREVIEW_IDENTIFIER: &str = "app.getsayall.remote-mic.windows.ch
 pub fn run() {
     let context = tauri::generate_context!();
     let chromecast_preview = context.config().identifier == CHROMECAST_PREVIEW_IDENTIFIER;
+    // A diagnostic relaunch can keep a completed preview in the tray without
+    // changing the user's saved startup preference.
+    let diagnostic_background =
+        chromecast_preview && std::env::args_os().any(|arg| arg == "--diagnostic-background");
     let log_path = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -5658,12 +5662,14 @@ pub fn run() {
                         );
                         unsafe {
                             let _ = CloseHandle(handle);
-                            let _ = MessageBoxW(
-                                None,
-                                w!("请从托盘正常退出正在运行的 SayAll，然后重新打开预览版。\nQuit the running SayAll from the tray, then open this preview again."),
-                                w!("SayAll Chromecast Preview"),
-                                MB_OK | MB_ICONINFORMATION,
-                            );
+                            if !diagnostic_background {
+                                let _ = MessageBoxW(
+                                    None,
+                                    w!("请从托盘正常退出正在运行的 SayAll，然后重新打开预览版。\nQuit the running SayAll from the tray, then open this preview again."),
+                                    w!("SayAll Chromecast Preview"),
+                                    MB_OK | MB_ICONINFORMATION,
+                                );
+                            }
                         }
                         return;
                     }
@@ -5722,7 +5728,7 @@ pub fn run() {
                 webview.label() == "main"
             ));
         })
-        .setup(|app| {
+        .setup(move |app| {
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
             );
@@ -5868,7 +5874,7 @@ pub fn run() {
             let show_main_window_on_startup = should_show_main_window_on_startup(
                 onboarding_active,
                 completed_update,
-                saved_settings.open_window_at_launch,
+                saved_settings.open_window_at_launch && !diagnostic_background,
             );
             #[cfg(feature = "runtime-simulation")]
             let show_main_window_on_startup =
@@ -5898,9 +5904,10 @@ pub fn run() {
                     let hide_result = window.hide();
                     let visible_after = window.is_visible().unwrap_or(true);
                     sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason=open_window_at_launch_disabled onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
                         if visible_after { "failed" } else { "passed" },
                         visible_after,
+                        if diagnostic_background { "diagnostic_background" } else { "open_window_at_launch_disabled" },
                         saved_settings.open_window_at_launch
                     ));
                 }

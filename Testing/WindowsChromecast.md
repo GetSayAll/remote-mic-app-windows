@@ -174,6 +174,21 @@ Read these events in order for the same `generation`:
 The events omit HID paths, Bluetooth addresses and report payloads. Ordinary
 keyboard input is excluded from the Chromecast counters and edge detail.
 
+### Listener restart and preview activation
+
+An earlier listener owned a one-use mapping sender. Stopping and starting the
+listener again made it look ready while dropping every message sent to the
+mapping engine. A Windows regression starts and stops the message-only
+listener twice and verifies that both stops reach the same engine channel.
+The test uses no physical keys or system input injection.
+
+Check `source_revision` and `pid` in the startup and input records before
+comparing runs. Opening a second EXE while an old instance owns the shared
+lock leaves the old listener active. For an existing, configured preview,
+`--diagnostic-background` starts the replacement in the tray without changing
+its saved startup preference. In this mode a lock conflict is logged without
+opening a dialog.
+
 ## One-shot local Whisper dictation (2026-11-10)
 
 In Reflections, open Local Whisper Transcription, select the verified Whisper
