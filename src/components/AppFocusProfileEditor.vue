@@ -549,7 +549,7 @@ onUnmounted(() => {
   background: var(--accent-surface);
 }
 button:disabled {
-  cursor: not-allowed;
+  cursor: default;
   opacity: 0.55;
 }
 .inline-status {

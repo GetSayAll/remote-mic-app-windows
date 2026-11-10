@@ -964,7 +964,7 @@ onUnmounted(() => {
   text-decoration: underline;
 }
 .quiet-button:disabled {
-  cursor: not-allowed;
+  cursor: default;
   opacity: 0.55;
 }
 .scroll-message {
@@ -1021,7 +1021,7 @@ onUnmounted(() => {
   color: var(--delete-text-hover);
 }
 .danger-link:disabled {
-  cursor: not-allowed;
+  cursor: default;
   opacity: 0.55;
 }
 .danger-button {
@@ -1040,7 +1040,7 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--delete-text) 16%, transparent);
 }
 .danger-button:disabled {
-  cursor: not-allowed;
+  cursor: default;
   opacity: 0.55;
 }
 .dialog-backdrop {

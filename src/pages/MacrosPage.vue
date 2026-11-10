@@ -2061,7 +2061,7 @@ watch(
 }
 .btn:disabled {
   opacity: 0.5;
-  cursor: not-allowed;
+  cursor: default;
 }
 .btn.primary {
   background: var(--accent);
