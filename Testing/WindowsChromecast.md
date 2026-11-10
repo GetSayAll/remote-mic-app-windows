@@ -115,3 +115,30 @@ interface, enqueued PCM on repeated presses, and passed the first-run wizard.
 The user reported voice input was available. This confirms the basic device
 path on this PC. The previous build had an observation-only button path,
 so these records do not establish that any ordinary key runs a mapping.
+
+## Three-byte Report 1 and physical key feedback
+
+- The failing preview saved the enabled center-key mapping but logged no
+  gesture or dispatch. The present Windows Consumer Control collection
+  exposes a 3-byte input report, ID 1, with usage `0x0041` for OK. The old
+  decoder only accepted ID 1 with 2 bytes.
+- On an isolated test worker, Windows' HID parser synthesized OK down/up from
+  the actual installed descriptor. The production report parser and mapping
+  engine produced exactly one recorded `Shift+Enter` and a pair of button
+  events. No system input was generated. Run
+  `cargo test --locked -p sayall-windows --lib chromecast_native_descriptor_ok_dispatches_shift_enter_and_releases_highlight -- --ignored --nocapture`
+  with the device's HID collection present.
+- The event JSON printed after `CAST_E2E_EDGES=` was passed unchanged to the
+  Vue contract test using `SAYALL_CAST_E2E_EDGE_FIXTURE` with its file path.
+  Run `pnpm exec vitest run src/pages/ButtonsPage.cast-contract.test.ts` to
+  exercise Tauri's JavaScript event adapter and the actual Vue page with a
+  stubbed native endpoint. It verifies center and row illumination, dark
+  neighbors, and release. The standalone page suite covers all 14 ordinary
+  keys and clearing on disconnect or device change.
+- Windows Rust serial regression passed 542 tests with 17 ignored. The
+  present-descriptor test passed separately. The active desktop, BLE settings,
+  physical radio key transmission and Codex shortcut receipt remain outside
+  this test evidence.
+
+Product comparison and the local Whisper boundary are recorded in the
+[capability review](../docs/investigations/2026-11-09-sayall-whisper-capability-review.md).

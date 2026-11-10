@@ -231,6 +231,7 @@ pub enum ChromecastInput {
     },
     Keyboard(ButtonEdge),
     CollectionRemoved,
+    ReportRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,32 +297,39 @@ pub fn device_path_matches_supported_remote(path: &str) -> bool {
     device_path_matches_xiaomi_remote(path) || device_path_matches_chromecast_remote(path)
 }
 
-/// Ported from vRemoter's Chromecast report ID 1 table (MIT; see ATTRIBUTION.md).
-/// Windows RAWHID includes the report ID. Never interpret these bytes as Xiaomi usages.
+pub(crate) fn chromecast_button_for_consumer_usage(usage: u16) -> Option<RemoteButton> {
+    Some(match usage {
+        0x019E => RemoteButton::Power,
+        0x0089 | 0x0189 => RemoteButton::Input,
+        0x0042 => RemoteButton::Up,
+        0x0043 => RemoteButton::Down,
+        0x0044 => RemoteButton::Left,
+        0x0045 => RemoteButton::Right,
+        0x0041 => RemoteButton::Ok,
+        0x0224 => RemoteButton::Back,
+        0x0223 => RemoteButton::Home,
+        0x00E9 => RemoteButton::VolumeUp,
+        0x00EA => RemoteButton::VolumeDown,
+        0x00E2 => RemoteButton::VolumeMute,
+        0x0077 => RemoteButton::Youtube,
+        0x0078 => RemoteButton::Netflix,
+        _ => return None,
+    })
+}
+
+/// Legacy two-byte Report 1 (vRemoter, MIT) and three-byte Report 2 (VibeMote).
+/// The Windows descriptor-based, three-byte Report 1 is decoded by HidP.
 pub fn decode_chromecast_report(
     report: &[u8],
 ) -> Result<BTreeSet<RemoteButton>, RawInputDecodeError> {
     // Firmware using standard Consumer Control (Windows observation in VibeMote).
     if report.len() == 3 && report[0] == 2 {
         let usage = u16::from_le_bytes([report[1], report[2]]);
-        let button = match usage {
-            0 => return Ok(BTreeSet::new()),
-            0x019E => RemoteButton::Power,
-            0x0189 => RemoteButton::Input,
-            0x0042 => RemoteButton::Up,
-            0x0043 => RemoteButton::Down,
-            0x0044 => RemoteButton::Left,
-            0x0045 => RemoteButton::Right,
-            0x0041 => RemoteButton::Ok,
-            0x0224 => RemoteButton::Back,
-            0x0223 => RemoteButton::Home,
-            0x00E9 => RemoteButton::VolumeUp,
-            0x00EA => RemoteButton::VolumeDown,
-            0x00E2 => RemoteButton::VolumeMute,
-            0x0077 => RemoteButton::Youtube,
-            0x0078 => RemoteButton::Netflix,
-            _ => return Err(RawInputDecodeError::InvalidReportPrefix),
-        };
+        if usage == 0 {
+            return Ok(BTreeSet::new());
+        }
+        let button = chromecast_button_for_consumer_usage(usage)
+            .ok_or(RawInputDecodeError::InvalidReportPrefix)?;
         return Ok(BTreeSet::from([button]));
     }
     if report.len() != 2 {

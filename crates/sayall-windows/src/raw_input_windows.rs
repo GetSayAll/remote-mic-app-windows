@@ -1,10 +1,11 @@
 use crate::button_mapping::EngineMessage;
 use crate::key_gate;
 use crate::raw_input::{
-    button_for_usage, chromecast_path_matches_target, decode_chromecast_report,
-    decode_report_usages, device_path_matches_chromecast_remote, normalize_device_path,
-    parse_raw_hid_body, report_route, select_single_device_path, ChromecastInput, DevicePathError,
-    RawInputPhase, RawInputSnapshot, RawKeyboardEvent, ReportRoute,
+    button_for_usage, chromecast_button_for_consumer_usage, chromecast_path_matches_target,
+    decode_chromecast_report, decode_report_usages, device_path_matches_chromecast_remote,
+    normalize_device_path, parse_raw_hid_body, report_route, select_single_device_path,
+    ChromecastInput, DevicePathError, RawInputDecodeError, RawInputPhase, RawInputSnapshot,
+    RawKeyboardEvent, RemoteButton, ReportRoute,
 };
 use crate::remote_target::Target;
 use crate::PlatformError;
@@ -18,12 +19,17 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Devices::HumanInterfaceDevice::{
+    HidP_GetCaps, HidP_GetUsages, HidP_Input, HidP_MaxUsageListLength, HIDP_CAPS,
+    HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
+};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
     HRAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RAWKEYBOARD, RIDEV_DEVNOTIFY,
-    RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RIDI_PREPARSEDDATA, RID_INPUT, RIM_TYPEHID,
+    RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
@@ -34,6 +40,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const CONSUMER_USAGE_PAGE: u16 = 0x0c;
+const CONSUMER_CONTROL_USAGE: u16 = 0x01;
+const CAST_DESCRIPTOR_REPORT_BYTES: usize = 3;
+const MAX_CAST_PREPARSED_BYTES: usize = 64 * 1024;
+const MAX_CAST_ACTIVE_USAGES: usize = 128;
+const CAST_DECODE_ERROR_PREFIX: &str = "Chromecast HID 报文解码失败";
 /// 监听器观察到遥控器活动后武装 key_gate 的宽限（毫秒）。
 /// 2026-09-06 与 key_gate::ARM_GRACE_MS 一致提升为 4s：RC003 键盘孪生
 /// 孤立按压首沿泄漏后由此武装，4s 内后续按压不再泄漏（修复左键双响应，
@@ -269,6 +281,8 @@ struct ListenerContext {
     binding_present: bool,
     cast_collections: BTreeSet<String>,
     cast_generation: Option<u64>,
+    cast_hid_descriptor: Option<(HANDLE, ChromecastHidDescriptor)>,
+    cast_report_rejection_logged: bool,
 }
 
 impl ListenerContext {
@@ -276,6 +290,64 @@ impl ListenerContext {
         if self.cast_generation != Some(generation) {
             self.cast_generation = Some(generation);
             self.cast_collections.clear();
+            self.cast_hid_descriptor = None;
+            self.cast_report_rejection_logged = false;
+        }
+    }
+
+    fn decode_cast_hid(
+        &mut self,
+        device: HANDLE,
+        report: &[u8],
+    ) -> Result<BTreeSet<RemoteButton>, String> {
+        if !is_descriptor_cast_report(report) {
+            return decode_chromecast_report(report).map_err(|error| {
+                match error {
+                    RawInputDecodeError::UnsupportedReportShape(_) => "unsupported_report_length",
+                    RawInputDecodeError::InvalidReportPrefix => "unsupported_report_id_or_usage",
+                    _ => "malformed_report",
+                }
+                .to_owned()
+            });
+        }
+        if !self
+            .cast_hid_descriptor
+            .as_ref()
+            .is_some_and(|(cached_device, _)| *cached_device == device)
+        {
+            self.cast_hid_descriptor = Some((device, ChromecastHidDescriptor::read(device)?));
+            crate::ble::gatt_note(
+                "raw_input feature=chromecast action=load_descriptor phase=completed terminal_result=passed report_id=1 report_bytes=3 usage_page=consumer".to_owned(),
+            );
+        }
+        self.cast_hid_descriptor
+            .as_ref()
+            .expect("descriptor present after successful read")
+            .1
+            .decode(report)
+    }
+
+    fn record_cast_report_rejection(&mut self, report_id: u8, length: usize, error: String) {
+        if !self.cast_report_rejection_logged {
+            self.cast_report_rejection_logged = true;
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=decode phase=completed terminal_result=failed error_domain=hid error_code=report_rejected reason={error} report_id={report_id} report_bytes={length} retryable=true"
+            ));
+        }
+        self.snapshot.lock().unwrap().last_error =
+            Some(format!("{CAST_DECODE_ERROR_PREFIX}（{error}）"));
+    }
+
+    fn clear_cast_decode_error(&self) {
+        if self.cast_report_rejection_logged {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if snapshot
+                .last_error
+                .as_ref()
+                .is_some_and(|error| error.starts_with(CAST_DECODE_ERROR_PREFIX))
+            {
+                snapshot.last_error = None;
+            }
         }
     }
 
@@ -285,6 +357,88 @@ impl ListenerContext {
             target_generation,
             input: ChromecastInput::CollectionRemoved,
         });
+    }
+}
+
+fn is_descriptor_cast_report(report: &[u8]) -> bool {
+    report.len() == CAST_DESCRIPTOR_REPORT_BYTES && report[0] == 1
+}
+
+struct ChromecastHidDescriptor {
+    // GetRawInputDeviceInfoW requires aligned storage. The buffer owns its copy
+    // of the opaque preparsed data; no HidD_FreePreparsedData call is needed.
+    data: Vec<usize>,
+    usage_limit: usize,
+}
+
+impl ChromecastHidDescriptor {
+    fn read(device: HANDLE) -> Result<Self, String> {
+        let mut size = 0;
+        let result =
+            unsafe { GetRawInputDeviceInfoW(Some(device), RIDI_PREPARSEDDATA, None, &mut size) };
+        let bytes = size as usize;
+        if result == u32::MAX || !(1..=MAX_CAST_PREPARSED_BYTES).contains(&bytes) {
+            return Err("preparsed_data_size_invalid".to_owned());
+        }
+        let mut data = vec![0usize; bytes.div_ceil(size_of::<usize>())];
+        let written = unsafe {
+            GetRawInputDeviceInfoW(
+                Some(device),
+                RIDI_PREPARSEDDATA,
+                Some(data.as_mut_ptr().cast()),
+                &mut size,
+            )
+        };
+        if written as usize != bytes {
+            return Err("preparsed_data_read_failed".to_owned());
+        }
+        let pointer = PHIDP_PREPARSED_DATA(data.as_ptr() as isize);
+        let mut caps = HIDP_CAPS::default();
+        let status = unsafe { HidP_GetCaps(pointer, &mut caps) };
+        if status != HIDP_STATUS_SUCCESS
+            || caps.UsagePage != CONSUMER_USAGE_PAGE
+            || caps.Usage != CONSUMER_CONTROL_USAGE
+            || usize::from(caps.InputReportByteLength) != CAST_DESCRIPTOR_REPORT_BYTES
+        {
+            return Err("consumer_collection_mismatch".to_owned());
+        }
+        let usage_limit = unsafe {
+            HidP_MaxUsageListLength(HidP_Input, Some(CONSUMER_USAGE_PAGE), pointer) as usize
+        };
+        if !(1..=MAX_CAST_ACTIVE_USAGES).contains(&usage_limit) {
+            return Err("consumer_usage_count_invalid".to_owned());
+        }
+        Ok(Self { data, usage_limit })
+    }
+
+    fn pointer(&self) -> PHIDP_PREPARSED_DATA {
+        PHIDP_PREPARSED_DATA(self.data.as_ptr() as isize)
+    }
+
+    fn decode(&self, report: &[u8]) -> Result<BTreeSet<RemoteButton>, String> {
+        let mut report = <[u8; CAST_DESCRIPTOR_REPORT_BYTES]>::try_from(report)
+            .map_err(|_| "invalid_report_length".to_owned())?;
+        let mut usages = [0u16; MAX_CAST_ACTIVE_USAGES];
+        let mut count = self.usage_limit as u32;
+        let status = unsafe {
+            HidP_GetUsages(
+                HidP_Input,
+                CONSUMER_USAGE_PAGE,
+                None,
+                usages.as_mut_ptr(),
+                &mut count,
+                self.pointer(),
+                &mut report,
+            )
+        };
+        if status != HIDP_STATUS_SUCCESS || count as usize > self.usage_limit {
+            return Err(format!("consumer_usage_parse_status_{:08x}", status.0));
+        }
+        Ok(usages[..count as usize]
+            .iter()
+            .copied()
+            .filter_map(chromecast_button_for_consumer_usage)
+            .collect())
     }
 }
 
@@ -450,6 +604,8 @@ fn run_listener(
             binding_present: !selected_path.is_empty(),
             cast_collections: BTreeSet::new(),
             cast_generation: None,
+            cast_hid_descriptor: None,
+            cast_report_rejection_logged: false,
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -692,6 +848,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                 if cast_removal {
                     context.set_cast_generation(generation);
                     context.cast_collections.remove(&device_path);
+                    context.cast_hid_descriptor = None;
                     context.cast_collection_removed(address, generation);
                 }
             }
@@ -754,6 +911,7 @@ fn audit_binding() {
             let present: BTreeSet<_> =
                 paths.iter().map(|path| normalize_device_path(path)).collect();
             if !context.cast_collections.is_subset(&present) {
+                context.cast_hid_descriptor = None;
                 context.cast_collection_removed(address, generation);
             }
             context.cast_collections = present;
@@ -938,24 +1096,39 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         if let ReportRoute::Chromecast(address) = route {
             context.set_cast_generation(target_generation);
             context.cast_collections.insert(normalized);
-            let send_cast = |input| {
-                let _ = context.engine.send(EngineMessage::Chromecast {
-                    address,
-                    target_generation,
-                    input,
-                });
-            };
             if header.dwType == RIM_TYPEHID.0 {
                 for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
-                    let buttons = decode_chromecast_report(report).map_err(|error| error.to_string())?;
-                    send_cast(ChromecastInput::Hid {
-                        report_id: report[0],
-                        buttons,
-                    });
+                    let report_id = report[0];
+                    match context.decode_cast_hid(header.hDevice, report) {
+                        Ok(buttons) => {
+                            context.clear_cast_decode_error();
+                            let _ = context.engine.send(EngineMessage::Chromecast {
+                                address,
+                                target_generation,
+                                input: ChromecastInput::Hid { report_id, buttons },
+                            });
+                        }
+                        Err(error) => {
+                            context.record_cast_report_rejection(report_id, report.len(), error);
+                            if is_descriptor_cast_report(report) {
+                                // The missing state could be the release. Clear
+                                // the pending gesture without firing a shortcut.
+                                let _ = context.engine.send(EngineMessage::Chromecast {
+                                    address,
+                                    target_generation,
+                                    input: ChromecastInput::ReportRejected,
+                                });
+                            }
+                        }
+                    }
                 }
             } else if header.dwType == RIM_TYPEKEYBOARD.0 {
                 if let Some(edge) = decode_keyboard(body)?.chromecast_edge() {
-                    send_cast(ChromecastInput::Keyboard(edge));
+                    let _ = context.engine.send(EngineMessage::Chromecast {
+                        address,
+                        target_generation,
+                        input: ChromecastInput::Keyboard(edge),
+                    });
                 }
             }
             // This device never enters Xiaomi's F5 or native key gate paths.
@@ -1088,8 +1261,109 @@ fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {
 }
 
 #[cfg(test)]
+pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
+    use windows::Win32::Devices::HumanInterfaceDevice::{
+        HidP_InitializeReportForID, HIDP_REPORT_TYPE,
+    };
+    use windows::Win32::Foundation::NTSTATUS;
+
+    // The generated binding borrows a read-only slice for this output
+    // parameter. Declare the actual mutable C pointer for the test helper.
+    #[link(name = "hid")]
+    extern "system" {
+        fn HidP_SetUsages(
+            report_type: HIDP_REPORT_TYPE,
+            usage_page: u16,
+            link_collection: u16,
+            usage_list: *mut u16,
+            usage_count: *mut u32,
+            data: PHIDP_PREPARSED_DATA,
+            report: *mut u8,
+            report_bytes: u32,
+        ) -> NTSTATUS;
+    }
+
+    let mut count = 0;
+    let stride = size_of::<RAWINPUTDEVICELIST>() as u32;
+    let queried = unsafe { GetRawInputDeviceList(None, &mut count, stride) };
+    assert_ne!(queried, u32::MAX);
+    let mut devices = vec![RAWINPUTDEVICELIST::default(); count as usize];
+    let listed = unsafe { GetRawInputDeviceList(Some(devices.as_mut_ptr()), &mut count, stride) };
+    assert_ne!(listed, u32::MAX);
+    let (device, descriptor) = devices[..listed as usize]
+        .iter()
+        .filter(|entry| entry.dwType == RIM_TYPEHID)
+        .find_map(|entry| {
+            let path = get_device_name(entry.hDevice).ok()?;
+            if !device_path_matches_chromecast_remote(&path) {
+                return None;
+            }
+            Some((
+                entry.hDevice,
+                ChromecastHidDescriptor::read(entry.hDevice).ok()?,
+            ))
+        })
+        .expect("present Chromecast consumer HID descriptor with three-byte input reports");
+    let mut release = [0; CAST_DESCRIPTOR_REPORT_BYTES];
+    assert_eq!(
+        unsafe { HidP_InitializeReportForID(HidP_Input, 1, descriptor.pointer(), &mut release) },
+        HIDP_STATUS_SUCCESS
+    );
+    let mut press = release;
+    let mut usage = 0x0041u16;
+    let mut usage_count = 1u32;
+    assert_eq!(
+        unsafe {
+            HidP_SetUsages(
+                HidP_Input,
+                CONSUMER_USAGE_PAGE,
+                0,
+                &mut usage,
+                &mut usage_count,
+                descriptor.pointer(),
+                press.as_mut_ptr(),
+                press.len() as u32,
+            )
+        },
+        HIDP_STATUS_SUCCESS
+    );
+
+    let mut listener = ListenerContext {
+        selected_path: String::new(),
+        snapshot: Arc::new(Mutex::new(RawInputSnapshot::default())),
+        engine: mpsc::channel().0,
+        remote_voice_f5_pressed: false,
+        binding_present: true,
+        cast_collections: BTreeSet::new(),
+        cast_generation: None,
+        cast_hid_descriptor: None,
+        cast_report_rejection_logged: false,
+    };
+    [press, release].map(|report| {
+        let mut body = [0; 8 + CAST_DESCRIPTOR_REPORT_BYTES];
+        body[..4].copy_from_slice(&(CAST_DESCRIPTOR_REPORT_BYTES as u32).to_le_bytes());
+        body[4..8].copy_from_slice(&1u32.to_le_bytes());
+        body[8..].copy_from_slice(&report);
+        let reports = parse_raw_hid_body(&body).unwrap();
+        let report = reports[0];
+        ChromecastInput::Hid {
+            report_id: report[0],
+            buttons: listener.decode_cast_hid(device, report).unwrap(),
+        }
+    })
+}
+
+#[cfg(test)]
 mod tests {
-    use super::voice_f5_wake_edge;
+    use super::{is_descriptor_cast_report, voice_f5_wake_edge};
+
+    #[test]
+    fn chromecast_descriptor_decoder_only_handles_three_byte_report_one() {
+        assert!(is_descriptor_cast_report(&[1, 0, 0]));
+        assert!(!is_descriptor_cast_report(&[1, 7]));
+        assert!(!is_descriptor_cast_report(&[2, 0x41, 0]));
+        assert!(!is_descriptor_cast_report(&[]));
+    }
 
     #[test]
     fn voice_f5_wakes_reconnect_once_per_physical_hold() {

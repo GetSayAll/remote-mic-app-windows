@@ -208,6 +208,30 @@ const VOICE_PLACEMENT = computed<Placement>(() => isChromecast.value
   ? { button: "ok", side: "right", anchor: [0.6, 0.34], targetY: 0.31 }
   : XIAOMI_VOICE_PLACEMENT);
 
+// Coordinates match the 250 × 508 Chromecast artwork. Each direction lights
+// its own segment of the ring, while the center lights only the OK disc.
+const CAST_DPAD_WEDGE = "M92 59 A47 47 0 0 1 158 59 L143 74 A25 25 0 0 0 107 74 Z";
+const CAST_DPAD = [
+  { button: "up", angle: 0 },
+  { button: "right", angle: 90 },
+  { button: "down", angle: 180 },
+  { button: "left", angle: 270 },
+] as const;
+const CAST_ROUND_KEYS = [
+  { button: "ok", x: 125, y: 92, radius: 24 },
+  { button: "back", x: 100, y: 173, radius: 18 },
+  { button: "home", x: 100, y: 234, radius: 18 },
+  { button: "volume_mute", x: 150, y: 234, radius: 18 },
+  { button: "power", x: 100, y: 381, radius: 12 },
+  { button: "input", x: 150, y: 381, radius: 12 },
+] as const;
+const CAST_RECT_KEYS = [
+  { button: "volume_up", x: 193, y: 167, width: 9, height: 32, radius: 4 },
+  { button: "volume_down", x: 193, y: 201, width: 9, height: 31, radius: 4 },
+  { button: "youtube", x: 80, y: 284, width: 40, height: 32, radius: 16 },
+  { button: "netflix", x: 130, y: 284, width: 40, height: 32, radius: 16 },
+] as const;
+
 /**
  * 头部设备胶囊（2026-10-01）：优先显示已识别的型号（RC001 = 小米蓝牙语音遥控器 2、
  * RC003 = 小米蓝牙语音遥控器 2 Pro）；型号未读回时退回蓝牙广播名，未连接时提示未连接。
@@ -370,6 +394,8 @@ const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | nul
 const editorPanel = ref<HTMLElement | null>(null);
 const lockSelection = ref(switchCache?.lockSelection ?? true);
 const activeButtons = ref<Set<RemoteButton>>(new Set());
+const castPressPulses = ref<Set<RemoteButton>>(new Set());
+const castPressTimers = new Map<RemoteButton, number>();
 const lastFired = ref<FiredGesture | null>(null);
 const firedFlash = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const mappingSnapshot = ref<ButtonMappingSnapshot | null>(null);
@@ -484,6 +510,26 @@ function endFiredFlash(button: RemoteButton): void {
   }, remaining);
 }
 
+function isButtonLit(button: RemoteButton): boolean {
+  return activeButtons.value.has(button) || (isChromecast.value && castPressPulses.value.has(button));
+}
+
+function pulseCastPress(button: RemoteButton): void {
+  const previous = castPressTimers.get(button);
+  if (previous !== undefined) window.clearTimeout(previous);
+  castPressPulses.value.add(button);
+  castPressTimers.set(button, window.setTimeout(() => {
+    castPressTimers.delete(button);
+    castPressPulses.value.delete(button);
+  }, FLASH_MIN_MS));
+}
+
+function clearCastPresses(): void {
+  for (const timer of castPressTimers.values()) window.clearTimeout(timer);
+  castPressTimers.clear();
+  castPressPulses.value.clear();
+}
+
 function releasePageResources(): void {
   window.removeEventListener("keydown", handleCaptureKeydown, true);
   window.removeEventListener("keyup", handleCaptureKeyup, true);
@@ -503,6 +549,7 @@ function releasePageResources(): void {
   snapshotTimer = null;
   if (flashTimer !== null) window.clearTimeout(flashTimer);
   flashTimer = null;
+  clearCastPresses();
   resizeObserver?.disconnect();
   resizeObserver = null;
 }
@@ -526,7 +573,8 @@ const enabled = computed({
 });
 
 const voiceActive = computed(
-  () => props.runtime?.platform.connection.voiceState === "streaming",
+  () => props.runtime?.platform.connection.voiceState === "streaming"
+    && (!isChromecast.value || castConnected.value),
 );
 
 function actionsOf(button: RemoteButton): ButtonActions {
@@ -1432,6 +1480,7 @@ watch(mappingModel, () => {
   editingTarget.value = null;
   selectedButton.value = null;
   activeButtons.value = new Set();
+  clearCastPresses();
   firedFlash.value = null;
   appPickerOpen.value = false;
   if (pointLearnTimer) window.clearTimeout(pointLearnTimer);
@@ -1876,6 +1925,31 @@ const connectionReady = computed(() => {
   const phase = connectionInfo.value?.phase;
   return phase === "ready" || phase === "streaming";
 });
+const castConnected = computed(() => liveRemoteModel.value === "chromecast"
+  && (connectionReady.value || connectionInfo.value?.phase === "draining"));
+watch(
+  () => castConnected.value ? connectionInfo.value?.remoteToken ?? "chromecast" : null,
+  () => {
+    if (!isChromecast.value) return;
+    activeButtons.value = new Set();
+    clearCastPresses();
+    if (flashTimer !== null) window.clearTimeout(flashTimer);
+    flashTimer = null;
+    firedFlash.value = null;
+  },
+  { flush: "sync" },
+);
+
+function reconcilePhysicalButtons(): void {
+  if (isChromecast.value && (!castConnected.value || rawInput.value?.phase !== "ready")) {
+    activeButtons.value = new Set();
+    clearCastPresses();
+    return;
+  }
+  if (rawInput.value?.activeButtons) {
+    activeButtons.value = new Set(rawInput.value.activeButtons);
+  }
+}
 /** 圆点配色沿用改造前设备胶囊里的同一套映射（streaming=active / ready=success / 其余 pending）。 */
 const connectionTone = computed(() =>
   connectionInfo.value?.phase === "streaming"
@@ -2383,14 +2457,14 @@ onMounted(async () => {
     })
     .catch(() => undefined);
 
-  if (rawInput.value?.activeButtons) {
-    activeButtons.value = new Set(rawInput.value.activeButtons);
-  }
+  reconcilePhysicalButtons();
 
   const stopEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
+    if (unmounted || (isChromecast.value && !castConnected.value)) return;
     const arrival = performance.now();
     const next = new Set(activeButtons.value);
     if (edge.isPressed) {
+      if (isChromecast.value && !next.has(edge.button)) pulseCastPress(edge.button);
       next.add(edge.button);
     } else {
       next.delete(edge.button);
@@ -2430,6 +2504,7 @@ onMounted(async () => {
   // 约 400ms，看起来像卡片没跟着连线熄灭。闪烁现在跟随这一次按压，只有极短按
   // （<150ms）才补足到最短可见时间；按住连发每拍重新起算。
   const stopGestures = await subscribeButtonGestures((gesture: FiredGesture) => {
+    if (unmounted || (isChromecast.value && !castConnected.value)) return;
     lastFired.value = gesture;
     firedFlash.value = { button: gesture.button, trigger: gesture.trigger };
     flashStartedAt = performance.now();
@@ -2461,9 +2536,7 @@ onMounted(async () => {
     mappingSnapshot.value = await getButtonMappingSnapshot();
     await reconcileRc003Task();
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
-    if (rawInput.value?.activeButtons) {
-      activeButtons.value = new Set(rawInput.value.activeButtons);
-    }
+    reconcilePhysicalButtons();
   }, 1_000);
 
   // 流式画布：观测容器宽（不足最小画布 800px 时保持 800 由 CSS 缩放兜底）。
@@ -2639,12 +2712,12 @@ onUnmounted(() => {
         <template v-for="placement in PLACEMENTS" :key="placement.button">
           <path
             :d="connectionPath(placement)"
-            :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
+            :class="{ selected: selectedButton === placement.button, active: isButtonLit(placement.button) }"
             fill="none"
           />
           <polygon
             :points="arrowPolygon(placement)"
-            :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
+            :class="{ selected: selectedButton === placement.button, active: isButtonLit(placement.button) }"
           />
         </template>
         <path
@@ -2657,35 +2730,69 @@ onUnmounted(() => {
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${remoteTop}px` }">
         <img :src="artwork.src" :alt="artwork.alt" draggable="false" />
-        <span
-          v-for="placement in PLACEMENTS"
-          :key="placement.button"
-          class="anchor-dot"
-          :class="{ visible: activeButtons.has(placement.button) }"
-          :style="{
-            left: `${photoAnchorPoint(placement).x - 4}px`,
-            top: `${photoAnchorPoint(placement).y - 4}px`,
-          }"
-        ></span>
-        <span
-          class="anchor-dot voice"
-          :class="{ visible: voiceActive }"
-          :style="{
-            left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 4}px`,
-            top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 4}px`,
-          }"
-        ></span>
+        <svg v-if="isChromecast" class="cast-button-lights" viewBox="0 0 250 508" aria-hidden="true">
+          <path
+            v-for="key in CAST_DPAD"
+            :key="key.button"
+            :data-remote-button="key.button"
+            :class="{ lit: isButtonLit(key.button) }"
+            :d="CAST_DPAD_WEDGE"
+            :transform="`rotate(${key.angle} 125 92)`"
+          />
+          <circle
+            v-for="key in CAST_ROUND_KEYS"
+            :key="key.button"
+            :data-remote-button="key.button"
+            :class="{ lit: isButtonLit(key.button) }"
+            :cx="key.x"
+            :cy="key.y"
+            :r="key.radius"
+          />
+          <rect
+            v-for="key in CAST_RECT_KEYS"
+            :key="key.button"
+            :data-remote-button="key.button"
+            :class="{ lit: isButtonLit(key.button) }"
+            :x="key.x"
+            :y="key.y"
+            :width="key.width"
+            :height="key.height"
+            :rx="key.radius"
+          />
+          <circle data-remote-button="voice" :class="{ lit: voiceActive }" cx="150" cy="173" r="18" />
+        </svg>
+        <template v-else>
+          <span
+            v-for="placement in PLACEMENTS"
+            :key="placement.button"
+            class="anchor-dot"
+            :class="{ visible: activeButtons.has(placement.button) }"
+            :style="{
+              left: `${photoAnchorPoint(placement).x - 4}px`,
+              top: `${photoAnchorPoint(placement).y - 4}px`,
+            }"
+          ></span>
+          <span
+            class="anchor-dot voice"
+            :class="{ visible: voiceActive }"
+            :style="{
+              left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 4}px`,
+              top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 4}px`,
+            }"
+          ></span>
+        </template>
       </figure>
 
       <article
         v-for="placement in PLACEMENTS"
         :key="placement.button"
         class="mapping-card"
+        :data-remote-button="placement.button"
         :class="{
           left: placement.side === 'left',
           right: placement.side === 'right',
           selected: selectedButton === placement.button,
-          active: activeButtons.has(placement.button),
+          active: isButtonLit(placement.button),
           flashed: firedFlash?.button === placement.button,
           'is-locked': captureGated(placement.button),
         }"
@@ -2736,6 +2843,7 @@ onUnmounted(() => {
 
       <article
         class="mapping-card voice-card right"
+        data-remote-button="voice"
         :class="{ active: voiceActive }"
         :style="{ top: `${cardTop(VOICE_PLACEMENT)}px`, width: `${cardWidth}px` }"
       >

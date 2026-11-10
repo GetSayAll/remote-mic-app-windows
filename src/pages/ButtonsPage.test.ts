@@ -2144,6 +2144,81 @@ describe("buttons mapping page", () => {
     });
   });
 
+  it("lights each Chromecast button on its own physical edge, including the OK disc", async () => {
+    const page = await mountPage("chromecast");
+    const keyLight = (button: string) => page.get(`.cast-button-lights [data-remote-button="${button}"]`);
+    const card = (button: string) => page.get(`.mapping-card[data-remote-button="${button}"]`);
+    const keys = [
+      "up", "right", "down", "left", "ok", "back", "home", "volume_mute",
+      "power", "input", "volume_up", "volume_down", "youtube", "netflix",
+    ] as const;
+    expect(keyLight("ok").element.tagName).toBe("circle");
+    expect(keyLight("up").element.tagName).toBe("path");
+
+    vi.useFakeTimers();
+    try {
+      for (const button of keys) {
+        edgeHandler!({ button, isPressed: true });
+        await page.vm.$nextTick();
+        expect(keyLight(button).classes()).toContain("lit");
+        expect(card(button).classes()).toContain("active");
+        expect(card(button).classes()).not.toContain("selected");
+        expect(page.findAll(".cast-button-lights .lit")).toHaveLength(1);
+
+        edgeHandler!({ button, isPressed: false });
+        await page.vm.$nextTick();
+        expect(keyLight(button).classes()).toContain("lit");
+        await vi.advanceTimersByTimeAsync(150);
+        expect(keyLight(button).classes()).not.toContain("lit");
+        expect(card(button).classes()).not.toContain("active");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps Chromecast voice independent and clears lights on a device switch or disconnect", async () => {
+    const page = await mountPage("chromecast");
+    const connection = {
+      ...runtime.platform.connection,
+      remoteModel: "chromecast" as const,
+      remoteToken: "first",
+      phase: "streaming" as const,
+      voiceState: "streaming" as const,
+    };
+    await page.setProps({ runtime: { ...runtime, platform: { ...runtime.platform, connection } } });
+    expect(page.get('.cast-button-lights [data-remote-button="voice"]').classes()).toContain("lit");
+    expect(page.get('.cast-button-lights [data-remote-button="ok"]').classes()).not.toContain("lit");
+    edgeHandler!({ button: "ok", isPressed: true });
+    await page.vm.$nextTick();
+    expect(page.findAll(".cast-button-lights .lit")).toHaveLength(2);
+
+    await page.setProps({
+      runtime: {
+        ...runtime,
+        platform: {
+          ...runtime.platform,
+          connection: { ...connection, remoteToken: "second", phase: "ready", voiceState: "idle" },
+        },
+      },
+    });
+    expect(page.findAll(".cast-button-lights .lit")).toHaveLength(0);
+    edgeHandler!({ button: "ok", isPressed: true });
+    await page.vm.$nextTick();
+    expect(page.get('.mapping-card[data-remote-button="ok"]').classes()).toContain("active");
+
+    await page.setProps({
+      runtime: {
+        ...runtime,
+        platform: { ...runtime.platform, connection: { ...connection, phase: "reconnecting" } },
+      },
+    });
+    edgeHandler!({ button: "ok", isPressed: true });
+    await page.vm.$nextTick();
+    expect(page.findAll(".cast-button-lights .lit")).toHaveLength(0);
+    expect(page.get('.mapping-card[data-remote-button="ok"]').classes()).not.toContain("active");
+  });
+
   it("keeps the selection locked while pressing the remote unless unlocked", async () => {
     const wrapper = await mountPage();
     // 默认锁定：按下"返回"不改变当前选中（未选中任何键时仍为空）。

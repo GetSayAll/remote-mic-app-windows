@@ -1324,21 +1324,28 @@ fn engine_worker(
             ));
             last_target_generation = Some(target_generation);
         }
-        if matches!(
-            message.as_ref(),
+        let reset_reason = match message.as_ref() {
             Some(EngineMessage::Chromecast {
                 address,
                 target_generation,
-                input: ChromecastInput::CollectionRemoved,
-            }) if target.value == (Target::Chromecast(Some(*address)), *target_generation)
-        ) {
-            // A collection can disappear while ATVV remains connected. Cancel
-            // click/repeat timers before a pending action can use that source.
+                input,
+            }) if target.value == (Target::Chromecast(Some(*address)), *target_generation) => {
+                match input {
+                    ChromecastInput::CollectionRemoved => Some("chromecast_collection_removed"),
+                    ChromecastInput::ReportRejected => Some("chromecast_report_rejected"),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(reason) = reset_reason {
+            // When a collection disappears or stops yielding valid state,
+            // cancel click/repeat timers before any pending action can fire.
             let io = InjectorAppSwitcherIo(injector.as_ref());
             app_switcher.cancel(EndReason::DeviceRemoved, now, &io);
             drain_app_switcher_end(&mut app_switcher, &state);
             reset_after_terminal_action(
-                "chromecast_collection_removed",
+                reason,
                 &mut merger,
                 &mut recognizer,
                 &mut repeat_runs,
@@ -1347,9 +1354,7 @@ fn engine_worker(
                 &mut native_pending,
             );
             merger.forget_chromecast_sources();
-            injector
-                .common_phrase_host()
-                .reset("chromecast_collection_removed");
+            injector.common_phrase_host().reset(reason);
             phrase_claimed.clear();
             last_remote_move_at = None;
             continue;
@@ -2715,6 +2720,103 @@ mod tests {
                     keys: vec![KeyCode::LeftAlt, KeyCode::Enter],
                 },
             ],
+        );
+
+        send(4, hid(Some(RemoteButton::Ok)));
+        send(4, ChromecastInput::ReportRejected);
+        send(4, hid(None));
+        tap();
+        tap();
+        assert!(wait_until(
+            || injector.taps.lock().unwrap().len() >= 4,
+            Duration::from_secs(2),
+        ));
+        assert_eq!(
+            injector.taps.lock().unwrap()[3..],
+            [KeyChord {
+                keys: vec![KeyCode::LeftControl, KeyCode::Enter],
+            }],
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Requires a present Chromecast HID descriptor; no live key capture or OS injection"]
+    fn chromecast_native_descriptor_ok_dispatches_shift_enter_and_releases_highlight() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let [press, release] = crate::raw_input_windows::chromecast_descriptor_test_edges();
+        let injector = Arc::new(RecordingInjector::default());
+        let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
+        let runtime = ButtonMappingRuntime::with_target_source(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::clone(&snapshot),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+            || (Target::Chromecast(Some(123)), 4),
+        );
+        let mut mappings = ButtonMappings::default();
+        let chord = KeyChord {
+            keys: vec![KeyCode::LeftShift, KeyCode::Enter],
+        };
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: chord.clone(),
+                },
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_chromecast_mappings(mappings);
+        let edges = Arc::new(StdMutex::new(Vec::new()));
+        let recorded_edges = Arc::clone(&edges);
+        runtime.subscribe_button_edges(Arc::new(move |edge| {
+            recorded_edges.lock().unwrap().push(edge);
+        }));
+        let send = |input| {
+            runtime
+                .sender()
+                .send(EngineMessage::Chromecast {
+                    address: 123,
+                    target_generation: 4,
+                    input,
+                })
+                .unwrap();
+        };
+        send(press);
+        assert!(wait_until(
+            || snapshot
+                .lock()
+                .unwrap()
+                .active_buttons
+                .contains(&RemoteButton::Ok),
+            Duration::from_secs(2),
+        ));
+        send(release);
+        assert!(wait_until(
+            || edges.lock().unwrap().len() == 2,
+            Duration::from_secs(2),
+        ));
+        assert!(snapshot.lock().unwrap().active_buttons.is_empty());
+        assert_eq!(
+            *edges.lock().unwrap(),
+            [
+                ButtonEdge {
+                    button: RemoteButton::Ok,
+                    is_pressed: true,
+                },
+                ButtonEdge {
+                    button: RemoteButton::Ok,
+                    is_pressed: false,
+                },
+            ]
+        );
+        assert_eq!(*injector.taps.lock().unwrap(), [chord]);
+        println!(
+            "CAST_E2E_EDGES={}",
+            serde_json::to_string(&*edges.lock().unwrap()).unwrap()
         );
     }
 
