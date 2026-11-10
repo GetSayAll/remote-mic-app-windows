@@ -866,7 +866,7 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.find(".step-card-body .chip.selected").text()).toBe("打开记事本并聚焦");
   });
 
-  it("「添加应用」在组合动作页打开本机应用弹窗", async () => {
+  it("「添加应用」在组合动作页打开应用选择弹窗", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "编辑").trigger("click");
     await flushPromises();
@@ -875,7 +875,7 @@ describe("组合动作页 · 编辑向导", () => {
     const add = wrapper.findAll("button").find((item) => item.text() === "添加应用")!;
     await add.trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("本机应用");
+    expect(wrapper.text()).toContain("选择应用");
   });
 
   it("单键或快捷键列出已保存与常用的快捷键，点选即写入", async () => {
@@ -912,10 +912,7 @@ describe("组合动作页 · 编辑向导", () => {
     const add = wrapper.findAll("button").find((item) => item.text() === "添加应用")!;
     await add.trigger("click");
     await flushPromises();
-    const pick = wrapper
-      .findAll("button")
-      .find((item) => item.text() === "选择程序或快捷方式")!;
-    await pick.trigger("click");
+    await wrapper.get(".registered-apps-dialog .picker-program-pick").trigger("click");
     await flushPromises();
     await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
     await flushPromises();

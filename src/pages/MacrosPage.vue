@@ -865,27 +865,26 @@ function applyChordToSelectedStep(chord: MacroChord): void {
   setStatus(t("已选择：{chord}", { chord: macroChordLabel(chord) }), "success");
 }
 
-/** 「添加应用」弹窗确认：写入共享自定义应用列表，并选中第一个新增应用。 */
-async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
-  if (apps.length === 0) return;
+/** 「添加应用」弹窗确认：写入共享自定义应用列表，并把当前步骤切换到该 APP。 */
+async function selectApp(app: CustomAppPick): Promise<void> {
   appPickerSaving.value = true;
   appPickerError.value = null;
   try {
     const mappings = await getButtonMappings();
-    const unique = new Map((mappings.applications ?? []).map((app) => [app.path.toLowerCase(), app]));
-    for (const app of apps) unique.set(app.path.toLowerCase(), app);
-    const saved = await saveButtonMappings({
-      ...mappings,
-      applications: [...unique.values()],
-    });
+    const key = app.path.toLowerCase();
+    const applications = [...(mappings.applications ?? [])];
+    if (!applications.some((candidate) => candidate.path.toLowerCase() === key)) {
+      applications.push({ name: app.name, path: app.path });
+    }
+    const saved = await saveButtonMappings({ ...mappings, applications });
     customApps.value = (saved.applications ?? []).map((app) => ({
       id: app.path,
       name: app.name,
     }));
     appPickerOpen.value = false;
     void reloadPresetApps();
-    renameStepTarget(apps[0].path);
-    setStatus(t("已添加 {count} 个应用", { count: apps.length }), "success");
+    renameStepTarget(app.path);
+    setStatus(t("已选择：{name}", { name: app.name }), "success");
   } catch (error) {
     appPickerError.value = messageOf(error);
   } finally {
@@ -1558,7 +1557,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip add-app" type="button" :title="t('扫描本机应用，或选择任意程序或快捷方式')" @click="appPickerOpen = true">{{ t("添加应用") }}</button>
+                      <button class="chip add-app" type="button" :title="t('扫描本机应用，或选择任意程序或快捷方式')" @click="appPickerError = null; appPickerOpen = true">{{ t("添加应用") }}</button>
                     </div>
                   </div>
                   <span class="field-hint">
@@ -1587,7 +1586,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip add-app" type="button" :title="t('扫描本机应用，或选择任意程序或快捷方式')" @click="appPickerOpen = true">{{ t("添加应用") }}</button>
+                      <button class="chip add-app" type="button" :title="t('扫描本机应用，或选择任意程序或快捷方式')" @click="appPickerError = null; appPickerOpen = true">{{ t("添加应用") }}</button>
                     </div>
                   </div>
                   <div class="field">
@@ -1750,7 +1749,7 @@ watch(
                         class="chip add-app"
                         type="button"
                         :title="t('扫描本机应用，或选择任意程序或快捷方式')"
-                        @click="appPickerOpen = true"
+                        @click="appPickerError = null; appPickerOpen = true"
                       >
                         {{ t("添加应用") }}
                       </button>
@@ -1901,7 +1900,7 @@ watch(
       :saving="appPickerSaving"
       :save-error="appPickerError"
       @close="appPickerOpen = false"
-      @add="addScannedApps"
+      @select="selectApp"
     />
   </div>
 </template>

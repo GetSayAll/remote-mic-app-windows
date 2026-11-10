@@ -608,38 +608,54 @@ watch([presetApps, () => mappings.value.applications], () => {
   registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
 }, { deep: true });
 
-async function addScannedApps(
-  apps: CustomAppPick[],
-  source?: "scan" | "file",
-): Promise<void> {
+/**
+ * 应用选择器确认：把选中的 APP 写入应用库，并立即绑定到当前编辑格。
+ *
+ * 选择器一次只返回一个 APP，不再区分扫描/文件来源；两者都走同一个
+ * `open_app` 动作。应用库与按键动作放在一次保存里，避免半写入。
+ */
+async function selectApp(app: CustomAppPick): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   appPickerError.value = null;
-  let savedOk = false;
   try {
-    const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
-    for (const app of apps) unique.set(app.path.toLowerCase(), app);
-    const saved = await saveButtonMappings({ ...mappings.value, applications: [...unique.values()] });
+    const target = editingTarget.value;
+    const applications = [...(mappings.value.applications ?? [])];
+    const key = app.path.toLowerCase();
+    if (!applications.some((candidate) => candidate.path.toLowerCase() === key)) {
+      applications.push({ name: app.name, path: app.path });
+    }
+    const next: ButtonMappings = {
+      ...mappings.value,
+      applications,
+      actions: { ...mappings.value.actions },
+    };
+    let notice: string | null = null;
+    if (target) {
+      const actions = { ...actionsOf(target.button) };
+      actions[target.trigger] = { type: "open_app", target: app.path };
+      const reconciled = reconcileHoldRepeat(actions);
+      next.actions[target.button] = reconciled.actions;
+      notice = reconciled.notice;
+    }
+    const saved = await saveButtonMappings(next);
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+    writeSwitchCache(saved.enabled, lockSelection.value);
     appPickerOpen.value = false;
-    savedOk = true;
-    if (source !== "file") {
-      statusMessage.value = t("已添加 {count} 个应用，按键绑定未改变", { count: apps.length });
-    }
+    statusMessage.value =
+      notice ??
+      (target
+        ? t("已选择：{name}", { name: app.name })
+        : t("已添加应用：{name}", { name: app.name }));
   } catch (cause) {
     appPickerError.value = operationErrorText(
-      "add scanned apps failed",
+      "select app failed",
       cause,
       "没能添加应用，请重试。",
     );
   } finally {
     busy.value = false;
-  }
-  // 与旧「＋ 添加应用」保持一致：手动选一个程序时直接绑定当前编辑格；
-  // 扫描多选仍只入应用库，不改按键绑定。
-  if (savedOk && source === "file" && apps.length === 1 && editingTarget.value) {
-    applyAction({ type: "open_app", target: apps[0]!.path });
   }
 }
 
@@ -2705,7 +2721,7 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
-    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
+    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
 </template>

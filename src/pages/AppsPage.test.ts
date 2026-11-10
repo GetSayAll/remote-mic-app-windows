@@ -133,9 +133,8 @@ describe("APP adaptation page", () => {
     await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
     await flushPromises();
 
-    await wrapper.get(".picker-app input").setValue(true);
-    const add = wrapper.findAll("button").find((button) => button.text().startsWith("添加所选"))!;
-    await add.trigger("click");
+    await wrapper.get('.picker-row input[aria-label="Cursor"]').setValue(true);
+    await wrapper.get(".picker-actions .primary-button").trigger("click");
     await flushPromises();
 
     const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {

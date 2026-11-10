@@ -37,23 +37,48 @@ export default {
   // 更新完成提示（对齐 Mac update.completed.*）
   "无线麦已更新": "SayAll Updated",
   "已成功更新到版本 {version}。": "Successfully updated to version {version}.",
-  // 本机应用选择器
-  "本机应用": "Installed Apps",
+  // 应用选择器（单一选择）
+  "选择应用": "Choose App",
+  "从本机扫描或手动选择程序。一次只能选择一个应用。":
+    "Scan this PC or choose a program. You can select one app.",
+  "本机扫描": "Local Scan",
+  "程序选择": "Program",
+  "手动": "Manual",
+  "{count} 个应用": "{count} apps",
+  "支持 .exe 和 .lnk": "Supports .exe and .lnk",
+  "适用于便携应用，或扫描列表里没有的程序。":
+    "For portable apps, or apps not in the scan list.",
+  "已选择应用。要重新选择，请先取消下方已选择的应用。":
+    "App selected. To choose another, cancel the selected app below first.",
+  "尚未选择应用。请从上方两个入口中选择一个。":
+    "No app selected. Choose one from the two sections above.",
+  "已选择": "Selected",
+  "还没有选择应用": "No app selected",
+  "选中后会在这里显示名称、来源和路径。":
+    "The selected app's name, source, and path appear here.",
+  "取消选择": "Clear Selection",
+  "确认后会把当前配置切换到这个应用":
+    "Confirming switches the current configuration to this app.",
+  "一次只能选择一个应用": "One app at a time",
+  "正在保存…": "Saving…",
+  "使用这个应用": "Use This App",
+  "已选择：{name}": "Selected: {name}",
   "关闭应用选择": "Close app picker",
   "搜索本机应用": "Search installed apps",
   "搜索应用": "Search apps",
   "重新扫描": "Scan Again",
-  "全选当前结果": "Select all results",
-  "{count} 个应用 · 已选 {selected}": "{count} apps · {selected} selected",
   "正在扫描…": "Scanning…",
   "未找到匹配的应用": "No matching apps found",
   "已添加": "Added",
-  "正在添加…": "Adding…",
-  "添加所选": "Add Selected",
   "选择程序或快捷方式": "Choose a program or shortcut",
   "扫描本机应用，或选择任意程序或快捷方式":
     "Scan installed apps, or choose any program or shortcut",
-  "这个应用已经在列表里。": "This app is already in the list.",
-  "（{count}）": " ({count})",
   "无法读取本机应用列表，请稍后重试。": "Couldn't read the list of installed apps. Please try again later.",
+  // 兼容旧选择器的词条；当前界面不再使用。
+  "本机应用": "Installed Apps",
+  "全选当前结果": "Select all results",
+  "{count} 个应用 · 已选 {selected}": "{count} apps · {selected} selected",
+  "正在添加…": "Adding…",
+  "添加所选": "Add Selected",
+  "（{count}）": " ({count})",
 } as Record<string, string>;
