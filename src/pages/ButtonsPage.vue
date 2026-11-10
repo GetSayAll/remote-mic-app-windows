@@ -276,6 +276,14 @@ function cardTop(placement: Placement): number {
   return placement.targetY * canvasHeight.value - CARD_HEIGHT / 2;
 }
 
+function cardStyle(placement: Placement) {
+  return {
+    left: `${placement.side === "left" ? 0 : canvasWidth.value - cardWidth.value}px`,
+    top: `${cardTop(placement)}px`,
+    width: `${cardWidth.value}px`,
+  };
+}
+
 /** 卡片朝向遥控器一侧的边缘中点（箭头/连线的落点基准）。 */
 function cardEdgePoint(placement: Placement): { x: number; y: number } {
   return {
@@ -379,6 +387,7 @@ const mappings = ref<ButtonMappings>({
 });
 /** 映射是否已从设置读回：「启用自定义按键功能」开关就绪前用占位符顶位（防滑入）。 */
 const mappingsLoaded = ref(false);
+const mappingLoadFailed = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
@@ -973,9 +982,30 @@ async function addCustomApp(): Promise<void> {
 }
 
 function selectButton(button: RemoteButton): void {
+  if (isChromecast.value) {
+    openEditor(button, "single");
+    return;
+  }
   // 三键在「全按键支持」关闭时置灰禁用：合成事件绕过原生 disabled，这里再守一道。
   if (captureGated(button)) return;
   selectedButton.value = button;
+}
+
+function castHotspotAttributes(button: RemoteButton) {
+  return {
+    class: "cast-key-hotspot",
+    role: "button" as const,
+    tabindex: mappingsLoaded.value ? 0 : -1,
+    "aria-label": buttonLabels[button],
+    "aria-disabled": !mappingsLoaded.value || undefined,
+    onClick: () => selectButton(button),
+    onKeydown: (event: KeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectButton(button);
+    },
+  };
 }
 
 function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
@@ -1457,6 +1487,7 @@ function writeMappings<T>(scope: ButtonMappingModel | undefined, write: () => Pr
 async function loadMappings(): Promise<void> {
   const scope = mappingModel.value;
   const generation = mappingGeneration;
+  mappingLoadFailed.value = false;
   try {
     await mappingWrites.get(scope);
     if (unmounted || generation !== mappingGeneration) return;
@@ -1468,7 +1499,14 @@ async function loadMappings(): Promise<void> {
     if (scope === undefined) writeSwitchCache(loaded.enabled, lockSelection.value);
   } catch (error) {
     if (!unmounted && generation === mappingGeneration) {
-      statusMessage.value = operationErrorText("load button mappings failed", error, "没能读取按键映射，请重试。");
+      mappingLoadFailed.value = true;
+      console.error("load button mappings failed", error);
+      reportFrontendEvent({
+        event: "button_mapping_load",
+        phase: "completed",
+        result: "failed",
+        reason: "settings_read_failed",
+      });
     }
   }
 }
@@ -2392,6 +2430,14 @@ onMounted(async () => {
   // 即真实宽度，后续窗口变化仍由 ResizeObserver 接管。
   if (canvasEl.value) {
     canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, canvasEl.value.clientWidth);
+    // Geometry must continue to track maximize even while native IPC is
+    // pending or unavailable. Cards and SVG share this width throughout.
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(([entry]) => {
+        if (entry) canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, entry.contentRect.width);
+      });
+      resizeObserver.observe(canvasEl.value);
+    }
   }
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
@@ -2406,7 +2452,7 @@ onMounted(async () => {
   // 等上一两秒"（2026-10-28 用户反馈）。现在它们就绪后各自补齐。
   const [, snapshot, persistedLockSelection] = await Promise.all([
     loadMappings(),
-    getButtonMappingSnapshot(),
+    getButtonMappingSnapshot().catch(() => null),
     // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
     getLockMappingSelection().catch(() => {
       reportFrontendEvent({
@@ -2533,23 +2579,14 @@ onMounted(async () => {
   await rc003ReconcileStarted;
 
   snapshotTimer = window.setInterval(async () => {
-    mappingSnapshot.value = await getButtonMappingSnapshot();
+    await getButtonMappingSnapshot()
+      .then((snapshot) => { if (!unmounted) mappingSnapshot.value = snapshot; })
+      .catch(() => undefined);
     await reconcileRc003Task();
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
     reconcilePhysicalButtons();
   }, 1_000);
 
-  // 流式画布：观测容器宽（不足最小画布 800px 时保持 800 由 CSS 缩放兜底）。
-  // 首次宽度已在 onMounted 同步段测过（见函数开头），此处只订阅后续变化。
-  // jsdom 测试环境无 ResizeObserver，跳过观测。
-  if (canvasEl.value && typeof ResizeObserver !== "undefined") {
-    resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, Math.round(entry.contentRect.width));
-      }
-    });
-    resizeObserver.observe(canvasEl.value);
-  }
   resourcesReady = true;
   reportFrontendEvent({
     event: "buttons_page_resource_setup",
@@ -2660,7 +2697,7 @@ onUnmounted(() => {
         >
           {{
             isChromecast
-              ? t("点击 Chromecast 普通按键的单击、双击、三击或长按格子进行配置。部分按键可能同时触发 Windows 的原有操作。")
+              ? t("点击遥控器图或卡片可编辑单击，点击各格子可编辑对应手势。部分按键可能同时触发 Windows 的原有操作。")
               :
             captureFailure ??
             captureRevokedNote ??
@@ -2668,6 +2705,10 @@ onUnmounted(() => {
             t("点击按键进行自定义配置")
           }}
         </p>
+        <div v-if="mappingLoadFailed" class="mapping-load-error" role="alert">
+          <span>{{ t("没能读取按键映射，请重试。") }}</span>
+          <button class="secondary-button" type="button" @click="loadMappings">{{ t("重试") }}</button>
+        </div>
         <p v-if="isChromecast && connectionReady && (rawInput?.phase !== 'ready' || !rawInput?.matchedDeviceCount)" class="muted">
           {{ t("语音已连接，Windows 还没有提供普通按键通道。可以先保存配置，收到实体按键后才会执行。") }}
         </p>
@@ -2730,10 +2771,11 @@ onUnmounted(() => {
 
       <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${remoteTop}px` }">
         <img :src="artwork.src" :alt="artwork.alt" draggable="false" />
-        <svg v-if="isChromecast" class="cast-button-lights" viewBox="0 0 250 508" aria-hidden="true">
+        <svg v-if="isChromecast" class="cast-button-lights" viewBox="0 0 250 508" role="group" :aria-label="artwork.alt">
           <path
             v-for="key in CAST_DPAD"
             :key="key.button"
+            v-bind="castHotspotAttributes(key.button)"
             :data-remote-button="key.button"
             :class="{ lit: isButtonLit(key.button) }"
             :d="CAST_DPAD_WEDGE"
@@ -2742,6 +2784,7 @@ onUnmounted(() => {
           <circle
             v-for="key in CAST_ROUND_KEYS"
             :key="key.button"
+            v-bind="castHotspotAttributes(key.button)"
             :data-remote-button="key.button"
             :class="{ lit: isButtonLit(key.button) }"
             :cx="key.x"
@@ -2751,6 +2794,7 @@ onUnmounted(() => {
           <rect
             v-for="key in CAST_RECT_KEYS"
             :key="key.button"
+            v-bind="castHotspotAttributes(key.button)"
             :data-remote-button="key.button"
             :class="{ lit: isButtonLit(key.button) }"
             :x="key.x"
@@ -2759,7 +2803,7 @@ onUnmounted(() => {
             :height="key.height"
             :rx="key.radius"
           />
-          <circle data-remote-button="voice" :class="{ lit: voiceActive }" cx="150" cy="173" r="18" />
+          <circle data-remote-button="voice" :class="{ lit: voiceActive }" aria-hidden="true" cx="150" cy="173" r="18" />
         </svg>
         <template v-else>
           <span
@@ -2796,7 +2840,7 @@ onUnmounted(() => {
           flashed: firedFlash?.button === placement.button,
           'is-locked': captureGated(placement.button),
         }"
-        :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
+        :style="cardStyle(placement)"
         :title="captureGated(placement.button) ? triKeyGatedTitle : undefined"
         :aria-disabled="captureGated(placement.button) || undefined"
         @click="selectButton(placement.button)"
@@ -2845,7 +2889,7 @@ onUnmounted(() => {
         class="mapping-card voice-card right"
         data-remote-button="voice"
         :class="{ active: voiceActive }"
-        :style="{ top: `${cardTop(VOICE_PLACEMENT)}px`, width: `${cardWidth}px` }"
+        :style="cardStyle(VOICE_PLACEMENT)"
       >
         <div class="mapping-card-title">
           <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -2937,7 +2981,7 @@ onUnmounted(() => {
               {{ t("聚焦输入框") }}
             </button>
             <span v-if="capturingShortcut" class="capture-display">
-              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? t("先选择修饰键") : t("请按下快捷键组合")) }}
+              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? t("先选择修饰键") : t("请在电脑键盘上按下组合键")) }}
             </span>
           </div>
           <label

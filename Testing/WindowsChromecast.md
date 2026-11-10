@@ -222,6 +222,24 @@ trace before it can claim to support the installed device. See CAST-12 in
 [the backlog](../TODO.md). Verify the focused application's newline behavior
 after confirming receipt of an actual shortcut.
 
+### Mapping editor startup and maximize
+
+In the `e5fa92c` desktop run, the first main document tried state-backed IPC
+before Tauri registered application state. Mapping cells remained disabled
+and the initial snapshot rejection interrupted page setup. The main WebView
+now loads after state registration. Its `document_load` diagnostic includes
+`state_managed`. Mapping read failures expose a retry, and canvas geometry
+tracks viewport changes even when an IPC call fails. Cards, their arrows and
+the voice card use the same measured canvas width.
+
+Click any of the 14 ordinary keys in the illustration or its card to edit the
+single press. The individual cells edit the corresponding gestures. A
+renderer regression verifies saving a shortcut during a remote reconnect.
+Headless Chrome checked pointer hit testing and all 15 arrow-to-card
+connections at viewport widths of 1100, 1950 and 1280 pixels. These checks
+cover the editor and layout. Physical delivery of ordinary button reports
+is tracked independently in CAST-12.
+
 ## One-shot local Whisper dictation (2026-11-10)
 
 In Reflections, open Local Whisper Transcription, select the verified Whisper

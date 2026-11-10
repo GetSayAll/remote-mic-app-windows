@@ -501,7 +501,87 @@ describe("buttons mapping page", () => {
     expect(page.find(".voice-card .mapping-cell").exists()).toBe(false);
     expect(page.find('.remote-photo img').attributes('src')).toBe('/chromecast-remote.svg');
     expect(page.find('.remote-photo img').attributes('alt')).not.toContain('小米');
+    expect(page.findAll('.cast-button-lights [role="button"][tabindex="0"]')).toHaveLength(14);
+    expect(page.get('.cast-button-lights [data-remote-button="voice"]').attributes('aria-hidden')).toBe('true');
     expect(getButtonMappings).toHaveBeenCalledWith("chromecast");
+  });
+
+  it("opens and saves Cast mappings from the card and diagram while disconnected", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({ enabled: true, actions: {} });
+    const page = await mountPage("chromecast");
+    await page.setProps({
+      runtime: { ...runtime, platform: { ...runtime.platform, connection: {
+        ...runtime.platform.connection, remoteModel: "unknown", remoteName: null, phase: "reconnecting",
+      } } },
+    });
+
+    await page.get('.mapping-card[data-remote-button="ok"] .mapping-card-title').trigger("click");
+    expect(page.get(".mapping-editor h2").text()).toBe("确定 · 单击");
+    await page.get('.mapping-editor button[title="换行"]').trigger("click");
+    await flushPromises();
+    expect(saveButtonMappings).toHaveBeenLastCalledWith(expect.objectContaining({
+      actions: { ok: expect.objectContaining({
+        single: { type: "shortcut", chord: { keys: ["shift", "enter"] } },
+      }) },
+    }), "chromecast");
+
+    await page.get('.cast-button-lights [data-remote-button="back"]').trigger("click");
+    expect(page.get(".mapping-editor h2").text()).toBe("返回 · 单击");
+    await page.get('.cast-button-lights [data-remote-button="right"]').trigger("keydown", { key: "Enter" });
+    expect(page.get(".mapping-editor h2").text()).toBe("右 · 单击");
+    await page.get('.cast-button-lights [data-remote-button="netflix"]').trigger("keydown", { key: " " });
+    expect(page.get(".mapping-editor h2").text()).toBe("Netflix · 单击");
+    await page.get('.cast-button-lights [data-remote-button="voice"]').trigger("click");
+    expect(page.get(".mapping-editor h2").text()).toBe("Netflix · 单击");
+  });
+
+  it("keeps the right column aligned and retries mapping loads after startup IPC failures", async () => {
+    let resize: ResizeObserverCallback | undefined;
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { resize = callback; }
+      observe() {}
+      disconnect = disconnect;
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      vi.mocked(getButtonMappings).mockRejectedValueOnce(new Error("settings temporarily unavailable"));
+      vi.mocked(getButtonMappingSnapshot).mockRejectedValueOnce(new Error("snapshot temporarily unavailable"));
+      const page = await mountPage("chromecast");
+      expect(page.get(".mapping-load-error").text()).toContain("没能读取按键映射");
+
+      const cards = page.findAll(".mapping-card");
+      const index = cards.findIndex((card) => card.attributes("data-remote-button") === "ok");
+      const card = cards[index].element as HTMLElement;
+      const arrow = page.findAll(".mapping-connections polygon")[index];
+      for (const width of [1800, 940]) {
+        expect(resize).toBeDefined();
+        resize!([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver);
+        await flushPromises();
+        expect(page.get(".mapping-connections").attributes("width")).toBe(String(width));
+        const [tip] = (arrow.attributes("points") ?? "").split(",");
+        expect(tip).not.toBe("");
+        expect(Number.parseFloat(card.style.left) - Number(tip)).toBeCloseTo(7);
+      }
+
+      await page.get(".mapping-load-error button").trigger("click");
+      await flushPromises();
+      expect(page.find(".mapping-load-error").exists()).toBe(false);
+      await cards[index].get(".mapping-cell").trigger("click");
+      expect(page.get(".mapping-editor h2").text()).toBe("确定 · 单击");
+      page.unmount();
+      expect(disconnect).toHaveBeenCalledOnce();
+    } finally {
+      consoleError.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps Xiaomi card selection separate from its trigger editor", async () => {
+    const page = await mountPage("rc003");
+    await page.get('.mapping-card[data-remote-button="ok"] .mapping-card-title').trigger("click");
+    expect(page.get('.mapping-card[data-remote-button="ok"]').classes()).toContain("selected");
+    expect(page.find(".mapping-editor").exists()).toBe(false);
   });
 
   it("saves and tests distinct Chromecast gestures using the same shortcut and action editor", async () => {

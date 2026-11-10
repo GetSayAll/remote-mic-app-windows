@@ -153,6 +153,36 @@ fn main_webview(app: &tauri::AppHandle) -> Option<tauri::Webview> {
     app.get_webview(MAIN_WINDOW_LABEL)
 }
 
+fn main_ipc_state_managed(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppState>().is_some()
+        && app
+            .try_state::<recommendations::RecommendationsState>()
+            .is_some()
+        && app.try_state::<whisper::WhisperRuntime>().is_some()
+}
+
+fn create_configured_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    // Tauri creates automatic windows before setup. A hidden WebView can
+    // already run JavaScript, so the main page must be created manually.
+    if !main_ipc_state_managed(app) {
+        return Err(std::io::Error::other("main WebView IPC state is not registered").into());
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == MAIN_WINDOW_LABEL)
+        .ok_or_else(|| std::io::Error::other("main WebView configuration is missing"))?;
+    if config.create || config.visible {
+        return Err(
+            std::io::Error::other("main WebView must be created manually and hidden").into(),
+        );
+    }
+    tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+    Ok(())
+}
+
 #[derive(Default)]
 struct WebviewFailureState {
     reloaded: bool,
@@ -5723,9 +5753,10 @@ pub fn run() {
                 tauri::webview::PageLoadEvent::Started => "started",
                 tauri::webview::PageLoadEvent::Finished => "finished",
             };
+            let main = webview.label() == MAIN_WINDOW_LABEL;
+            let state_managed = main_ipc_state_managed(webview.app_handle());
             sayall_windows::gatt_note(format!(
-                "webview event=document_load phase={phase} result=passed main_window={}",
-                webview.label() == "main"
+                "webview event=document_load phase={phase} result=passed main_window={main} state_managed={state_managed}"
             ));
         })
         .setup(move |app| {
@@ -5830,13 +5861,6 @@ pub fn run() {
                     Default::default()
                 }
             };
-            // 应用图标（2026-10-02）：托盘刚用内置图标建成，这里按持久化选择把
-            // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
-            #[cfg(windows)]
-            app_icon::apply(app.handle(), saved_settings.app_icon);
-            #[cfg(windows)]
-            apply_native_language(app.handle(), saved_settings.application_language);
-
             // 「本次启动前刚完成更新」（2026-10-19，对齐 Mac
             // `recordLaunchAndDetectCompletedUpdate`）：记录写在独立的
             // `launch-state.json`（不碰 settings.json，安装生命周期测试对后者做逐字节
@@ -5864,54 +5888,6 @@ pub fn run() {
                 }
             };
 
-            // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
-            // 「启动时自动打开主面板」关闭后，普通启动只驻留托盘；未完成首次设置
-            // 或本次启动前刚完成更新时仍显示窗口（Mac 同款：更新完成后仍会显示主面板）。
-            // 托盘左键 / 托盘菜单 / 再次启动应用都走 `show_main_window`，不受本设置影响。
-            //
-            // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
-            // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
-            let show_main_window_on_startup = should_show_main_window_on_startup(
-                onboarding_active,
-                completed_update,
-                saved_settings.open_window_at_launch && !diagnostic_background,
-            );
-            #[cfg(feature = "runtime-simulation")]
-            let show_main_window_on_startup =
-                show_main_window_on_startup || runtime_simulation_requested();
-            if let Some(window) = main_window(app.handle()) {
-                let visible_before = window.is_visible().unwrap_or(true);
-                if show_main_window_on_startup {
-                    // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
-                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
-                    let show_result = window.show();
-                    let _ = window.set_focus();
-                    let visible_after = window.is_visible().unwrap_or(true);
-                    sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
-                        if visible_after { "passed" } else { "failed" },
-                        visible_after,
-                        if onboarding_active {
-                            "onboarding_active"
-                        } else if completed_update {
-                            "completed_update"
-                        } else {
-                            "open_window_at_launch"
-                        },
-                        saved_settings.open_window_at_launch
-                    ));
-                } else {
-                    let hide_result = window.hide();
-                    let visible_after = window.is_visible().unwrap_or(true);
-                    sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
-                        if visible_after { "failed" } else { "passed" },
-                        visible_after,
-                        if diagnostic_background { "diagnostic_background" } else { "open_window_at_launch_disabled" },
-                        saved_settings.open_window_at_launch
-                    ));
-                }
-            }
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
             // 「任务装没装」当状态。
@@ -6197,26 +6173,6 @@ pub fn run() {
                 }
             }
 
-            // 选的输入工具同样要推给平台（2026-10-01）：语音会话开始前决定把哪个
-            // 输入法切进当前会话。启动恢复同样走"选中即对齐"（2026-10-03 Andy：
-            // 保证重启/冷启动后的第一按也能拉起）：自身在前台先布防、失焦后切一次；
-            // 否则立即切。基准确认见 Bugs/2026-10-03-ime-switch-lags-tool-selection.md。
-            match settings.load() {
-                Ok(loaded) => {
-                    sayall_windows::gatt_note(format!(
-                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=passed tool={}",
-                        voice_input_tool_name(loaded.voice_input_tool)
-                    ));
-                    platform.set_voice_input_tool(loaded.voice_input_tool);
-                }
-                Err(error) => {
-                    sayall_windows::gatt_note(
-                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=cold_start_fallback retryable=true".to_owned(),
-                    );
-                    eprintln!("{error}");
-                }
-            }
-
             // 增益（对齐 Mac：0 dB = 原始音量）。启动即把持久化值推给平台，
             // 否则重启后管道会退回 0 dB，直到用户再碰一次滑块。
             platform.set_gain_db(saved_settings.gain_db);
@@ -6388,6 +6344,12 @@ pub fn run() {
             });
             app.manage(recommendations::RecommendationsState::default());
             app.manage(whisper::WhisperRuntime::default());
+            create_configured_main_window(app.handle())?;
+            // 托盘初始图标和菜单在此同步到配置。窗口尚未显示，用户看不到切换。
+            #[cfg(windows)]
+            app_icon::apply(app.handle(), saved_settings.app_icon);
+            #[cfg(windows)]
+            apply_native_language(app.handle(), saved_settings.application_language);
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
@@ -6451,6 +6413,75 @@ pub fn run() {
                     dropped
                 });
             }
+            // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
+            // 「启动时自动打开主面板」关闭后，普通启动只驻留托盘；未完成首次设置
+            // 或本次启动前刚完成更新时仍显示窗口（Mac 同款：更新完成后仍会显示主面板）。
+            // 托盘左键 / 托盘菜单 / 再次启动应用都走 `show_main_window`，不受本设置影响。
+            //
+            // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
+            // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
+            let show_main_window_on_startup = should_show_main_window_on_startup(
+                onboarding_active,
+                completed_update,
+                saved_settings.open_window_at_launch && !diagnostic_background,
+            );
+            #[cfg(feature = "runtime-simulation")]
+            let show_main_window_on_startup =
+                show_main_window_on_startup || runtime_simulation_requested();
+            if let Some(window) = main_window(app.handle()) {
+                let visible_before = window.is_visible().unwrap_or(true);
+                if show_main_window_on_startup {
+                    // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
+                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
+                    let show_result = window.show();
+                    let _ = window.set_focus();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "passed" } else { "failed" },
+                        visible_after,
+                        if onboarding_active {
+                            "onboarding_active"
+                        } else if completed_update {
+                            "completed_update"
+                        } else {
+                            "open_window_at_launch"
+                        },
+                        saved_settings.open_window_at_launch
+                    ));
+                } else {
+                    let hide_result = window.hide();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "failed" } else { "passed" },
+                        visible_after,
+                        if diagnostic_background { "diagnostic_background" } else { "open_window_at_launch_disabled" },
+                        saved_settings.open_window_at_launch
+                    ));
+                }
+            }
+            // 选的输入工具同样要推给平台（2026-10-01）：语音会话开始前决定把哪个
+            // 输入法切进当前会话。启动恢复同样走"选中即对齐"（2026-10-03 Andy：
+            // 保证重启/冷启动后的第一按也能拉起）：自身在前台先布防、失焦后切一次；
+            // 否则立即切。基准确认见 Bugs/2026-10-03-ime-switch-lags-tool-selection.md。
+            let state = app.state::<AppState>();
+            match state.settings.load() {
+                Ok(loaded) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=passed tool={}",
+                        voice_input_tool_name(loaded.voice_input_tool)
+                    ));
+                    state.platform.set_voice_input_tool(loaded.voice_input_tool);
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=cold_start_fallback retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                }
+            }
+
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
@@ -8057,6 +8088,23 @@ mod ui_hint_tests {
         );
         assert_eq!(app_language_from_ui_language(0x0409), AppLanguage::English);
         assert_eq!(app_language_from_ui_language(0x0411), AppLanguage::English);
+    }
+
+    #[test]
+    fn main_window_config_requires_deferred_hidden_creation() {
+        let config: tauri::utils::config::Config =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main = config
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == MAIN_WINDOW_LABEL)
+            .expect("main window configuration");
+        assert!(!main.create, "Tauri would load the page before AppState");
+        assert!(
+            !main.visible,
+            "startup visibility must be applied by the host"
+        );
     }
 
     /// 主窗口查找只能用 `get_window`（见 `main_window` 的说明）。

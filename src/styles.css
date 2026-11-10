@@ -515,6 +515,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .remote-photo img { width: 100%; height: 100%; object-fit: cover; user-select: none; }
 .cast-button-lights { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .cast-button-lights [data-remote-button] { visibility: hidden; }
+.cast-button-lights .cast-key-hotspot { visibility: visible; fill: transparent; pointer-events: all; cursor: pointer; }
+.cast-button-lights .cast-key-hotspot[aria-disabled="true"] { pointer-events: none; }
+.cast-button-lights .cast-key-hotspot:not(.lit):is(:hover, :focus-visible) { stroke: var(--accent); stroke-width: 2; }
 .cast-button-lights .lit {
   visibility: visible;
   fill: color-mix(in srgb, var(--pressed) 26%, transparent);
@@ -522,7 +525,8 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   stroke-width: 2;
 }
 @media (forced-colors: active) {
-  .cast-button-lights .lit { forced-color-adjust: none; fill: transparent; stroke: Highlight; }
+  .cast-button-lights .lit,
+  .cast-button-lights .cast-key-hotspot:not(.lit):is(:hover, :focus-visible) { forced-color-adjust: none; fill: transparent; stroke: Highlight; }
 }
 /* 锚点橙点对齐 Mac：8px 纯圆点（无光环）。 */
 /* 按下高亮必须与连线同帧：连线本来就是瞬变，而卡片曾用 160ms 过渡、锚点 60ms。
@@ -534,8 +538,7 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; }
 .anchor-dot.visible { opacity: 1; }
 .mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; }
-.mapping-card.left { left: 0; }
-.mapping-card.right { right: 0; }
+.mapping-load-error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .mapping-card:hover { background: var(--surface-hover); border-color: var(--accent-border); box-shadow: 0 3px 12px var(--shadow-control); }
 .mapping-card.selected { background: var(--accent-surface); border-color: var(--accent-border); }
 .mapping-card.active { background: var(--pressed-surface); border-color: var(--pressed-border); }
