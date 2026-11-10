@@ -538,7 +538,8 @@ describe("APP adaptation page", () => {
     await flushPromises();
 
     expect(testScrollRegion).toHaveBeenCalledWith(target, "page_up");
-    expect(wrapper.find(".scroll-message").text()).toContain("滚动区域已移动");
+    expect(wrapper.find(".scroll-message").text()).toContain("内容已移动，这个区域可以翻页。");
+    expect(wrapper.find(".scroll-message").classes()).toContain("success");
   });
 
   it("learns and clears a scroll region without touching focus profiles", async () => {
@@ -563,13 +564,14 @@ describe("APP adaptation page", () => {
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text() === "清除滚动区域")!
+      .find((button) => button.text() === "清除学习结果")!
       .trigger("click");
     await flushPromises();
     const cleared = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
       scrollRegions?: Record<string, unknown>;
     };
     expect(cleared.scrollRegions).toBeUndefined();
+    expect(wrapper.find(".scroll-message").exists()).toBe(false);
   });
 
   it("sends a focus test request", async () => {

@@ -199,6 +199,8 @@ button, input { font: inherit; }
    （配置为打开应用的按键不触发：启动目标应用使本窗口失焦）。
    幽灵环的成因必然伴随一次指针交互，故按指针模态判定：既消除幽灵环，
    也不剥夺非 Tab 导航用户的焦点指示。鼠标按下打开指针模态，Tab 关闭。 */
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible) { outline: none; }
 button:focus-visible,
 input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 body.pointer-nav button:focus-visible,

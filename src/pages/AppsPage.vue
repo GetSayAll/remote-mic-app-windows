@@ -64,7 +64,7 @@ const scrollLearning = ref(false);
 const scrollTesting = ref<ScrollCommand | null>(null);
 const scrollMessage = ref<{
   text: string;
-  tone: "success" | "error" | "info";
+  tone: "success" | "error" | "info" | "warning";
 } | null>(null);
 let noticeTimer: number | null = null;
 
@@ -153,24 +153,36 @@ function scrollRegionErrorLabel(error: unknown, context: "learn" | "test"): stri
         ? error
         : JSON.stringify(error);
   const code = raw.toLowerCase();
-  if (code.includes("target_exited")) return t("目标应用已关闭，请重试。");
-  if (code.includes("own_process")) return t("请先切到目标 APP 再测试滚动。");
-  if (code.includes("not_accessible")) return t("这个 APP 没有暴露可读取的滚动区域。");
-  if (code.includes("no_candidate") || code.includes("outside_window")) {
-    return t("没有识别到滚动区域，请点一下内容区后重试。");
+  if (code.includes("target_exited")) {
+    return context === "learn"
+      ? t("目标应用已关闭，请重试。")
+      : t("翻页没有成功，请确认目标 App 在前台并已授予辅助功能权限。");
   }
+  if (code.includes("not_accessible")) {
+    return context === "learn"
+      ? t("没有识别到可滚动区域，请点内容区（消息列表、正文或终端）后重试。")
+      : t("翻页没有成功，请确认目标 App 在前台并已授予辅助功能权限。");
+  }
+  if (code.includes("own_process")) return t("请先切到目标 App 再测试翻页。");
   if (code.includes("pattern_unavailable")) {
-    return t("这个 APP 不支持结构翻页，已尝试滚轮回退。");
+    return t("已发送翻页；请目视确认内容是否移动。");
   }
-  if (code.includes("not_moved")) return t("滚动区域没有移动，请重新学习。");
+  if (code.includes("not_moved")) {
+    return t("已发送翻页，但没有检测到内容移动；可能已在顶部或底部，或该区域不可滚动。");
+  }
+  if (code.includes("no_candidate") || code.includes("outside_window")) {
+    return context === "learn"
+      ? t("没有识别到可滚动区域，请点内容区（消息列表、正文或终端）后重试。")
+      : t("这个 App 没有可用的预置区域，请先学习。");
+  }
   return context === "learn"
-    ? t("没有识别到滚动区域，请点一下内容区后重试。")
-    : t("滚动请求失败，请重试。");
+    ? t("没有识别到可滚动区域，请点内容区（消息列表、正文或终端）后重试。")
+    : t("翻页没有成功，请确认目标 App 在前台并已授予辅助功能权限。");
 }
 
 function scrollRegionMessage(
   text: string,
-  tone: "success" | "error" | "info" = "success",
+  tone: "success" | "error" | "info" | "warning" = "success",
 ): void {
   scrollMessage.value = { text, tone };
 }
@@ -279,12 +291,12 @@ async function learnScrollRegionForSelected(): Promise<void> {
     await activateAppForLearning(row.target);
     const region = await learnScrollRegion();
     if (await saveScrollRegion(row.target, region)) {
-      scrollRegionMessage(t("滚动区域已记录。"));
+      scrollRegionMessage(t("滚动区域已记录，可以直接测试翻页。"));
     } else {
       scrollRegionMessage(t("保存滚动区域失败，请重试。"), "error");
     }
   } catch (error) {
-    scrollRegionMessage(scrollRegionErrorLabel(error, "learn"), "error");
+    scrollRegionMessage(scrollRegionErrorLabel(error, "learn"), "warning");
   } finally {
     scrollLearning.value = false;
   }
@@ -294,9 +306,7 @@ async function clearScrollRegion(): Promise<void> {
   const row = selectedRow.value;
   if (!row || scrollBusy.value) return;
   scrollMessage.value = null;
-  if (await saveScrollRegion(row.target, null)) {
-    scrollRegionMessage(t("已清除滚动区域记录。"));
-  } else {
+  if (!(await saveScrollRegion(row.target, null))) {
     scrollRegionMessage(t("清除滚动区域失败，请重试。"), "error");
   }
 }
@@ -308,19 +318,24 @@ async function testScroll(command: ScrollCommand): Promise<void> {
   scrollMessage.value = null;
   try {
     const outcome = await testScrollRegion(row.target, command);
-    if (outcome.moved && outcome.atEdge) {
-      scrollRegionMessage(t("已翻页，并到达滚动区域的这一端。"), "info");
-    } else if (outcome.atEdge) {
-      scrollRegionMessage(t("已经到达滚动区域的这一端。"), "info");
+    if (command === "to_top" && outcome.atEdge) {
+      scrollRegionMessage(t("已滚到顶部。"));
+    } else if (command === "to_bottom" && outcome.atEdge) {
+      scrollRegionMessage(t("已滚到底部。"));
     } else if (outcome.moved) {
-      scrollRegionMessage(t("滚动区域已移动。"));
+      scrollRegionMessage(t("内容已移动，这个区域可以翻页。"));
+    } else if (outcome.atEdge) {
+      scrollRegionMessage(t("没有滚动；可能该区域不可滚，或已经在这一端。"), "warning");
     } else if (outcome.method === "wheel") {
-      scrollRegionMessage(t("已发送滚动请求，但无法读回是否移动。"), "info");
+      scrollRegionMessage(t("已发送翻页；请目视确认内容是否移动。"));
     } else {
-      scrollRegionMessage(t("没有检测到滚动，请重新学习。"), "error");
+      scrollRegionMessage(
+        t("已发送翻页，但没有检测到内容移动；可能已在顶部或底部，或该区域不可滚动。"),
+        "warning",
+      );
     }
   } catch (error) {
-    scrollRegionMessage(scrollRegionErrorLabel(error, "test"), "error");
+    scrollRegionMessage(scrollRegionErrorLabel(error, "test"), "warning");
   } finally {
     scrollTesting.value = null;
   }
@@ -386,7 +401,7 @@ onUnmounted(() => {
     <header class="page-header">
       <div>
         <h1>{{ tPage("APP 适配") }}</h1>
-        <p class="page-subtitle">{{ t("输入框聚焦按 APP 生效，APP 在前台即可使用。") }}</p>
+        <p class="page-subtitle">{{ t("输入框聚焦与翻页滚动按 APP 生效，APP 在前台即可使用。") }}</p>
       </div>
     </header>
 
@@ -457,7 +472,7 @@ onUnmounted(() => {
         </p>
 
         <p class="scope-note">
-          {{ t("输入框聚焦按 APP 单独设置：只要该 APP 在前台就能用，与“打开应用”动作无关。") }}
+          {{ t("输入框聚焦和上下翻页按 APP 单独设置：只要该 APP 在前台就能用，与「打开 App」动作无关。") }}
         </p>
 
         <AppFocusProfileEditor
@@ -478,7 +493,7 @@ onUnmounted(() => {
             <span class="spacer"></span>
           </div>
           <p class="hint">
-            {{ t("翻页键会滚动这个 APP 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。") }}
+            {{ t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。") }}
           </p>
           <div class="scroll-learn-row">
             <button
@@ -506,6 +521,15 @@ onUnmounted(() => {
             >
               {{ scrollTesting === "page_down" ? t("执行中…") : t("测试向下翻页") }}
             </button>
+            <button
+              v-if="selectedScrollRegion"
+              class="secondary-button scroll-test"
+              type="button"
+              :disabled="scrollBusy"
+              @click="clearScrollRegion"
+            >
+              {{ t("清除学习结果") }}
+            </button>
           </div>
           <div class="scroll-edge-row">
             <span class="scroll-edge-label">{{ t("滚到两端：") }}</span>
@@ -524,16 +548,6 @@ onUnmounted(() => {
               @click="testScroll('to_bottom')"
             >
               {{ scrollTesting === "to_bottom" ? t("执行中…") : t("滚到底部") }}
-            </button>
-            <span class="spacer"></span>
-            <button
-              v-if="selectedScrollRegion"
-              class="quiet-button"
-              type="button"
-              :disabled="scrollBusy"
-              @click="clearScrollRegion"
-            >
-              {{ t("清除滚动区域") }}
             </button>
           </div>
           <p v-if="scrollMessage" class="scroll-message" :class="scrollMessage.tone">
@@ -966,6 +980,9 @@ onUnmounted(() => {
 }
 .scroll-message.info {
   color: var(--text-secondary);
+}
+.scroll-message.warning {
+  color: var(--warning-text);
 }
 .binding-card {
   padding-bottom: 8px;
