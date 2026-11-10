@@ -59,31 +59,28 @@ fn publish(next: Target, helper_address: Option<u64>) {
     let mut published = PUBLISHED_HELPER_ADDRESS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let changed = {
+    let (changed, generation) = {
         let mut target = TARGET
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if target.0 == next {
-            false
-        } else {
+        let changed = target.0 != next;
+        if changed {
             *target = (next, target.1.wrapping_add(1));
-            true
         }
+        (changed, target.1)
     };
     if !changed && *published == Some(helper_address) {
         return;
     }
     // 只记"有没有值"——地址本身是设备身份，不进日志（LOGGING.md 隐私红线）。
+    let (model, selected) = match next {
+        Target::XiaomiOrUnselected(address) => ("xiaomi_or_unselected", address.is_some()),
+        Target::Chromecast(address) => ("chromecast", address.is_some()),
+    };
     note(format!(
-        "remote_target action={} source=ble_session",
-        if matches!(
-            next,
-            Target::XiaomiOrUnselected(None) | Target::Chromecast(None)
-        ) {
-            "cleared"
-        } else {
-            "published"
-        }
+        "remote_target action={} source=ble_session model={model} generation={generation} target_changed={changed} helper_target_requested={}",
+        if selected { "published" } else { "cleared" },
+        helper_address.is_some(),
     ));
     if *published != Some(helper_address) {
         match write_file(helper_address.unwrap_or(0)) {

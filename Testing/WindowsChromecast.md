@@ -262,6 +262,46 @@ Google-specific report-layer helper with exact device-instance and handle
 attribution. If the trace has no input notification, check the remote's
 report mode and HID notification subscription before working on a helper.
 
+### Comparing Xiaomi and Chromecast diagnostics
+
+The sanitized local collection covered the six regular SayAll files and the
+Chromecast preview log. The Xiaomi-era regular build (`f3f5212`) recorded 850
+semantic-edge events and 322 OK shortcut dispatches. Its old records did not
+label each event's model. The `5a47241` Chromecast sample had 41 first-PCM
+events, five shared-HID submissions, zero kernel completions and zero semantic
+edges. The samples cover different times, so the counts establish observed
+stages rather than a rate comparison. Present Xiaomi and Chromecast HOGP
+parent nodes both used `mshidumdf` version `10.0.26100.9549` and showed no PnP
+problem. A normal node is not evidence of report delivery.
+
+The RC003 acceptance trace provides a more specific control. Two OK presses
+arrived as two `VK_RETURN` keypresses via Raw Input and Home arrived once as
+`VK_HOME`. Enhanced RC003 capture addressed Back and Volume +/−, while
+ordinary OK kept its standard Windows route. See the
+[RC003 controlled capture](../hardware/RC003/README.md).
+
+In a fresh run, read the following records for the same process and target
+generation:
+
+1. `remote_target` identifies the target model, generation, and whether the
+   Xiaomi helper target was requested. `registration_readback` identifies
+   whether Windows registered each Raw Input collection to the listener.
+2. `window_flow` counts messages and failures before attribution. It counts
+   deliveries to the listener as a whole. `button_flow` then counts only the
+   selected model's routed reports, decode results, and forwarding outcomes.
+3. For Chromecast, `direct_reader_binding` links the generation to a
+   process-local `reader_id`. `shared_hid_open` describes the verified
+   collection, and `shared_hid_read` records submission, bounded pending
+   snapshots, kernel completion before decoding, and terminal counters.
+4. `shortcut_settings` identifies the configured model, `map_edges` and
+   `map_gesture` show decoded input, `map_dispatch` gives the gate outcome,
+   and `map_shortcut` records backend acceptance and elapsed time. Confirm
+   the focused application's response independently.
+
+The added diagnostics record aggregate counts, stable button and gesture
+labels, and numeric error codes. They omit raw packets, keyboard input text,
+device addresses, interface paths, audio, and application window titles.
+
 ## One-shot local Whisper dictation (2026-11-10)
 
 In Reflections, open Local Whisper Transcription, select the verified Whisper

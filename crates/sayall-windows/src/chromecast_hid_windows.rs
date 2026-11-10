@@ -6,21 +6,25 @@ use crate::raw_input::{
 };
 use std::collections::BTreeSet;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use windows::core::{HRESULT, PCWSTR};
 use windows::Win32::Devices::HumanInterfaceDevice::{
     HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetPreparsedData, HidP_GetCaps,
     HidP_GetUsages, HidP_Input, HidP_MaxUsageListLength, HIDD_ATTRIBUTES, HIDP_CAPS,
     HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
 };
-use windows::Win32::Foundation::{ERROR_IO_PENDING, GENERIC_READ, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    GetLastError, ERROR_IO_PENDING, GENERIC_READ, HANDLE, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, INFINITE,
+    CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
@@ -34,6 +38,11 @@ const REPORT_BYTES: usize = 3;
 const MAX_ACTIVE_USAGES: usize = 128;
 const QUEUE_CAPACITY: usize = 32;
 static WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static NEXT_READER_ID: AtomicU64 = AtomicU64::new(1);
+static LAST_OPEN_UNAVAILABLE: Mutex<Option<(&'static str, u32)>> = Mutex::new(None);
+const FIRST_IDLE_HEARTBEAT: Duration = Duration::from_secs(8);
+const SECOND_IDLE_HEARTBEAT: Duration = Duration::from_secs(30);
+const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 type ButtonReport = (u8, BTreeSet<RemoteButton>);
 
@@ -55,6 +64,7 @@ impl Drop for WorkerSlot {
 }
 
 pub(super) struct Reader {
+    id: u64,
     stop: Arc<OwnedHandle>,
     reports: Receiver<ButtonReport>,
     finished: Arc<AtomicBool>,
@@ -69,7 +79,10 @@ impl Reader {
         if !chromecast_path_matches_target(path, address) {
             return Ok(None);
         }
-        let worker_slot = WorkerSlot::acquire()?;
+        let id = NEXT_READER_ID.fetch_add(1, Ordering::Relaxed);
+        let open_started = Instant::now();
+        let worker_slot =
+            WorkerSlot::acquire().map_err(|reason| open_failure(id, open_started, reason, 0))?;
         let win32_path = path
             .strip_prefix(r"\??\")
             .map_or_else(|| path.to_owned(), |suffix| format!(r"\\?\{suffix}"));
@@ -85,14 +98,25 @@ impl Reader {
                 None,
             )
         }
-        .map_err(|_| "device_open_failed")?;
+        .map_err(|error| {
+            open_failure(
+                id,
+                open_started,
+                "device_open_failed",
+                error.code().0 as u32,
+            )
+        })?;
         let file = own(file);
-        let Some(descriptor) = Descriptor::read(raw(&file))? else {
+        let Some(descriptor) = Descriptor::read(raw(&file))
+            .map_err(|reason| open_failure(id, open_started, reason, 0))?
+        else {
+            note_open_unavailable(id, open_started, "skipped", "collection_mismatch", 0);
             return Ok(None);
         };
 
-        let io_done = event()?;
-        let stop = Arc::new(event()?);
+        let io_done = event().map_err(|reason| open_failure(id, open_started, reason, 0))?;
+        let stop = Arc::new(event().map_err(|reason| open_failure(id, open_started, reason, 0))?);
+        let open_elapsed_ms = open_started.elapsed().as_millis();
         let worker_stop = Arc::clone(&stop);
         let finished = Arc::new(AtomicBool::new(false));
         let worker_finished = Arc::clone(&finished);
@@ -100,26 +124,43 @@ impl Reader {
         std::thread::Builder::new()
             .name("sayall-chromecast-hid".to_owned())
             .spawn(move || {
-                let result = read_loop(&file, &descriptor, &io_done, &worker_stop, sender, &wake);
+                if let Ok(mut last) = LAST_OPEN_UNAVAILABLE.lock() {
+                    *last = None;
+                }
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=shared_hid_open phase=completed terminal_result=passed reason=selected_consumer_collection reader_id={id} input_report_bytes={REPORT_BYTES} usage_page=0x{CONSUMER_PAGE:04x} usage=0x{CONSUMER_CONTROL:04x} max_active_usages={} elapsed_ms={open_elapsed_ms}",
+                    descriptor.usage_limit
+                ));
+                let started = Instant::now();
+                let mut stats = ReadStats { id, ..ReadStats::default() };
+                let result = read_loop(&file, &descriptor, &io_done, &worker_stop, sender, &wake, &mut stats);
                 // The listener can start the replacement after seeing this flag.
                 drop(descriptor);
                 drop(file);
                 drop(worker_slot);
-                if let Err(reason) = result {
-                    crate::ble::gatt_note(format!(
-                        "raw_input feature=chromecast action=shared_hid_read phase=completed terminal_result=failed reason={reason}"
-                    ));
-                }
+                let (terminal, reason, error_code) = match result {
+                    Ok(reason) => ("stopped", reason, 0),
+                    Err(error) => ("failed", error.reason, error.code),
+                };
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=shared_hid_read phase=completed terminal_result={terminal} reason={reason} reader_id={id} elapsed_ms={} error_code=0x{error_code:08x} {stats}",
+                    started.elapsed().as_millis()
+                ));
                 worker_finished.store(true, Ordering::Release);
                 wake();
             })
-            .map_err(|_| "worker_start_failed")?;
+            .map_err(|_| open_failure(id, open_started, "worker_start_failed", 0))?;
 
         Ok(Some(Self {
+            id,
             stop,
             reports,
             finished,
         }))
+    }
+
+    pub(super) fn id(&self) -> u64 {
+        self.id
     }
 
     pub(super) fn try_recv(&self) -> Option<ButtonReport> {
@@ -129,6 +170,34 @@ impl Reader {
     pub(super) fn is_finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
     }
+}
+
+fn open_failure(id: u64, started: Instant, reason: &'static str, error_code: u32) -> &'static str {
+    note_open_unavailable(id, started, "failed", reason, error_code);
+    reason
+}
+
+fn note_open_unavailable(
+    id: u64,
+    started: Instant,
+    terminal: &str,
+    reason: &'static str,
+    error_code: u32,
+) {
+    // The binding audit retries unavailable collections. Preserve transitions
+    // while suppressing an unchanged failure at every audit tick.
+    let Ok(mut last) = LAST_OPEN_UNAVAILABLE.lock() else {
+        return;
+    };
+    if *last == Some((reason, error_code)) {
+        return;
+    }
+    *last = Some((reason, error_code));
+    drop(last);
+    crate::ble::gatt_note(format!(
+        "raw_input feature=chromecast action=shared_hid_open phase=completed terminal_result={terminal} reason={reason} reader_id={id} elapsed_ms={} error_code=0x{error_code:08x}",
+        started.elapsed().as_millis()
+    ));
 }
 
 impl Drop for Reader {
@@ -249,6 +318,83 @@ fn decode_button_report(
     Ok(Some((report_id, buttons)))
 }
 
+#[derive(Default)]
+struct ReadStats {
+    id: u64,
+    pending_submits: u64,
+    synchronous_submits: u64,
+    completions: u64,
+    decoded: u64,
+    unsupported: u64,
+    malformed: u64,
+    queued: u64,
+}
+
+impl std::fmt::Display for ReadStats {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "pending_submits={} synchronous_submits={} kernel_completions={} decoded_reports={} unsupported_reports={} malformed_reports={} queued_reports={}",
+            self.pending_submits, self.synchronous_submits, self.completions,
+            self.decoded, self.unsupported, self.malformed, self.queued
+        )
+    }
+}
+
+struct ReadFailure {
+    reason: &'static str,
+    code: u32,
+}
+
+impl ReadFailure {
+    fn reason(reason: &'static str) -> Self {
+        Self { reason, code: 0 }
+    }
+
+    fn windows(reason: &'static str, error: windows::core::Error) -> Self {
+        Self {
+            reason,
+            code: error.code().0 as u32,
+        }
+    }
+}
+
+fn next_idle_heartbeat(elapsed: Duration) -> Duration {
+    if elapsed < FIRST_IDLE_HEARTBEAT {
+        FIRST_IDLE_HEARTBEAT
+    } else if elapsed < SECOND_IDLE_HEARTBEAT {
+        SECOND_IDLE_HEARTBEAT
+    } else {
+        let seconds = IDLE_HEARTBEAT_INTERVAL.as_secs();
+        Duration::from_secs((elapsed.as_secs() / seconds + 1) * seconds)
+    }
+}
+
+fn wait_for_pending_read(waits: &[HANDLE; 2], submitted: Instant, stats: &ReadStats) -> WAIT_EVENT {
+    let mut heartbeat_at = FIRST_IDLE_HEARTBEAT;
+    loop {
+        let timeout = heartbeat_at
+            .saturating_sub(submitted.elapsed())
+            .as_millis()
+            .max(1) as u32;
+        let result = unsafe { WaitForMultipleObjects(waits, false, timeout) };
+        if result != WAIT_TIMEOUT {
+            return result;
+        }
+        let elapsed = submitted.elapsed();
+        if elapsed >= heartbeat_at {
+            // A wait timeout is only telemetry. The outstanding operation
+            // retains the same OVERLAPPED, event and buffer until it completes.
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=shared_hid_read phase=pending reason=still_waiting_for_completion reader_id={} elapsed_ms={} {stats}",
+                stats.id,
+                elapsed.as_millis()
+            ));
+            heartbeat_at = next_idle_heartbeat(elapsed);
+        }
+    }
+}
+
 fn read_loop(
     file: &OwnedHandle,
     descriptor: &Descriptor,
@@ -256,78 +402,133 @@ fn read_loop(
     stop: &OwnedHandle,
     sender: SyncSender<ButtonReport>,
     wake: &impl Fn(),
-) -> Result<(), &'static str> {
+    stats: &mut ReadStats,
+) -> Result<&'static str, ReadFailure> {
     let file = raw(file);
     let io_done = raw(io_done);
     let stop = raw(stop);
     let waits = [stop, io_done];
-    let mut first_read = true;
+    let id = stats.id;
+    let mut logged_pending = false;
+    let mut logged_synchronous = false;
     let mut observed_shapes = BTreeSet::new();
     loop {
         if unsafe { WaitForMultipleObjects(&[stop], false, 0) } == WAIT_OBJECT_0 {
-            return Ok(());
+            return Ok("stop_requested");
         }
-        unsafe { ResetEvent(io_done) }.map_err(|_| "read_event_reset_failed")?;
+        unsafe { ResetEvent(io_done) }
+            .map_err(|error| ReadFailure::windows("read_event_reset_failed", error))?;
         let mut report = [0; REPORT_BYTES];
         let mut operation = OVERLAPPED {
             hEvent: io_done,
             ..OVERLAPPED::default()
         };
+        let submitted = Instant::now();
         let pending = match unsafe { ReadFile(file, Some(&mut report), None, Some(&mut operation)) }
         {
-            Ok(()) => false,
-            Err(error) if error.code() == HRESULT::from_win32(ERROR_IO_PENDING.0) => true,
-            Err(_) => return Err("read_submit_failed"),
+            Ok(()) => {
+                stats.synchronous_submits += 1;
+                false
+            }
+            Err(error) if error.code() == HRESULT::from_win32(ERROR_IO_PENDING.0) => {
+                stats.pending_submits += 1;
+                true
+            }
+            Err(error) => return Err(ReadFailure::windows("read_submit_failed", error)),
         };
-        if first_read {
-            first_read = false;
-            crate::ble::gatt_note(
-                "raw_input feature=chromecast action=shared_hid_read phase=started reason=initial_read_submitted"
-                    .to_owned(),
-            );
+        let (logged, mode) = if pending {
+            (&mut logged_pending, "pending")
+        } else {
+            (&mut logged_synchronous, "synchronous")
+        };
+        if !*logged {
+            *logged = true;
+            let reason = if stats.pending_submits + stats.synchronous_submits == 1 {
+                "initial_read_submitted"
+            } else {
+                "submission_mode_observed"
+            };
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=shared_hid_read phase=started reason={reason} reader_id={id} submit_mode={mode} elapsed_ms={} {stats}",
+                submitted.elapsed().as_millis()
+            ));
         }
         if pending {
-            let result = unsafe { WaitForMultipleObjects(&waits, false, INFINITE) };
+            let result = wait_for_pending_read(&waits, submitted, stats);
             if result.0 != WAIT_OBJECT_0.0 + 1 {
+                let wait_error = if result == WAIT_FAILED {
+                    unsafe { GetLastError() }.0
+                } else {
+                    0
+                };
                 // A cancellation can race with a completed read. Either way the
                 // operation must be drained before its stack buffers are released.
-                let _ = unsafe { CancelIoEx(file, Some(&operation)) };
+                let cancel = unsafe { CancelIoEx(file, Some(&operation)) }
+                    .err()
+                    .map_or(0, |error| error.code().0 as u32);
                 let mut discarded = 0;
-                let _ = unsafe { GetOverlappedResult(file, &operation, &mut discarded, true) };
+                let reap = unsafe { GetOverlappedResult(file, &operation, &mut discarded, true) }
+                    .err()
+                    .map_or(0, |error| error.code().0 as u32);
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=shared_hid_read phase=reaped reason=pending_operation_drained reader_id={id} elapsed_ms={} wait_result=0x{:08x} wait_error={wait_error} cancel_hresult=0x{cancel:08x} reap_hresult=0x{reap:08x}",
+                    submitted.elapsed().as_millis(), result.0
+                ));
                 return if result == WAIT_OBJECT_0 {
-                    Ok(())
+                    Ok("stop_requested")
                 } else {
-                    Err("read_wait_failed")
+                    Err(ReadFailure {
+                        reason: "read_wait_failed",
+                        code: wait_error,
+                    })
                 };
             }
         }
         let mut bytes = 0;
         unsafe { GetOverlappedResult(file, &operation, &mut bytes, false) }
-            .map_err(|_| "read_completion_failed")?;
+            .map_err(|error| ReadFailure::windows("read_completion_failed", error))?;
+        stats.completions += 1;
         // Observe kernel delivery before interpreting report ID or length. Each
         // shape is logged once per worker without report bytes or device details.
-        let report_id = (bytes != 0).then_some(report[0]);
+        let report_id = match (bytes, report[0]) {
+            (0, _) => "none",
+            (_, DESCRIPTOR_REPORT_ID) => "1",
+            (_, CONSUMER_USAGE_REPORT_ID) => "2",
+            _ => "other",
+        };
         let first_completion = observed_shapes.is_empty();
         if observed_shapes.insert((report_id, bytes)) {
-            let id = report_id.map_or_else(|| "none".to_owned(), |id| id.to_string());
             crate::ble::gatt_note(format!(
-                "raw_input feature=chromecast action=shared_hid_read phase=kernel_completion first={first_completion} report_id={id} report_bytes={bytes}"
+                "raw_input feature=chromecast action=shared_hid_read phase=kernel_completion first={first_completion} reader_id={id} submit_mode={mode} report_id={report_id} report_bytes={bytes} elapsed_ms={} {stats}",
+                submitted.elapsed().as_millis()
             ));
         }
         if bytes as usize != REPORT_BYTES {
-            return Err("read_report_length_invalid");
+            stats.malformed += 1;
+            return Err(ReadFailure::reason("read_report_length_invalid"));
         }
         // Unsupported IDs may belong to another control on the same collection.
         // A malformed supported report ends this stream so the listener can clear
         // held state instead of guessing whether the report meant release.
-        let Some(report) = decode_button_report(&mut report, |report| descriptor.decode(report))?
-        else {
-            continue;
+        let report = match decode_button_report(&mut report, |report| descriptor.decode(report)) {
+            Ok(Some(report)) => report,
+            Ok(None) => {
+                stats.unsupported += 1;
+                continue;
+            }
+            Err(reason) => {
+                stats.malformed += 1;
+                return Err(ReadFailure::reason(reason));
+            }
         };
+        stats.decoded += 1;
         match sender.try_send(report) {
-            Ok(()) => wake(),
-            Err(TrySendError::Disconnected(_)) => return Ok(()),
-            Err(TrySendError::Full(_)) => return Err("read_queue_full"),
+            Ok(()) => {
+                stats.queued += 1;
+                wake();
+            }
+            Err(TrySendError::Disconnected(_)) => return Ok("receiver_disconnected"),
+            Err(TrySendError::Full(_)) => return Err(ReadFailure::reason("read_queue_full")),
         }
     }
 }
@@ -335,7 +536,16 @@ fn read_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+
+    #[test]
+    fn idle_heartbeat_coalesces_without_drifting() {
+        for (elapsed, next) in [(0, 8), (7, 8), (8, 30), (30, 60), (60, 120), (141, 180)] {
+            assert_eq!(
+                next_idle_heartbeat(Duration::from_secs(elapsed)),
+                Duration::from_secs(next)
+            );
+        }
+    }
 
     #[test]
     fn consumer_usage_report_preserves_id_for_press_and_release() {

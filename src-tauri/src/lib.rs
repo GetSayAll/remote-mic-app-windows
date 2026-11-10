@@ -3031,6 +3031,13 @@ fn button_mappings_for_scope(
     }
 }
 
+fn button_mapping_model(scope: ButtonMappingScope) -> &'static str {
+    match scope {
+        ButtonMappingScope::Xiaomi => "xiaomi",
+        ButtonMappingScope::Chromecast => "chromecast",
+    }
+}
+
 fn apply_button_mappings_for_scope(
     platform: &dyn PlatformRuntime,
     scope: ButtonMappingScope,
@@ -3047,10 +3054,14 @@ fn get_button_mappings(
     remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> ButtonMappings {
-    button_mappings_for_scope(
-        state.platform.as_ref(),
-        ButtonMappingScope::from_remote_model(remote_model),
-    )
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let mappings = button_mappings_for_scope(state.platform.as_ref(), scope);
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=button_mapping action=read_runtime phase=completed terminal_result=passed remote_model={} {}",
+        button_mapping_model(scope),
+        button_mapping_log_summary(&mappings),
+    ));
+    mappings
 }
 
 #[tauri::command]
@@ -3060,13 +3071,14 @@ async fn save_button_mappings(
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
     let started = std::time::Instant::now();
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let model = button_mapping_model(scope);
     let summary = button_mapping_log_summary(&mappings);
     sayall_windows::gatt_note(format!(
-        "shortcut_settings feature=button_mapping action=save phase=requested {summary}"
+        "shortcut_settings feature=button_mapping action=save phase=requested remote_model={model} {summary}"
     ));
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
-    let scope = ButtonMappingScope::from_remote_model(remote_model);
     let result =
         match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
             // 持久化成功后热加载到引擎与门控（保存即生效）。
@@ -3081,12 +3093,12 @@ async fn save_button_mappings(
         };
     sayall_windows::gatt_note(match &result {
         Ok(saved) => format!(
-            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=passed {} elapsed_ms={}",
+            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=passed remote_model={model} {} elapsed_ms={}",
             button_mapping_log_summary(saved),
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=failed remote_model={model} error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ),
     });
@@ -6034,14 +6046,14 @@ pub fn run() {
             let button_mappings = match settings.load_button_mappings() {
                 Ok(mappings) => {
                     sayall_windows::gatt_note(format!(
-                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed {}",
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed remote_model=xiaomi {}",
                         button_mapping_log_summary(&mappings)
                     ));
                     mappings
                 }
                 Err(error) => {
                     sayall_windows::gatt_note(
-                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=failed remote_model=xiaomi error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
                     );
                     eprintln!("{error}");
                     ButtonMappings::default()
@@ -6050,7 +6062,13 @@ pub fn run() {
             // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
             platform.set_button_mappings(button_mappings);
             match settings.load_button_mappings_for_scope(ButtonMappingScope::Chromecast) {
-                Ok(mappings) => platform.set_chromecast_button_mappings(mappings),
+                Ok(mappings) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed remote_model=chromecast {}",
+                        button_mapping_log_summary(&mappings),
+                    ));
+                    platform.set_chromecast_button_mappings(mappings);
+                }
                 Err(error) => {
                     sayall_windows::gatt_note(
                         "shortcut_settings feature=button_mapping remote_model=chromecast action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),

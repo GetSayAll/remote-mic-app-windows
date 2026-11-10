@@ -980,6 +980,14 @@ impl ExpectedButtonTarget<'_> {
     fn is_current(self) -> bool {
         (self.source)() == self.value
     }
+
+    fn diagnostic_model(self) -> &'static str {
+        match self.value.0 {
+            Target::Chromecast(_) => "chromecast",
+            Target::XiaomiOrUnselected(Some(_)) => "xiaomi",
+            Target::XiaomiOrUnselected(None) => "xiaomi_or_unselected",
+        }
+    }
 }
 
 impl Drop for ButtonMappingRuntime {
@@ -1752,17 +1760,9 @@ fn handle_edges(
     if edges.is_empty() || !target.is_current() {
         return;
     }
-    let cast_gate = if matches!(target.value.0, Target::Chromecast(_)) {
-        format!(
-            " model=chromecast generation={} suspended={}",
-            target.value.1,
-            lock_state(state).suspended
-        )
-    } else {
-        String::new()
-    };
+    let suspended = lock_state(state).suspended;
     crate::ble::gatt_note(format!(
-        "map_edges count={} detail={} gate(sw={} lk={}){cast_gate}",
+        "map_edges count={} detail={} gate(sw={} lk={}) model={} generation={} suspended={suspended}",
         edges.len(),
         edges
             .iter()
@@ -1770,7 +1770,9 @@ fn handle_edges(
             .collect::<Vec<_>>()
             .join(","),
         key_gate::swallowed_edge_count(),
-        key_gate::leaked_down_count()
+        key_gate::leaked_down_count(),
+        target.diagnostic_model(),
+        target.value.1,
     ));
     for edge in edges.iter().filter(|edge| edge.is_pressed) {
         usage.record_button_press(edge.button);
@@ -2028,19 +2030,15 @@ fn fire_gesture(
     if matches!(target.value.0, Target::Chromecast(_)) && !chromecast {
         return false;
     }
-    if chromecast {
+    let model = target.diagnostic_model();
+    let generation = target.value.1;
+    crate::ble::gatt_note(format!(
+        "map_gesture model={model} generation={generation} button={button:?} trigger={trigger:?}"
+    ));
+    let note_dispatch = |outcome: &str| {
         crate::ble::gatt_note(format!(
-            "map_gesture model=chromecast generation={} button={button:?} trigger={trigger:?}",
-            target.value.1
+            "map_dispatch model={model} generation={generation} button={button:?} trigger={trigger:?} outcome={outcome}"
         ));
-    }
-    let note_cast_dispatch = |outcome: &str| {
-        if chromecast {
-            crate::ble::gatt_note(format!(
-                "map_dispatch model=chromecast generation={} button={button:?} trigger={trigger:?} outcome={outcome}",
-                target.value.1
-            ));
-        }
     };
     let fired = FiredGesture { button, trigger };
     let suspended = {
@@ -2054,7 +2052,7 @@ fn fire_gesture(
     }
     // 暂挂（向导第⑥步）：手势仍被观察与广播，但不执行任何注入/动作。
     if suspended {
-        note_cast_dispatch("suspended");
+        note_dispatch("suspended");
         return false;
     }
 
@@ -2062,7 +2060,11 @@ fn fire_gesture(
     // 小米需要门控进程。Chromecast 从已归因的 Raw Input 触发显式映射，
     // 不假定 Windows 原有按键动作已经被拦截。
     if !mappings.enabled || (!chromecast && !key_gate::is_gate_thread_alive()) {
-        note_cast_dispatch("mapping_disabled");
+        note_dispatch(if mappings.enabled {
+            "gate_not_alive"
+        } else {
+            "mapping_disabled"
+        });
         if mappings.enabled {
             crate::ble::gatt_note(format!(
                 "map_skip_inject reason=gate_not_alive enabled={} gate_alive=false button={:?} trigger={:?}",
@@ -2084,10 +2086,11 @@ fn fire_gesture(
     let action = effective_action(&mappings, overlay.as_ref(), button, trigger);
     if chromecast && action == ButtonAction::Disabled {
         // Cast never suppresses the native event, so there is nothing to replay.
-        note_cast_dispatch("trigger_unassigned");
+        note_dispatch("trigger_unassigned");
         return false;
     }
     if overlay_actions.is_some() && action == ButtonAction::Disabled {
+        note_dispatch("profile_disabled");
         // 方案显式设为「不执行操作」：消费本次手势，不回注原生键。
         // 与基础映射的 Disabled 不同——后者需要回注原生键避免吞键。
         crate::ble::gatt_note(format!(
@@ -2096,6 +2099,7 @@ fn fire_gesture(
         return false;
     }
     if action == ButtonAction::Disabled {
+        note_dispatch("trigger_unassigned");
         // 吞键缝隙（2026-09-27 真机，见 Bugs/2026-09-27-fullkey-swallowed-keys.md）：
         // 整键因任一触发列有动作而进 mapped_mask，门控/报告层按整键吞原始键；
         // 当前触发列却是 Disabled 时，不回注则按键凭空消失（真机：Tv 配置长按
@@ -2146,6 +2150,7 @@ fn fire_gesture(
                 if chord.keys.len() == 1
                     && native_key(button).is_some_and(|native| chord.keys[0] == native));
             if native_covers {
+                note_dispatch("native_covers_action");
                 crate::ble::gatt_note(format!(
                     "map_skip_inject reason=native_covers_action button={:?} trigger=single",
                     button
@@ -2205,16 +2210,25 @@ fn fire_gesture(
             // 成立。这里补上第二层：本进程键钩子宿主看到的注入事件回声
             // （`echo_delta`/`last_*`，见 key_gate::InjectedEcho）。
             let echo_before = crate::key_gate::injected_event_count();
-            match injector.tap(&chord) {
+            let submitted_at = Instant::now();
+            let result = injector.tap(&chord);
+            let submit_ms = submitted_at.elapsed().as_millis();
+            crate::ble::gatt_note(format!(
+                "map_shortcut model={model} generation={generation} button={button:?} trigger={trigger:?} key_count={} backend={} accepted={} elapsed_ms={submit_ms} application_receipt=unknown",
+                chord.keys.len(),
+                if terminal_action { "lock_workstation" } else { "send_input" },
+                result.is_ok(),
+            ));
+            match result {
                 Ok(()) => {
                     // 锁屏动作走 Win32 API（LockWorkStation），不进输入流：
                     // 没有可观测的注入回声，不得套用 SendInput 分支的判据。
                     if terminal_action {
-                        note_cast_dispatch("lock_api_accepted");
+                        note_dispatch("lock_api_accepted");
                         crate::ble::gatt_note(LOCK_WORKSTATION_INJECT_NOTE.to_owned());
                     } else {
                         let echo = observe_injection_echo(echo_before);
-                        note_cast_dispatch("shortcut_queued");
+                        note_dispatch("shortcut_queued");
                         if chromecast {
                             // The hook counts injections from other processes too.
                             // Never attribute its last key to this remote.
@@ -2229,7 +2243,7 @@ fn fire_gesture(
                     return terminal_action;
                 }
                 Err(error) => {
-                    note_cast_dispatch("shortcut_backend_rejected");
+                    note_dispatch("shortcut_backend_rejected");
                     crate::ble::gatt_note("map_inject result=err error_domain=send_input error_code=injection_failed reason=backend_rejected retryable=true".to_owned());
                     lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
                 }
