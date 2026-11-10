@@ -240,6 +240,28 @@ connections at viewport widths of 1100, 1950 and 1280 pixels. These checks
 cover the editor and layout. Physical delivery of ordinary button reports
 is tracked independently in CAST-12.
 
+The subsequent `5a47241` field retry recorded four submitted shared HID
+reads, zero kernel completions, zero Raw Input packets for the selected
+Chromecast, and zero mapping edges or actions across four launches. The
+same sample contained 28 first-PCM events and a successful mapping save.
+Because this build logs kernel completion before report filtering, the
+failure occurs upstream of the SayAll decoder and mapping engine. This
+evidence leaves the Bluetooth radio and Windows transport boundary open.
+
+A cache-first WinRT query for the selected device found its HID-over-GATT
+service (`0x1812`). The follow-up characteristic query returned `AccessDenied`,
+so this path could not even enumerate the input report characteristic.
+
+For CAST-12, use an isolated Windows test host and capture the selected
+remote's connection with Microsoft's Bluetooth Virtual Sniffer. Correlate
+the connection and input report characteristic before testing one OK press
+and release without dictation, then one after dictation. Record only the
+sanitized report count and whether both edges occurred. If the trace shows
+reports that the public HID interfaces do not deliver, test a read-only
+Google-specific report-layer helper with exact device-instance and handle
+attribution. If the trace has no input notification, check the remote's
+report mode and HID notification subscription before working on a helper.
+
 ## One-shot local Whisper dictation (2026-11-10)
 
 In Reflections, open Local Whisper Transcription, select the verified Whisper
