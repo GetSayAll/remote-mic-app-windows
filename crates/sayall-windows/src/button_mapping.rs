@@ -1752,8 +1752,17 @@ fn handle_edges(
     if edges.is_empty() || !target.is_current() {
         return;
     }
+    let cast_gate = if matches!(target.value.0, Target::Chromecast(_)) {
+        format!(
+            " model=chromecast generation={} suspended={}",
+            target.value.1,
+            lock_state(state).suspended
+        )
+    } else {
+        String::new()
+    };
     crate::ble::gatt_note(format!(
-        "map_edges count={} detail={} gate(sw={} lk={})",
+        "map_edges count={} detail={} gate(sw={} lk={}){cast_gate}",
         edges.len(),
         edges
             .iter()
@@ -2021,9 +2030,18 @@ fn fire_gesture(
     }
     if chromecast {
         crate::ble::gatt_note(format!(
-            "map_gesture model=chromecast button={button:?} trigger={trigger:?}"
+            "map_gesture model=chromecast generation={} button={button:?} trigger={trigger:?}",
+            target.value.1
         ));
     }
+    let note_cast_dispatch = |outcome: &str| {
+        if chromecast {
+            crate::ble::gatt_note(format!(
+                "map_dispatch model=chromecast generation={} button={button:?} trigger={trigger:?} outcome={outcome}",
+                target.value.1
+            ));
+        }
+    };
     let fired = FiredGesture { button, trigger };
     let suspended = {
         let mut state = lock_state(state);
@@ -2036,6 +2054,7 @@ fn fire_gesture(
     }
     // 暂挂（向导第⑥步）：手势仍被观察与广播，但不执行任何注入/动作。
     if suspended {
+        note_cast_dispatch("suspended");
         return false;
     }
 
@@ -2043,6 +2062,7 @@ fn fire_gesture(
     // 小米需要门控进程。Chromecast 从已归因的 Raw Input 触发显式映射，
     // 不假定 Windows 原有按键动作已经被拦截。
     if !mappings.enabled || (!chromecast && !key_gate::is_gate_thread_alive()) {
+        note_cast_dispatch("mapping_disabled");
         if mappings.enabled {
             crate::ble::gatt_note(format!(
                 "map_skip_inject reason=gate_not_alive enabled={} gate_alive=false button={:?} trigger={:?}",
@@ -2064,6 +2084,7 @@ fn fire_gesture(
     let action = effective_action(&mappings, overlay.as_ref(), button, trigger);
     if chromecast && action == ButtonAction::Disabled {
         // Cast never suppresses the native event, so there is nothing to replay.
+        note_cast_dispatch("trigger_unassigned");
         return false;
     }
     if overlay_actions.is_some() && action == ButtonAction::Disabled {
@@ -2189,14 +2210,26 @@ fn fire_gesture(
                     // 锁屏动作走 Win32 API（LockWorkStation），不进输入流：
                     // 没有可观测的注入回声，不得套用 SendInput 分支的判据。
                     if terminal_action {
+                        note_cast_dispatch("lock_api_accepted");
                         crate::ble::gatt_note(LOCK_WORKSTATION_INJECT_NOTE.to_owned());
                     } else {
                         let echo = observe_injection_echo(echo_before);
-                        crate::ble::gatt_note(shortcut_injection_note(echo));
+                        note_cast_dispatch("shortcut_queued");
+                        if chromecast {
+                            // The hook counts injections from other processes too.
+                            // Never attribute its last key to this remote.
+                            crate::ble::gatt_note(format!(
+                                "map_inject model=chromecast result=queued global_hook_echo_delta={}",
+                                echo.count
+                            ));
+                        } else {
+                            crate::ble::gatt_note(shortcut_injection_note(echo));
+                        }
                     }
                     return terminal_action;
                 }
                 Err(error) => {
+                    note_cast_dispatch("shortcut_backend_rejected");
                     crate::ble::gatt_note("map_inject result=err error_domain=send_input error_code=injection_failed reason=backend_rejected retryable=true".to_owned());
                     lock_state(state).last_error = Some(format!("注入快捷键失败：{error}"));
                 }
@@ -2737,6 +2770,19 @@ mod tests {
                 keys: vec![KeyCode::LeftControl, KeyCode::Enter],
             }],
         );
+
+        runtime.set_chromecast_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
+        tap();
+        assert!(wait_until(
+            || injector.taps.lock().unwrap().len() == 5,
+            Duration::from_secs(2),
+        ));
+        assert_eq!(
+            injector.taps.lock().unwrap()[4],
+            KeyChord {
+                keys: vec![KeyCode::Enter]
+            },
+        );
     }
 
     #[cfg(windows)]
@@ -2797,6 +2843,10 @@ mod tests {
         send(release);
         assert!(wait_until(
             || edges.lock().unwrap().len() == 2,
+            Duration::from_secs(2),
+        ));
+        assert!(wait_until(
+            || injector.taps.lock().unwrap().len() == 1,
             Duration::from_secs(2),
         ));
         assert!(snapshot.lock().unwrap().active_buttons.is_empty());

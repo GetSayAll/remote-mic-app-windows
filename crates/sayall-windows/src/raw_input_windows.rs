@@ -269,6 +269,18 @@ fn wait_for_thread(control: &mut ListenerControl, timeout: Duration) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CastRawInputCounters {
+    accepted_packets: u64,
+    rejected_paths: u64,
+    hid_reports: u64,
+    decode_failures: u64,
+    keyboard_unmapped: u64,
+    engine_forwarded: u64,
+    engine_closed: u64,
+    last_report: Option<(u8, usize)>,
+}
+
 struct ListenerContext {
     selected_path: String,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
@@ -283,6 +295,8 @@ struct ListenerContext {
     cast_generation: Option<u64>,
     cast_hid_descriptor: Option<(HANDLE, ChromecastHidDescriptor)>,
     cast_report_rejection_logged: bool,
+    cast_input: CastRawInputCounters,
+    cast_last_audit: Option<(usize, CastRawInputCounters)>,
 }
 
 impl ListenerContext {
@@ -292,6 +306,56 @@ impl ListenerContext {
             self.cast_collections.clear();
             self.cast_hid_descriptor = None;
             self.cast_report_rejection_logged = false;
+            self.cast_input = CastRawInputCounters::default();
+            self.cast_last_audit = None;
+        }
+    }
+
+    fn audit_cast_input(&mut self, generation: u64, matched: usize) {
+        let audit = (matched, self.cast_input);
+        if self.cast_last_audit == Some(audit) {
+            return;
+        }
+        self.cast_last_audit = Some(audit);
+        let CastRawInputCounters {
+            accepted_packets,
+            rejected_paths,
+            hid_reports,
+            decode_failures,
+            keyboard_unmapped,
+            engine_forwarded,
+            engine_closed,
+            last_report,
+        } = self.cast_input;
+        // Record a zero-packet baseline and changes only. Enumeration alone
+        // cannot tell whether Windows ever delivered a button report.
+        let report = last_report.map_or_else(
+            || "report_id=none report_bytes=0".to_owned(),
+            |(id, bytes)| format!("report_id={id} report_bytes={bytes}"),
+        );
+        crate::ble::gatt_note(format!(
+            "raw_input feature=chromecast action=button_flow generation={generation} matched={matched} accepted_packets={accepted_packets} rejected_paths={rejected_paths} hid_reports={hid_reports} decode_failures={decode_failures} keyboard_unmapped={keyboard_unmapped} engine_forwarded={engine_forwarded} engine_closed={engine_closed} {report}"
+        ));
+    }
+
+    fn forward_cast_button(
+        &mut self,
+        address: u64,
+        target_generation: u64,
+        input: ChromecastInput,
+    ) {
+        if self
+            .engine
+            .send(EngineMessage::Chromecast {
+                address,
+                target_generation,
+                input,
+            })
+            .is_ok()
+        {
+            self.cast_input.engine_forwarded += 1;
+        } else {
+            self.cast_input.engine_closed += 1;
         }
     }
 
@@ -606,6 +670,8 @@ fn run_listener(
             cast_generation: None,
             cast_hid_descriptor: None,
             cast_report_rejection_logged: false,
+            cast_input: CastRawInputCounters::default(),
+            cast_last_audit: None,
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -915,6 +981,7 @@ fn audit_binding() {
                 context.cast_collection_removed(address, generation);
             }
             context.cast_collections = present;
+            context.audit_cast_input(generation, paths.len());
         }
         let still_bound = !context.selected_path.is_empty()
             && paths
@@ -1063,6 +1130,12 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
             // 区分开的唯一线索（2026-09-18 现场正是无法区分这两者才迟迟定不了位）。
             if crate::raw_input::device_path_matches_supported_remote(&normalized) {
+                if matches!(target, Target::Chromecast(Some(_)))
+                    && device_path_matches_chromecast_remote(&normalized)
+                {
+                    context.set_cast_generation(target_generation);
+                    context.cast_input.rejected_paths += 1;
+                }
                 let first = {
                     let mut state = context.snapshot.lock().unwrap();
                     state.stale_remote_event_count += 1;
@@ -1095,20 +1168,38 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
 
         if let ReportRoute::Chromecast(address) = route {
             context.set_cast_generation(target_generation);
+            context.cast_input.accepted_packets += 1;
+            if context.cast_input.accepted_packets == 1 {
+                let packet_type = match header.dwType {
+                    kind if kind == RIM_TYPEHID.0 => "hid",
+                    kind if kind == RIM_TYPEKEYBOARD.0 => "keyboard",
+                    _ => "other",
+                };
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=first_button_packet generation={target_generation} packet_type={packet_type}"
+                ));
+            }
             context.cast_collections.insert(normalized);
             if header.dwType == RIM_TYPEHID.0 {
-                for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
+                let reports = parse_raw_hid_body(body).map_err(|error| {
+                    context.cast_input.decode_failures += 1;
+                    error.to_string()
+                })?;
+                for report in reports {
                     let report_id = report[0];
+                    context.cast_input.hid_reports += 1;
+                    context.cast_input.last_report = Some((report_id, report.len()));
                     match context.decode_cast_hid(header.hDevice, report) {
                         Ok(buttons) => {
                             context.clear_cast_decode_error();
-                            let _ = context.engine.send(EngineMessage::Chromecast {
+                            context.forward_cast_button(
                                 address,
                                 target_generation,
-                                input: ChromecastInput::Hid { report_id, buttons },
-                            });
+                                ChromecastInput::Hid { report_id, buttons },
+                            );
                         }
                         Err(error) => {
+                            context.cast_input.decode_failures += 1;
                             context.record_cast_report_rejection(report_id, report.len(), error);
                             if is_descriptor_cast_report(report) {
                                 // The missing state could be the release. Clear
@@ -1123,12 +1214,17 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                     }
                 }
             } else if header.dwType == RIM_TYPEKEYBOARD.0 {
-                if let Some(edge) = decode_keyboard(body)?.chromecast_edge() {
-                    let _ = context.engine.send(EngineMessage::Chromecast {
+                let event = decode_keyboard(body).inspect_err(|_| {
+                    context.cast_input.decode_failures += 1;
+                })?;
+                if let Some(edge) = event.chromecast_edge() {
+                    context.forward_cast_button(
                         address,
                         target_generation,
-                        input: ChromecastInput::Keyboard(edge),
-                    });
+                        ChromecastInput::Keyboard(edge),
+                    );
+                } else {
+                    context.cast_input.keyboard_unmapped += 1;
                 }
             }
             // This device never enters Xiaomi's F5 or native key gate paths.
@@ -1338,6 +1434,8 @@ pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
         cast_generation: None,
         cast_hid_descriptor: None,
         cast_report_rejection_logged: false,
+        cast_input: CastRawInputCounters::default(),
+        cast_last_audit: None,
     };
     [press, release].map(|report| {
         let mut body = [0; 8 + CAST_DESCRIPTOR_REPORT_BYTES];
