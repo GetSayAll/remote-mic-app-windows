@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="508" viewBox="0 0 250 508">
+  <!-- Original schematic of the Chromecast Voice Remote, with a right-side volume rocker. -->
+  <defs>
+    <linearGradient id="shell" x2="1" y2="0">
+      <stop stop-color="#e6e4de"/>
+      <stop offset=".55" stop-color="#faf9f5"/>
+      <stop offset="1" stop-color="#e7e5df"/>
+    </linearGradient>
+  </defs>
+  <rect x="193" y="166" width="9" height="67" rx="4.5" fill="#d1cec6" stroke="#bdbab1"/>
+  <path d="M194 200h7" stroke="#bdbab1"/>
+  <rect x="53" y="16" width="144" height="476" rx="69" fill="url(#shell)" stroke="#c1beb5" stroke-width="2"/>
+  <circle cx="125" cy="92" r="48" fill="#dad8d1" stroke="#c4c1b8"/>
+  <circle cx="125" cy="92" r="25" fill="#f5f3ed" stroke="#c9c6bd"/>
+  <g fill="#dfddd6" stroke="#c6c3ba">
+    <circle cx="100" cy="173" r="19"/><circle cx="150" cy="173" r="19"/>
+    <circle cx="100" cy="234" r="19"/><circle cx="150" cy="234" r="19"/>
+    <rect x="79" y="283" width="42" height="34" rx="17"/>
+    <rect x="129" y="283" width="42" height="34" rx="17"/>
+    <circle cx="100" cy="381" r="13"/><circle cx="150" cy="381" r="13"/>
+  </g>
+  <g fill="none" stroke="#626059" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m103 166-7 7 7 7m-7-7h12"/>
+    <path d="M150 164v9m-5-5v5a5 5 0 0 0 10 0v-5m-5 10v4"/>
+    <path d="m93 234 7-7 7 7v8H93z"/>
+    <path d="M141 232h4l5-4v12l-5-4h-4zM154 231l6 6m0-6-6 6"/>
+    <path d="M100 374v7m-4-4a6 6 0 1 0 8 0"/>
+    <path d="M145 376h11v10h-11m-3-5h8m-3-3 3 3-3 3"/>
+  </g>
+  <g fill="#626059" text-anchor="middle" font-family="sans-serif" font-size="8" font-weight="700">
+    <text x="100" y="303">YouTube</text>
+    <text x="150" y="303">NETFLIX</text>
+  </g>
+  <circle cx="125" cy="381" r="1.6" fill="#77736b"/>
+  <circle cx="125" cy="408" r="2.6" fill="#c0bdb4"/>
+</svg>

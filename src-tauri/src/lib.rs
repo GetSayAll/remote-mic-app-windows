@@ -4,14 +4,14 @@ use sayall_windows::button_mapping::{ButtonEdgeCallback, ButtonGestureCallback};
 use sayall_windows::raw_input::{RawInputSnapshot, RemoteButton};
 use sayall_windows::rc003_bridge::{BridgePhase, BridgeSnapshot};
 use sayall_windows::send_input::{
-    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, SendInputSnapshot,
+    ButtonAction, ButtonMappings, ButtonTrigger, KeyChord, KeyCode, SendInputSnapshot,
 };
 use sayall_windows::{
-    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, ImeStatus, PairedRemote, PlatformSnapshot,
-    WindowsPlatform,
+    AudioEndpoint, AudioSnapshot, ConnectionPhase, ConnectionSnapshot, ImeStatus, PairedRemote,
+    PlatformSnapshot, RemoteModel, WindowsPlatform,
 };
 use serde::{Deserialize, Serialize};
-use settings::SettingsStore;
+use settings::{ButtonMappingScope, SettingsStore};
 #[cfg(windows)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +38,43 @@ mod startup;
 mod transcripts;
 mod updater;
 mod usage;
+mod whisper;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LocalWhisperFile {
+    Executable,
+    Model,
+    Audio,
+}
+
+#[tauri::command]
+async fn pick_local_whisper_file(
+    window: tauri::WebviewWindow,
+    kind: LocalWhisperFile,
+) -> Result<Option<String>, String> {
+    use sayall_windows::file_dialog::{pick_whisper_input_path, WhisperInputFile};
+
+    if window.label() != "main" {
+        return Err("whisper_access_denied".to_owned());
+    }
+    let kind = match kind {
+        LocalWhisperFile::Executable => WhisperInputFile::Executable,
+        LocalWhisperFile::Model => WhisperInputFile::Model,
+        LocalWhisperFile::Audio => WhisperInputFile::Audio,
+    };
+    let selected = tauri::async_runtime::spawn_blocking(move || pick_whisper_input_path(kind))
+        .await
+        .map_err(|_| "whisper_picker_failed".to_owned())?
+        .map_err(|_| "whisper_picker_failed".to_owned())?;
+    selected
+        .map(|path| {
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| "whisper_invalid_path".to_owned())
+        })
+        .transpose()
+}
 
 use diagnostics::DiagnosticReport;
 use membership::{
@@ -114,6 +151,36 @@ fn main_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
 /// 取主窗口的 webview（`with_webview` 这类 webview 级操作专用）。
 fn main_webview(app: &tauri::AppHandle) -> Option<tauri::Webview> {
     app.get_webview(MAIN_WINDOW_LABEL)
+}
+
+fn main_ipc_state_managed(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppState>().is_some()
+        && app
+            .try_state::<recommendations::RecommendationsState>()
+            .is_some()
+        && app.try_state::<whisper::WhisperRuntime>().is_some()
+}
+
+fn create_configured_main_window(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    // Tauri creates automatic windows before setup. A hidden WebView can
+    // already run JavaScript, so the main page must be created manually.
+    if !main_ipc_state_managed(app) {
+        return Err(std::io::Error::other("main WebView IPC state is not registered").into());
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == MAIN_WINDOW_LABEL)
+        .ok_or_else(|| std::io::Error::other("main WebView configuration is missing"))?;
+    if config.create || config.visible {
+        return Err(
+            std::io::Error::other("main WebView must be created manually and hidden").into(),
+        );
+    }
+    tauri::WebviewWindowBuilder::from_config(app, config)?.build()?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -1140,7 +1207,9 @@ async fn get_diagnostic_report(app: tauri::AppHandle) -> DiagnosticReport {
     let send_input_for_task = send_input.clone();
     let app_version_for_task = app_version.clone();
     match tauri::async_runtime::spawn_blocking(move || {
-        let tool = load_voice_input_tool(&settings);
+        let tool = load_voice_input_tool(&settings).filter(|tool| {
+            voice_input_tool_supported(Some(*tool), platform_for_task.connection.remote_model)
+        });
         DiagnosticReport::capture(
             &app_version_for_task,
             &platform_for_task,
@@ -1665,6 +1734,13 @@ async fn enable_rc003_capture(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<rc003_task::TaskStatus, String> {
+    if state.platform.connection_snapshot().remote_model == sayall_windows::RemoteModel::Chromecast
+    {
+        sayall_windows::gatt_note(
+            "enhanced_capture phase=rejected reason=chromecast_not_supported".to_owned(),
+        );
+        return Err("谷歌遥控器暂不支持全按键支持".to_owned());
+    }
     // 尝试与结局都落诊断日志：「UAC 选了否，开关却变成开」这类争议
     // 只能靠这里的记录裁决（2026-09-24 真机争议：日志证明当时 UAC 是
     // 被允许的——任务重建于同一秒，没有日志就只能各说各话）。
@@ -2423,7 +2499,9 @@ fn rc003_auto_trigger_reconcile(
         let enabled = settings
             .load()
             .map(|settings| settings.rc003_capture_enabled)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && platform.connection_snapshot().remote_model
+                != sayall_windows::RemoteModel::Chromecast;
         let snapshot = platform.rc003_bridge_snapshot();
         // 「助手反复被接受却一次没接管」要在这里推进，而不是放在 Connected 分支：
         // 助手每轮活不过几秒时，对账多数轮次根本观察不到 Connected（快照从
@@ -2943,29 +3021,70 @@ fn end_key_observation(window_id: u64, state: tauri::State<'_, AppState>) -> Opt
     count
 }
 
+fn button_mappings_for_scope(
+    platform: &dyn PlatformRuntime,
+    scope: ButtonMappingScope,
+) -> ButtonMappings {
+    match scope {
+        ButtonMappingScope::Xiaomi => platform.button_mappings(),
+        ButtonMappingScope::Chromecast => platform.chromecast_button_mappings(),
+    }
+}
+
+fn button_mapping_model(scope: ButtonMappingScope) -> &'static str {
+    match scope {
+        ButtonMappingScope::Xiaomi => "xiaomi",
+        ButtonMappingScope::Chromecast => "chromecast",
+    }
+}
+
+fn apply_button_mappings_for_scope(
+    platform: &dyn PlatformRuntime,
+    scope: ButtonMappingScope,
+    mappings: &ButtonMappings,
+) {
+    match scope {
+        ButtonMappingScope::Xiaomi => platform.set_button_mappings(mappings.clone()),
+        ButtonMappingScope::Chromecast => platform.set_chromecast_button_mappings(mappings.clone()),
+    }
+}
+
 #[tauri::command]
-fn get_button_mappings(state: tauri::State<'_, AppState>) -> ButtonMappings {
-    state.platform.button_mappings()
+fn get_button_mappings(
+    remote_model: Option<RemoteModel>,
+    state: tauri::State<'_, AppState>,
+) -> ButtonMappings {
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let mappings = button_mappings_for_scope(state.platform.as_ref(), scope);
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=button_mapping action=read_runtime phase=completed terminal_result=passed remote_model={} {}",
+        button_mapping_model(scope),
+        button_mapping_log_summary(&mappings),
+    ));
+    mappings
 }
 
 #[tauri::command]
 async fn save_button_mappings(
     mappings: ButtonMappings,
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
     let started = std::time::Instant::now();
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let model = button_mapping_model(scope);
     let summary = button_mapping_log_summary(&mappings);
     sayall_windows::gatt_note(format!(
-        "shortcut_settings feature=button_mapping action=save phase=requested {summary}"
+        "shortcut_settings feature=button_mapping action=save phase=requested remote_model={model} {summary}"
     ));
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
     let result =
         match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-            let saved = settings.save_button_mappings(mappings)?;
             // 持久化成功后热加载到引擎与门控（保存即生效）。
-            platform.set_button_mappings(saved.clone());
-            Ok(saved)
+            settings.save_button_mappings_for_scope(scope, mappings, |saved| {
+                apply_button_mappings_for_scope(platform.as_ref(), scope, saved);
+            })
         })
         .await
         {
@@ -2974,12 +3093,12 @@ async fn save_button_mappings(
         };
     sayall_windows::gatt_note(match &result {
         Ok(saved) => format!(
-            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=passed {} elapsed_ms={}",
+            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=passed remote_model={model} {} elapsed_ms={}",
             button_mapping_log_summary(saved),
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=failed error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=button_mapping action=save phase=completed terminal_result=failed remote_model={model} error_domain=settings error_code=save_failed reason=validation_or_persistence_failed retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
         ),
     });
@@ -2988,6 +3107,7 @@ async fn save_button_mappings(
 
 #[tauri::command]
 async fn reset_button_mappings(
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ButtonMappings, String> {
     let started = std::time::Instant::now();
@@ -2996,11 +3116,12 @@ async fn reset_button_mappings(
     );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
     let result =
         match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-            let saved = settings.save_button_mappings(ButtonMappings::default())?;
-            platform.set_button_mappings(saved.clone());
-            Ok(saved)
+            settings.save_button_mappings_for_scope(scope, ButtonMappings::default(), |saved| {
+                apply_button_mappings_for_scope(platform.as_ref(), scope, saved);
+            })
         })
         .await
         {
@@ -3023,6 +3144,7 @@ async fn reset_button_mappings(
 
 #[tauri::command]
 async fn export_button_mapping_configuration(
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
     let started = std::time::Instant::now();
@@ -3030,12 +3152,13 @@ async fn export_button_mapping_configuration(
         "shortcut_settings feature=button_mapping action=export phase=requested".to_owned(),
     );
     let settings = state.settings.clone();
-    let mappings = state.platform.button_mappings();
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let mappings = button_mappings_for_scope(state.platform.as_ref(), scope);
     let result = match tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let Some(path) = sayall_windows::file_dialog::pick_button_mapping_export_path()? else {
             return Ok(false);
         };
-        settings.export_button_mappings(&path, mappings)?;
+        settings.export_button_mappings_for_scope(scope, &path, mappings)?;
         Ok(true)
     })
     .await
@@ -3062,6 +3185,7 @@ async fn export_button_mapping_configuration(
 
 #[tauri::command]
 async fn import_button_mapping_configuration(
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<ButtonMappings>, String> {
     let started = std::time::Instant::now();
@@ -3070,14 +3194,16 @@ async fn import_button_mapping_configuration(
     );
     let settings = state.settings.clone();
     let platform = Arc::clone(&state.platform);
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
     let result = match tauri::async_runtime::spawn_blocking(
         move || -> Result<Option<ButtonMappings>, String> {
             let Some(path) = sayall_windows::file_dialog::pick_button_mapping_import_path()? else {
                 return Ok(None);
             };
-            let imported = settings.import_button_mappings(&path)?;
             // 文件完整校验并持久化成功后才热加载，失败时运行态保持原值。
-            platform.set_button_mappings(imported.clone());
+            let imported = settings.import_button_mappings_for_scope(scope, &path, |imported| {
+                apply_button_mappings_for_scope(platform.as_ref(), scope, imported);
+            })?;
             Ok(Some(imported))
         },
     )
@@ -3179,11 +3305,22 @@ async fn macro_references(
         move || -> Result<sayall_windows::send_input::MacroReferenceReport, String> {
             let library = settings.load_combined_actions()?;
             let mappings = settings.load_button_mappings()?;
-            Ok(sayall_windows::send_input::collect_macro_references(
+            let cast_mappings =
+                settings.load_button_mappings_for_scope(ButtonMappingScope::Chromecast)?;
+            let mut report = sayall_windows::send_input::collect_macro_references(
                 &macro_id,
                 &library.definitions,
                 &mappings,
-            ))
+            );
+            report.buttons.extend(
+                sayall_windows::send_input::collect_macro_references(
+                    &macro_id,
+                    &[],
+                    &cast_mappings,
+                )
+                .buttons,
+            );
+            Ok(report)
         },
     )
     .await
@@ -3214,15 +3351,13 @@ async fn delete_macro(
             let saved = settings.save_combined_actions(current)?;
             platform.set_macro_library(saved.clone());
             // 按键绑定联动：引用被删动作的槽位一律改成「未设置」（含级联删除的动作）。
-            let mut mappings = settings.load_button_mappings()?;
             let mut cleared = 0usize;
-            for removed in &outcome.removed_macro_ids {
-                cleared +=
-                    sayall_windows::send_input::clear_macro_references(&mut mappings, removed);
-            }
-            if cleared > 0 {
-                let saved_mappings = settings.save_button_mappings(mappings)?;
-                platform.set_button_mappings(saved_mappings);
+            for scope in [ButtonMappingScope::Xiaomi, ButtonMappingScope::Chromecast] {
+                cleared += settings.clear_button_mapping_macro_references(
+                    scope,
+                    &outcome.removed_macro_ids,
+                    |mappings| apply_button_mappings_for_scope(platform.as_ref(), scope, mappings),
+                )?;
             }
             let report = MacroDeleteResult {
                 library: saved,
@@ -3450,7 +3585,12 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut macro_count = 0_usize;
     let mut disabled_count = 0_usize;
     for actions in mappings.actions.values() {
-        for action in [&actions.single, &actions.double, &actions.long] {
+        for action in [
+            &actions.single,
+            &actions.double,
+            &actions.triple,
+            &actions.long,
+        ] {
             match action {
                 ButtonAction::Shortcut { .. } => shortcut_count += 1,
                 ButtonAction::OpenApp { .. } => open_app_count += 1,
@@ -3473,72 +3613,93 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     )
 }
 
+fn connected_chromecast_token(snapshot: &ConnectionSnapshot) -> Option<&str> {
+    if snapshot.remote_model != RemoteModel::Chromecast
+        || !matches!(
+            snapshot.phase,
+            ConnectionPhase::Ready | ConnectionPhase::Streaming | ConnectionPhase::Draining
+        )
+    {
+        return None;
+    }
+    snapshot.remote_token.as_deref()
+}
+
 #[tauri::command]
 async fn test_button_mapping(
     button: RemoteButton,
     trigger: ButtonTrigger,
+    remote_model: Option<RemoteModel>,
     state: tauri::State<'_, AppState>,
 ) -> Result<SendInputSnapshot, String> {
-    let action = state.platform.button_mappings().action_for(button, trigger);
     let platform = Arc::clone(&state.platform);
-    match action {
-        ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
-            tauri::async_runtime::spawn_blocking(move || platform.test_mouse_action(action))
-                .await
-                .map_err(|error| format!("测试鼠标任务失败：{error}"))?
-                .map_err(|error| error.to_string())
+    let scope = ButtonMappingScope::from_remote_model(remote_model);
+    let snapshot = platform.connection_snapshot();
+    let expected_token = if scope == ButtonMappingScope::Chromecast {
+        if !button.is_chromecast_mappable() {
+            return Err("当前 Chromecast 遥控器没有这个按键。".to_owned());
         }
-        ButtonAction::Scroll { direction, steps } => {
-            tauri::async_runtime::spawn_blocking(move || platform.test_scroll(direction, steps))
-                .await
-                .map_err(|error| format!("测试滚轮任务失败：{error}"))?
-                .map_err(|error| error.to_string())
+        Some(
+            connected_chromecast_token(&snapshot)
+                .ok_or_else(|| "请连接当前 Chromecast 遥控器后再测试。".to_owned())?
+                .to_owned(),
+        )
+    } else {
+        if snapshot.remote_model == RemoteModel::Chromecast {
+            return Err("遥控器已切换，请重新打开对应型号的按键配置。".to_owned());
         }
-        ButtonAction::Shortcut { chord } => {
-            tauri::async_runtime::spawn_blocking(move || platform.test_shortcut(chord))
-                .await
-                .map_err(|error| format!("测试快捷键任务失败：{error}"))?
-                .map_err(|error| error.to_string())
+        None
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = platform.connection_snapshot();
+        if let Some(token) = expected_token {
+            if connected_chromecast_token(&current) != Some(token.as_str()) {
+                return Err("遥控器已断开或切换，请重新测试。".to_owned());
+            }
+        } else if current.remote_model == RemoteModel::Chromecast {
+            return Err("遥控器已切换，请重新打开对应型号的按键配置。".to_owned());
         }
-        ButtonAction::OpenApp { target } => tauri::async_runtime::spawn_blocking(move || {
-            platform
+        let action = button_mappings_for_scope(platform.as_ref(), scope).action_for(button, trigger);
+        match action {
+            ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
+                platform.test_mouse_action(action).map_err(|error| error.to_string())
+            }
+            ButtonAction::Scroll { direction, steps } => {
+                platform.test_scroll(direction, steps).map_err(|error| error.to_string())
+            }
+            ButtonAction::Shortcut { chord } => {
+                platform.test_shortcut(chord).map_err(|error| error.to_string())
+            }
+            ButtonAction::OpenApp { target } if scope == ButtonMappingScope::Chromecast => {
+                platform.test_chromecast_app_focus(target)
+                    .map(|_| platform.send_input_snapshot())
+                    .map_err(|error| error.to_string())
+            }
+            ButtonAction::OpenApp { target } => platform
                 .launch_app(&target)
                 .map(|_| SendInputSnapshot::default())
-        })
-        .await
-        .map_err(|error| format!("测试打开应用任务失败：{error}"))?
-        .map_err(|error| error.to_string()),
-        ButtonAction::FocusInput => tauri::async_runtime::spawn_blocking(move || {
-            // 受理后返回平台的 SendInput 快照（与快捷键/滚轮测试同口径），
-            // 便于 UI 与仿真断言「动作确实走到了聚焦受理路径」。
-            platform
+                .map_err(|error| error.to_string()),
+            ButtonAction::FocusInput => platform
                 .test_focus_input()
                 .map(|_| platform.send_input_snapshot())
-        })
-        .await
-        .map_err(|error| format!("测试聚焦输入框任务失败：{error}"))?
-        .map_err(|error| error.to_string()),
-        ButtonAction::RunMacro { macro_id, .. } => {
-            // 「测试」= 按最新已保存版本执行一次组合动作（异步受理，终态见
-            // 组合动作页的状态行与 `map_macro_*` 日志）。
-            tauri::async_runtime::spawn_blocking(move || {
+                .map_err(|error| error.to_string()),
+            ButtonAction::RunMacro { macro_id, .. } => {
                 platform
                     .start_macro(&macro_id)
                     .map(|_| platform.send_input_snapshot())
-            })
-            .await
-            .map_err(|error| format!("测试组合动作任务失败：{error}"))?
-            .map_err(|error| error.to_string())
+            }
+            ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
+            ButtonAction::OpenCommonPhrases => {
+                Err("「打开常用语」不在试一下范围内：请绑定按键后到目标应用里使用".to_owned())
+            }
+            ButtonAction::AppSwitcher => Err(
+                "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
+                    .to_owned(),
+            ),
         }
-        ButtonAction::Disabled => Err("该触发方式当前未配置动作".to_owned()),
-        ButtonAction::OpenCommonPhrases => {
-            Err("「打开常用语」不在试一下范围内：请绑定按键后到目标应用里使用".to_owned())
-        }
-        ButtonAction::AppSwitcher => Err(
-            "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
-                .to_owned(),
-        ),
-    }
+    })
+    .await
+    .map_err(|error| format!("测试按键映射任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -3753,6 +3914,11 @@ async fn set_voice_hold_hotkey(
     hotkey: Option<KeyChord>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<KeyChord>, String> {
+    ensure_voice_hotkey_supported(
+        hotkey.as_ref(),
+        state.platform.connection_snapshot().remote_model,
+        "save",
+    )?;
     let started = std::time::Instant::now();
     let enabled = hotkey.is_some();
     let key_count = hotkey.as_ref().map(|chord| chord.keys.len()).unwrap_or(0);
@@ -3817,6 +3983,11 @@ async fn set_voice_input_tool(
     tool: Option<VoiceInputTool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<VoiceInputTool>, String> {
+    ensure_voice_input_tool_supported(
+        tool,
+        state.platform.connection_snapshot().remote_model,
+        "save",
+    )?;
     let started = std::time::Instant::now();
     let settings = state.settings.clone();
     let platform = state.platform.clone();
@@ -3924,6 +4095,51 @@ fn load_voice_input_tool(settings: &SettingsStore) -> Option<VoiceInputTool> {
         .and_then(|settings| settings.voice_input_tool)
 }
 
+fn voice_input_tool_supported(
+    tool: Option<VoiceInputTool>,
+    model: sayall_windows::RemoteModel,
+) -> bool {
+    model != sayall_windows::RemoteModel::Chromecast
+        || matches!(tool, None | Some(VoiceInputTool::Wechat))
+}
+
+fn voice_hotkey_supported(hotkey: Option<&KeyChord>, model: sayall_windows::RemoteModel) -> bool {
+    model != sayall_windows::RemoteModel::Chromecast
+        || hotkey.is_some_and(|chord| {
+            chord.keys.len() == 2
+                && chord.keys.contains(&KeyCode::LeftControl)
+                && chord.keys.contains(&KeyCode::LeftWindows)
+        })
+}
+
+fn ensure_voice_hotkey_supported(
+    hotkey: Option<&KeyChord>,
+    model: sayall_windows::RemoteModel,
+    action: &'static str,
+) -> Result<(), String> {
+    if voice_hotkey_supported(hotkey, model) {
+        return Ok(());
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_hold action={action} phase=completed terminal_result=failed error_domain=compatibility error_code=chromecast_wetype_hotkey_required reason=voice_hotkey_unavailable retryable=false"
+    ));
+    Err("当前遥控器请使用微信输入法和默认语音键。".to_owned())
+}
+
+fn ensure_voice_input_tool_supported(
+    tool: Option<VoiceInputTool>,
+    model: sayall_windows::RemoteModel,
+    action: &'static str,
+) -> Result<(), String> {
+    if voice_input_tool_supported(tool, model) {
+        return Ok(());
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_settings feature=voice_input_tool action={action} phase=completed terminal_result=failed error_domain=compatibility error_code=chromecast_wetype_required reason=input_tool_unavailable retryable=false"
+    ));
+    Err("当前遥控器请使用微信输入法和默认语音键。".to_owned())
+}
+
 /// 输入法状态日志（`ime_status`，AGENTS.md「功能点自带日志」口径）：格式与字段
 /// 由 `sayall_windows::ime_status_log_line` 单一来源（含单测），这里只负责落盘。
 fn log_ime_status(
@@ -3947,12 +4163,14 @@ fn log_ime_status(
 /// 任何失败都降级成 `ImeStatus::unavailable()`，命令不报错（界面 fail-open）。
 async fn ime_status_command(
     settings: SettingsStore,
+    model: sayall_windows::RemoteModel,
     action: &'static str,
     query: fn(Option<VoiceInputTool>) -> ImeStatus,
 ) -> ImeStatus {
     let started = std::time::Instant::now();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let tool = load_voice_input_tool(&settings);
+        let tool = load_voice_input_tool(&settings)
+            .filter(|tool| voice_input_tool_supported(Some(*tool), model));
         (tool, query(tool))
     })
     .await;
@@ -3980,6 +4198,7 @@ async fn ime_status_command(
 async fn get_ime_status(state: tauri::State<'_, AppState>) -> Result<ImeStatus, String> {
     Ok(ime_status_command(
         state.settings.clone(),
+        state.platform.connection_snapshot().remote_model,
         "queried",
         sayall_windows::ime_status_for,
     )
@@ -4057,6 +4276,9 @@ async fn stage_onboarding_voice_binding(
     let settings = state.settings.clone();
     let platform = state.platform.clone();
     match tauri::async_runtime::spawn_blocking(move || {
+        let model = platform.connection_snapshot().remote_model;
+        ensure_voice_input_tool_supported(Some(tool), model, "stage_binding")?;
+        ensure_voice_hotkey_supported(hotkey.as_ref(), model, "stage_binding")?;
         let staged = settings.stage_onboarding_voice_binding(tool, hotkey.clone())?;
         platform.set_voice_input_tool(Some(tool));
         platform.set_voice_hold_hotkey(hotkey);
@@ -5265,6 +5487,9 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     let started = std::time::Instant::now();
     // 按键宿主随退出收尾关闭（幂等；宿主自身 EOF 兜底同样保证不驻留）。
     sayall_windows::key_host::shutdown_global();
+    if let Some(whisper) = app.try_state::<whisper::WhisperRuntime>() {
+        whisper.cancel_for_exit();
+    }
     // 会员组件收尾（2026-10-15）：私有实现在这里释放网络与凭据刷新任务，
     // 公开实现是 no-op。
     app.state::<AppState>().membership.shutdown();
@@ -5378,18 +5603,29 @@ fn spawn_second_instance_listener(app: tauri::AppHandle) {
     }
 }
 
+const CHROMECAST_PREVIEW_IDENTIFIER: &str = "app.getsayall.remote-mic.windows.chromecast-test";
+
 pub fn run() {
+    let context = tauri::generate_context!();
+    let chromecast_preview = context.config().identifier == CHROMECAST_PREVIEW_IDENTIFIER;
+    // A diagnostic relaunch can keep a completed preview in the tray without
+    // changing the user's saved startup preference.
+    let diagnostic_background =
+        chromecast_preview && std::env::args_os().any(|arg| arg == "--diagnostic-background");
     let log_path = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("SayAll")
+        .join(if chromecast_preview {
+            "SayAllChromecastPreview"
+        } else {
+            "SayAll"
+        })
         .join("Logs")
         .join("sayall-diagnostic.log");
     // 版本号唯一来源是 tauri.conf.json 的 `version`（安装包名、exe 版本资源、关于页
     // 显示都取自它）。这里提前构建 context 并读同一个 package_info，日志里的
     // app_version 才与用户安装的版本严格一致（此前用编译期 CARGO_PKG_VERSION，
     // Cargo crate 版本是占位值 0.0.0，会写出与实际安装版本无关的版本号）。
-    let context = tauri::generate_context!();
     let log_ready = sayall_windows::initialize_diagnostic_log(
         log_path,
         sayall_windows::DiagnosticLogMetadata {
@@ -5459,6 +5695,26 @@ pub fn run() {
                 // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=
                 // ERROR_ALREADY_EXISTS（不是失败）；其余残留错误值无意义。
                 if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                    if chromecast_preview {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            MessageBoxW, MB_ICONINFORMATION, MB_OK,
+                        };
+                        sayall_windows::gatt_note(
+                            "app_lifecycle event=single_instance phase=completed terminal_result=failed error_domain=process error_code=already_running reason=existing_instance retryable=true show_request_result=skipped_preview".to_owned(),
+                        );
+                        unsafe {
+                            let _ = CloseHandle(handle);
+                            if !diagnostic_background {
+                                let _ = MessageBoxW(
+                                    None,
+                                    w!("请从托盘正常退出正在运行的 SayAll，然后重新打开预览版。\nQuit the running SayAll from the tray, then open this preview again."),
+                                    w!("SayAll Chromecast Preview"),
+                                    MB_OK | MB_ICONINFORMATION,
+                                );
+                            }
+                        }
+                        return;
+                    }
                     // 请求已运行实例把主窗口显示出来（命名事件由对端的
                     // `spawn_second_instance_listener` 等待；对端是未带此功能的
                     // 旧版本时请求失败，如实记录但按原样退出）。
@@ -5509,12 +5765,13 @@ pub fn run() {
                 tauri::webview::PageLoadEvent::Started => "started",
                 tauri::webview::PageLoadEvent::Finished => "finished",
             };
+            let main = webview.label() == MAIN_WINDOW_LABEL;
+            let state_managed = main_ipc_state_managed(webview.app_handle());
             sayall_windows::gatt_note(format!(
-                "webview event=document_load phase={phase} result=passed main_window={}",
-                webview.label() == "main"
+                "webview event=document_load phase={phase} result=passed main_window={main} state_managed={state_managed}"
             ));
         })
-        .setup(|app| {
+        .setup(move |app| {
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
             );
@@ -5616,13 +5873,6 @@ pub fn run() {
                     Default::default()
                 }
             };
-            // 应用图标（2026-10-02）：托盘刚用内置图标建成，这里按持久化选择把
-            // 主窗口（任务栏 / Alt-Tab）与托盘图标一起换成用户选的那一个。
-            #[cfg(windows)]
-            app_icon::apply(app.handle(), saved_settings.app_icon);
-            #[cfg(windows)]
-            apply_native_language(app.handle(), saved_settings.application_language);
-
             // 「本次启动前刚完成更新」（2026-10-19，对齐 Mac
             // `recordLaunchAndDetectCompletedUpdate`）：记录写在独立的
             // `launch-state.json`（不碰 settings.json，安装生命周期测试对后者做逐字节
@@ -5650,53 +5900,6 @@ pub fn run() {
                 }
             };
 
-            // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
-            // 「启动时自动打开主面板」关闭后，普通启动只驻留托盘；未完成首次设置
-            // 或本次启动前刚完成更新时仍显示窗口（Mac 同款：更新完成后仍会显示主面板）。
-            // 托盘左键 / 托盘菜单 / 再次启动应用都走 `show_main_window`，不受本设置影响。
-            //
-            // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
-            // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
-            let show_main_window_on_startup = should_show_main_window_on_startup(
-                onboarding_active,
-                completed_update,
-                saved_settings.open_window_at_launch,
-            );
-            #[cfg(feature = "runtime-simulation")]
-            let show_main_window_on_startup =
-                show_main_window_on_startup || runtime_simulation_requested();
-            if let Some(window) = main_window(app.handle()) {
-                let visible_before = window.is_visible().unwrap_or(true);
-                if show_main_window_on_startup {
-                    // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
-                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
-                    let show_result = window.show();
-                    let _ = window.set_focus();
-                    let visible_after = window.is_visible().unwrap_or(true);
-                    sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
-                        if visible_after { "passed" } else { "failed" },
-                        visible_after,
-                        if onboarding_active {
-                            "onboarding_active"
-                        } else if completed_update {
-                            "completed_update"
-                        } else {
-                            "open_window_at_launch"
-                        },
-                        saved_settings.open_window_at_launch
-                    ));
-                } else {
-                    let hide_result = window.hide();
-                    let visible_after = window.is_visible().unwrap_or(true);
-                    sayall_windows::gatt_note(format!(
-                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason=open_window_at_launch_disabled onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
-                        if visible_after { "failed" } else { "passed" },
-                        visible_after,
-                        saved_settings.open_window_at_launch
-                    ));
-                }
-            }
             // RC003 三键：用户开过开关（设置里 enabled 且任务在系统里）才自动拉起
             // 助手。默认关闭——开关是用户的选择，持久化在设置里，而不是拿
             // 「任务装没装」当状态。
@@ -5843,14 +6046,14 @@ pub fn run() {
             let button_mappings = match settings.load_button_mappings() {
                 Ok(mappings) => {
                     sayall_windows::gatt_note(format!(
-                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed {}",
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed remote_model=xiaomi {}",
                         button_mapping_log_summary(&mappings)
                     ));
                     mappings
                 }
                 Err(error) => {
                     sayall_windows::gatt_note(
-                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=failed remote_model=xiaomi error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
                     );
                     eprintln!("{error}");
                     ButtonMappings::default()
@@ -5858,6 +6061,21 @@ pub fn run() {
             };
             // 启动即热加载已保存映射（引擎与门控吞键配置同步就绪）。
             platform.set_button_mappings(button_mappings);
+            match settings.load_button_mappings_for_scope(ButtonMappingScope::Chromecast) {
+                Ok(mappings) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed remote_model=chromecast {}",
+                        button_mapping_log_summary(&mappings),
+                    ));
+                    platform.set_chromecast_button_mappings(mappings);
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=button_mapping remote_model=chromecast action=load phase=completed terminal_result=failed error_domain=settings error_code=parse_or_read_failed reason=defaults_applied retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                }
+            }
             // 组合动作库：与按键映射同一启动时序同步到执行器（RunMacro 引用
             // 在引擎点火前即可解析；缺失引用按 missing_dependency 处理）。
             let combined_actions = match settings.load_combined_actions() {
@@ -5970,26 +6188,6 @@ pub fn run() {
                     );
                     eprintln!("{error}");
                     platform.set_voice_hold_hotkey(None);
-                }
-            }
-
-            // 选的输入工具同样要推给平台（2026-10-01）：语音会话开始前决定把哪个
-            // 输入法切进当前会话。启动恢复同样走"选中即对齐"（2026-10-03 Andy：
-            // 保证重启/冷启动后的第一按也能拉起）：自身在前台先布防、失焦后切一次；
-            // 否则立即切。基准确认见 Bugs/2026-10-03-ime-switch-lags-tool-selection.md。
-            match settings.load() {
-                Ok(loaded) => {
-                    sayall_windows::gatt_note(format!(
-                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=passed tool={}",
-                        voice_input_tool_name(loaded.voice_input_tool)
-                    ));
-                    platform.set_voice_input_tool(loaded.voice_input_tool);
-                }
-                Err(error) => {
-                    sayall_windows::gatt_note(
-                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=cold_start_fallback retryable=true".to_owned(),
-                    );
-                    eprintln!("{error}");
                 }
             }
 
@@ -6163,6 +6361,13 @@ pub fn run() {
                 agent_access: agent_access_store,
             });
             app.manage(recommendations::RecommendationsState::default());
+            app.manage(whisper::WhisperRuntime::default());
+            create_configured_main_window(app.handle())?;
+            // 托盘初始图标和菜单在此同步到配置。窗口尚未显示，用户看不到切换。
+            #[cfg(windows)]
+            app_icon::apply(app.handle(), saved_settings.app_icon);
+            #[cfg(windows)]
+            apply_native_language(app.handle(), saved_settings.application_language);
             // 按键宿主进程（切片 1：骨架/握手/生命周期；钩子迁移见后续切片）：
             // 失败仅记录日志并保持 fail-open，不阻塞启动。
             let _ = sayall_windows::key_host::start_global();
@@ -6226,6 +6431,75 @@ pub fn run() {
                     dropped
                 });
             }
+            // 启动可见性（2026-10-19 用户定稿，对齐 Mac `OnboardingLaunchPolicy`）：
+            // 「启动时自动打开主面板」关闭后，普通启动只驻留托盘；未完成首次设置
+            // 或本次启动前刚完成更新时仍显示窗口（Mac 同款：更新完成后仍会显示主面板）。
+            // 托盘左键 / 托盘菜单 / 再次启动应用都走 `show_main_window`，不受本设置影响。
+            //
+            // 仿真构建不隐藏：CI 的 runtime simulation 依赖窗口里的 WebView 完成
+            // 页面旅程，隐藏窗口会让 WebView2 进入后台节流，报告可能写不出来。
+            let show_main_window_on_startup = should_show_main_window_on_startup(
+                onboarding_active,
+                completed_update,
+                saved_settings.open_window_at_launch && !diagnostic_background,
+            );
+            #[cfg(feature = "runtime-simulation")]
+            let show_main_window_on_startup =
+                show_main_window_on_startup || runtime_simulation_requested();
+            if let Some(window) = main_window(app.handle()) {
+                let visible_before = window.is_visible().unwrap_or(true);
+                if show_main_window_on_startup {
+                    // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
+                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
+                    let show_result = window.show();
+                    let _ = window.set_focus();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} show_result={show_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "passed" } else { "failed" },
+                        visible_after,
+                        if onboarding_active {
+                            "onboarding_active"
+                        } else if completed_update {
+                            "completed_update"
+                        } else {
+                            "open_window_at_launch"
+                        },
+                        saved_settings.open_window_at_launch
+                    ));
+                } else {
+                    let hide_result = window.hide();
+                    let visible_after = window.is_visible().unwrap_or(true);
+                    sayall_windows::gatt_note(format!(
+                        "startup feature=main_window_visibility action=decide terminal_result={} visible={} reason={} onboarding_active={onboarding_active} completed_update={completed_update} open_window_at_launch={} hide_result={hide_result:?} visible_before={visible_before} visible_after={visible_after}",
+                        if visible_after { "failed" } else { "passed" },
+                        visible_after,
+                        if diagnostic_background { "diagnostic_background" } else { "open_window_at_launch_disabled" },
+                        saved_settings.open_window_at_launch
+                    ));
+                }
+            }
+            // 选的输入工具同样要推给平台（2026-10-01）：语音会话开始前决定把哪个
+            // 输入法切进当前会话。启动恢复同样走"选中即对齐"（2026-10-03 Andy：
+            // 保证重启/冷启动后的第一按也能拉起）：自身在前台先布防、失焦后切一次；
+            // 否则立即切。基准确认见 Bugs/2026-10-03-ime-switch-lags-tool-selection.md。
+            let state = app.state::<AppState>();
+            match state.settings.load() {
+                Ok(loaded) => {
+                    sayall_windows::gatt_note(format!(
+                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=passed tool={}",
+                        voice_input_tool_name(loaded.voice_input_tool)
+                    ));
+                    state.platform.set_voice_input_tool(loaded.voice_input_tool);
+                }
+                Err(error) => {
+                    sayall_windows::gatt_note(
+                        "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=failed error_domain=settings error_code=load_failed reason=cold_start_fallback retryable=true".to_owned(),
+                    );
+                    eprintln!("{error}");
+                }
+            }
+
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
@@ -6284,6 +6558,12 @@ pub fn run() {
     #[cfg(feature = "runtime-simulation")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        pick_local_whisper_file,
+        whisper::transcribe_local_whisper,
+        whisper::cancel_local_whisper,
+        whisper::arm_local_whisper,
+        whisper::get_local_whisper_status,
+        whisper::cancel_live_local_whisper,
         get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
@@ -6428,6 +6708,12 @@ pub fn run() {
     #[cfg(not(feature = "runtime-simulation"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_runtime_snapshot,
+        pick_local_whisper_file,
+        whisper::transcribe_local_whisper,
+        whisper::cancel_local_whisper,
+        whisper::arm_local_whisper,
+        whisper::get_local_whisper_status,
+        whisper::cancel_live_local_whisper,
         get_usage_profile,
         get_membership_snapshot,
         refresh_membership,
@@ -6596,6 +6882,42 @@ mod tests {
     /// "有人改了一侧、忘了另一侧"（2026-09-16 的僵死 Bug 正是文档写了规则、
     /// 安装器从未实现）。
     const INSTALLER_HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
+
+    #[test]
+    fn chromecast_ipc_only_accepts_the_wetype_tool_and_default_hotkey() {
+        use sayall_windows::RemoteModel::{Chromecast, Rc003};
+
+        let enter = KeyChord {
+            keys: vec![KeyCode::Enter],
+        };
+        let wetype = KeyChord {
+            keys: vec![KeyCode::LeftWindows, KeyCode::LeftControl],
+        };
+        assert!(voice_input_tool_supported(
+            Some(VoiceInputTool::Wechat),
+            Chromecast
+        ));
+        assert!(!voice_input_tool_supported(
+            Some(VoiceInputTool::Other),
+            Chromecast
+        ));
+        assert!(!voice_input_tool_supported(
+            Some(VoiceInputTool::Doubao),
+            Chromecast
+        ));
+        assert!(!voice_input_tool_supported(
+            Some(VoiceInputTool::Vokie),
+            Chromecast
+        ));
+        assert!(voice_input_tool_supported(
+            Some(VoiceInputTool::Doubao),
+            Rc003
+        ));
+        assert!(voice_hotkey_supported(Some(&wetype), Chromecast));
+        assert!(!voice_hotkey_supported(Some(&enter), Chromecast));
+        assert!(!voice_hotkey_supported(None, Chromecast));
+        assert!(voice_hotkey_supported(Some(&enter), Rc003));
+    }
 
     fn snapshot_with_phase(phase: BridgePhase) -> BridgeSnapshot {
         BridgeSnapshot {
@@ -7784,6 +8106,23 @@ mod ui_hint_tests {
         );
         assert_eq!(app_language_from_ui_language(0x0409), AppLanguage::English);
         assert_eq!(app_language_from_ui_language(0x0411), AppLanguage::English);
+    }
+
+    #[test]
+    fn main_window_config_requires_deferred_hidden_creation() {
+        let config: tauri::utils::config::Config =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main = config
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == MAIN_WINDOW_LABEL)
+            .expect("main window configuration");
+        assert!(!main.create, "Tauri would load the page before AppState");
+        assert!(
+            !main.visible,
+            "startup visibility must be applied by the host"
+        );
     }
 
     /// 主窗口查找只能用 `get_window`（见 `main_window` 的说明）。

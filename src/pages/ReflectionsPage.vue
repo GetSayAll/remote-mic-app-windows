@@ -32,6 +32,7 @@ import { t } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { reflectionsViewSession } from "./reflections-view-session";
 import ReflectionsAgentAccess from "./ReflectionsAgentAccess.vue";
+import LocalWhisperDraft from "../components/LocalWhisperDraft.vue";
 
 const UNKNOWN_APPLICATION_KEY = "__unknown__";
 
@@ -611,6 +612,8 @@ onUnmounted(() => {
         :class="{ 'privacy-note-nowrap': effectiveLanguage === 'zh-Hans' }"
       >{{ privacyText }}</p>
     </header>
+
+    <LocalWhisperDraft />
 
     <p v-if="loadError" class="page-error" role="alert">
       {{ t("读取回眸记录失败：{error}", { error: loadError }) }}

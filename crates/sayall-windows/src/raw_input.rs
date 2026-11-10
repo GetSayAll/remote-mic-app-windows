@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -22,10 +22,13 @@ pub enum RemoteButton {
     VolumeMute,
     VolumeUp,
     VolumeDown,
+    Youtube,
+    Netflix,
+    Input,
 }
 
 /// 语义按键的稳定顺序：key_gate 的映射位掩码、UI 画布布局都依赖该表。
-pub const ALL_BUTTONS: [RemoteButton; 13] = [
+pub const ALL_BUTTONS: [RemoteButton; 16] = [
     RemoteButton::Back,
     RemoteButton::Ok,
     RemoteButton::Tv,
@@ -39,6 +42,9 @@ pub const ALL_BUTTONS: [RemoteButton; 13] = [
     RemoteButton::VolumeMute,
     RemoteButton::VolumeUp,
     RemoteButton::VolumeDown,
+    RemoteButton::Youtube,
+    RemoteButton::Netflix,
+    RemoteButton::Input,
 ];
 
 /// Report ID 1 中可由增强捕获链路接管的全部语义按键。
@@ -62,6 +68,12 @@ pub const ENHANCED_CAPTURE_BUTTON_USAGES: [(RemoteButton, u16); 13] = [
 ];
 
 impl RemoteButton {
+    pub fn is_chromecast_mappable(self) -> bool {
+        // Chromecast has Back, Home, a direction pad, media and input buttons.
+        // Tv and Menu belong to Xiaomi; the voice key uses ATVV exclusively.
+        !matches!(self, Self::Tv | Self::Menu)
+    }
+
     /// 在 [`ALL_BUTTONS`] 中的序号（0..12），用于门控位掩码。
     pub fn ordinal(self) -> usize {
         ALL_BUTTONS
@@ -101,6 +113,9 @@ impl RemoteButton {
             Self::VolumeMute => "button.volume_mute",
             Self::VolumeUp => "button.volume_up",
             Self::VolumeDown => "button.volume_down",
+            Self::Youtube => "button.youtube",
+            Self::Netflix => "button.netflix",
+            Self::Input => "button.input",
         }
     }
 
@@ -183,6 +198,71 @@ impl RawKeyboardEvent {
     pub fn button(self) -> Option<RemoteButton> {
         button_for_keyboard(self.virtual_key, self.make_code)
     }
+
+    pub(crate) fn chromecast_edge(self) -> Option<ButtonEdge> {
+        // Interpret only explicit Windows virtual keys on a Cast keyboard
+        // collection, never Xiaomi's VK=0xff scan-code or voice-key quirks.
+        let button = match self.virtual_key {
+            0x0D => RemoteButton::Ok,
+            0x24 | 0xAC => RemoteButton::Home,
+            0x25 => RemoteButton::Left,
+            0x26 => RemoteButton::Up,
+            0x27 => RemoteButton::Right,
+            0x28 => RemoteButton::Down,
+            0xA6 => RemoteButton::Back,
+            0xAD => RemoteButton::VolumeMute,
+            0xAE => RemoteButton::VolumeDown,
+            0xAF => RemoteButton::VolumeUp,
+            _ => return None,
+        };
+        Some(ButtonEdge {
+            button,
+            is_pressed: self.is_pressed(),
+        })
+    }
+}
+
+/// Input from an already identity-checked Chromecast HID collection.
+#[derive(Debug)]
+pub enum ChromecastInput {
+    Hid {
+        report_id: u8,
+        buttons: BTreeSet<RemoteButton>,
+    },
+    Keyboard(ButtonEdge),
+    /// Google 厂商服务 transmit（0xAB5E0002）通知的按键事件。
+    /// HCI 抓包实证（2026-11-10）：该遥控器对 Windows 主机从不发 HID 输入
+    /// 报告，普通按键全部走这条 8 字节通知（首字节键码，0=全部释放），
+    /// 键码空间与 legacy report-1 位索引一致。
+    Vendor(ChromecastVendorKey),
+    CollectionRemoved,
+    ReportRejected,
+}
+
+/// transmit 通知解码结果：按下（带键）或全部释放（键码 0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromecastVendorKey {
+    Press(RemoteButton),
+    ReleaseAll,
+}
+
+/// 解码 Google 厂商服务的 8 字节键事件通知。
+///
+/// 实测载荷：`[键码, 0×7]`；键码 0 表示释放当前按住的键。未知键码返回
+/// `None`（由调用方计数），空包同样返回 `None`。
+pub fn decode_chromecast_vendor_key(payload: &[u8]) -> Option<ChromecastVendorKey> {
+    let code = *payload.first()?;
+    if code == 0 {
+        return Some(ChromecastVendorKey::ReleaseAll);
+    }
+    chromecast_button_for_legacy_index(code).map(ChromecastVendorKey::Press)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromecastSource {
+    Hid(u8),
+    Keyboard,
+    Vendor,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -209,6 +289,112 @@ pub fn device_path_matches_xiaomi_remote(path: &str) -> bool {
     classic || ble
 }
 
+pub fn device_path_matches_chromecast_remote(path: &str) -> bool {
+    let normalized = normalize_device_path(path);
+    (contains_device_path_field(&normalized, "vid_18d1")
+        && contains_device_path_field(&normalized, "pid_9450"))
+        || (["dev_vid&0018d1", "dev_vid&0118d1", "dev_vid&0218d1"]
+            .iter()
+            .any(|field| contains_device_path_field(&normalized, field))
+            && contains_device_path_field(&normalized, "pid&9450"))
+}
+
+fn contains_device_path_field(path: &str, field: &str) -> bool {
+    let boundary = |byte: u8| matches!(byte, b'_' | b'&' | b'#' | b'\\');
+    path.match_indices(field).any(|(start, _)| {
+        let bytes = path.as_bytes();
+        (start == 0 || boundary(bytes[start - 1]))
+            && bytes
+                .get(start + field.len())
+                .map_or(true, |byte| boundary(*byte))
+    })
+}
+
+pub(crate) fn chromecast_path_matches_target(path: &str, address: u64) -> bool {
+    let token = crate::remote_target::address_token(address);
+    device_path_matches_chromecast_remote(path)
+        && path
+            .split(|character: char| !character.is_ascii_hexdigit())
+            .any(|field| field.eq_ignore_ascii_case(&token))
+}
+
+pub fn device_path_matches_supported_remote(path: &str) -> bool {
+    device_path_matches_xiaomi_remote(path) || device_path_matches_chromecast_remote(path)
+}
+
+pub(crate) fn chromecast_button_for_consumer_usage(usage: u16) -> Option<RemoteButton> {
+    Some(match usage {
+        0x019E => RemoteButton::Power,
+        0x0089 | 0x0189 => RemoteButton::Input,
+        0x0042 => RemoteButton::Up,
+        0x0043 => RemoteButton::Down,
+        0x0044 => RemoteButton::Left,
+        0x0045 => RemoteButton::Right,
+        0x0041 => RemoteButton::Ok,
+        0x0224 => RemoteButton::Back,
+        0x0223 => RemoteButton::Home,
+        0x00E9 => RemoteButton::VolumeUp,
+        0x00EA => RemoteButton::VolumeDown,
+        0x00E2 => RemoteButton::VolumeMute,
+        0x0077 => RemoteButton::Youtube,
+        0x0078 => RemoteButton::Netflix,
+        _ => return None,
+    })
+}
+
+/// Legacy two-byte Report 1 (vRemoter, MIT) and three-byte Report 2 (VibeMote).
+/// The Windows descriptor-based, three-byte Report 1 is decoded by HidP.
+pub fn decode_chromecast_report(
+    report: &[u8],
+) -> Result<BTreeSet<RemoteButton>, RawInputDecodeError> {
+    // Firmware using standard Consumer Control (Windows observation in VibeMote).
+    if report.len() == 3 && report[0] == 2 {
+        let usage = u16::from_le_bytes([report[1], report[2]]);
+        if usage == 0 {
+            return Ok(BTreeSet::new());
+        }
+        let button = chromecast_button_for_consumer_usage(usage)
+            .ok_or(RawInputDecodeError::InvalidReportPrefix)?;
+        return Ok(BTreeSet::from([button]));
+    }
+    if report.len() != 2 {
+        return Err(RawInputDecodeError::UnsupportedReportShape(report.len()));
+    }
+    if report[0] != 1 {
+        return Err(RawInputDecodeError::InvalidReportPrefix);
+    }
+    if report[1] == 0 {
+        return Ok(BTreeSet::new());
+    }
+    let button = chromecast_button_for_legacy_index(report[1])
+        .ok_or(RawInputDecodeError::InvalidReportPrefix)?;
+    Ok(BTreeSet::from([button]))
+}
+
+/// Chromecast 遥控器 legacy 键码表：HID report-1 位索引（vRemoter, MIT）
+/// 与厂商服务 transmit 通知首字节共用同一键码空间（2026-11-10 HCI 抓包
+/// 实测 19 键全对齐：1=Power 3=Up 4=Down 5=Left 6=Right 7=OK 8=Mute
+/// 10=Home 11=Back 12=Vol+ 13=Vol- 14=YouTube 15=Netflix 17=Input）。
+pub fn chromecast_button_for_legacy_index(index: u8) -> Option<RemoteButton> {
+    Some(match index {
+        1 => RemoteButton::Power,
+        3 => RemoteButton::Up,
+        4 => RemoteButton::Down,
+        5 => RemoteButton::Left,
+        6 => RemoteButton::Right,
+        7 => RemoteButton::Ok,
+        8 => RemoteButton::VolumeMute,
+        10 => RemoteButton::Home,
+        11 => RemoteButton::Back,
+        12 => RemoteButton::VolumeUp,
+        13 => RemoteButton::VolumeDown,
+        14 => RemoteButton::Youtube,
+        15 => RemoteButton::Netflix,
+        17 => RemoteButton::Input,
+        _ => return None,
+    })
+}
+
 pub fn normalize_device_path(path: &str) -> String {
     path.trim().to_ascii_lowercase()
 }
@@ -224,6 +410,33 @@ pub fn report_path_accepted(bound_path: &str, target: Option<u64>, report_path: 
     match target {
         Some(address) => crate::remote_target::matches_address(report_path, address),
         None => normalize_device_path(report_path) == normalize_device_path(bound_path),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReportRoute {
+    Xiaomi,
+    Chromecast(u64),
+}
+
+pub(crate) fn report_route(
+    bound_path: &str,
+    target: crate::remote_target::Target,
+    path: &str,
+) -> Option<ReportRoute> {
+    match target {
+        crate::remote_target::Target::XiaomiOrUnselected(address)
+            if device_path_matches_xiaomi_remote(path)
+                && report_path_accepted(bound_path, address, path) =>
+        {
+            Some(ReportRoute::Xiaomi)
+        }
+        crate::remote_target::Target::Chromecast(Some(address))
+            if chromecast_path_matches_target(path, address) =>
+        {
+            Some(ReportRoute::Chromecast(address))
+        }
+        _ => None,
     }
 }
 
@@ -264,7 +477,7 @@ pub fn select_single_device_path_preferring(
 ) -> Result<String, DevicePathError> {
     let matches: Vec<_> = paths
         .iter()
-        .filter(|path| device_path_matches_xiaomi_remote(path))
+        .filter(|path| device_path_matches_supported_remote(path))
         .collect();
     match matches.as_slice() {
         [] => Err(DevicePathError::Missing),
@@ -382,6 +595,10 @@ pub fn button_for_keyboard(virtual_key: u16, make_code: u16) -> Option<RemoteBut
 pub struct ButtonStateMerger {
     keyboard: BTreeSet<RemoteButton>,
     hid: BTreeSet<RemoteButton>,
+    // Keep one source per button for this device session. Windows can deliver
+    // whole keyboard and HID tap sequences back-to-back; a simple union of the
+    // current down states would count sequential twins as a double click.
+    chromecast: BTreeMap<RemoteButton, (ChromecastSource, bool)>,
 }
 
 impl ButtonStateMerger {
@@ -429,15 +646,77 @@ impl ButtonStateMerger {
 
     /// 应用一份 HID 报文的 usage 集合（绝对状态），返回语义边沿。
     pub fn update_hid_usages(&mut self, usages: BTreeSet<u16>) -> Vec<ButtonEdge> {
+        self.update_hid_buttons(usages.into_iter().filter_map(button_for_usage).collect())
+    }
+
+    pub fn update_hid_buttons(&mut self, buttons: BTreeSet<RemoteButton>) -> Vec<ButtonEdge> {
         let before = self.active_buttons();
-        self.hid = usages.into_iter().filter_map(button_for_usage).collect();
+        self.hid = buttons;
         edges_between(&before, &self.active_buttons())
+    }
+
+    pub fn update_chromecast(&mut self, input: ChromecastInput) -> Vec<ButtonEdge> {
+        let before = self.active_buttons();
+        match input {
+            ChromecastInput::Keyboard(edge) if edge.button.is_chromecast_mappable() => {
+                self.apply_chromecast_edge(edge, ChromecastSource::Keyboard);
+            }
+            ChromecastInput::Hid { report_id, buttons } if matches!(report_id, 1 | 2) => {
+                let source = ChromecastSource::Hid(report_id);
+                for (button, (owner, pressed)) in &mut self.chromecast {
+                    if *owner == source {
+                        *pressed = buttons.contains(button);
+                    }
+                }
+                for button in buttons
+                    .into_iter()
+                    .filter(|button| button.is_chromecast_mappable())
+                {
+                    self.chromecast.entry(button).or_insert((source, true));
+                }
+            }
+            ChromecastInput::Vendor(ChromecastVendorKey::Press(button))
+                if button.is_chromecast_mappable() =>
+            {
+                self.apply_chromecast_edge(
+                    ButtonEdge {
+                        button,
+                        is_pressed: true,
+                    },
+                    ChromecastSource::Vendor,
+                );
+            }
+            ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll) => {
+                // 键码 0 是"释放当前按住的键"：只释放厂商通道自己持有的
+                // 按下状态，不动 HID/键盘来源（每键单来源仲裁不变）。
+                for (_, (owner, pressed)) in &mut self.chromecast {
+                    if *owner == ChromecastSource::Vendor {
+                        *pressed = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+        edges_between(&before, &self.active_buttons())
+    }
+
+    fn apply_chromecast_edge(&mut self, edge: ButtonEdge, source: ChromecastSource) {
+        if let Some((owner, pressed)) = self.chromecast.get_mut(&edge.button) {
+            if *owner == source {
+                *pressed = edge.is_pressed;
+            }
+        } else if edge.is_pressed {
+            self.chromecast.insert(edge.button, (source, true));
+        }
     }
 
     pub fn release_all(&mut self) -> Vec<ButtonEdge> {
         let active = self.active_buttons();
         self.keyboard.clear();
         self.hid.clear();
+        for (_, pressed) in self.chromecast.values_mut() {
+            *pressed = false;
+        }
         active
             .into_iter()
             .map(|button| ButtonEdge {
@@ -447,8 +726,20 @@ impl ButtonStateMerger {
             .collect()
     }
 
+    pub fn forget_chromecast_sources(&mut self) {
+        self.chromecast.clear();
+    }
+
     fn active_buttons(&self) -> BTreeSet<RemoteButton> {
-        self.keyboard.union(&self.hid).copied().collect()
+        self.keyboard
+            .union(&self.hid)
+            .copied()
+            .chain(
+                self.chromecast
+                    .iter()
+                    .filter_map(|(button, (_, pressed))| (*pressed).then_some(*button)),
+            )
+            .collect()
     }
 }
 
@@ -473,6 +764,200 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chromecast_hid_collections_keep_independent_releases() {
+        let mut merger = ButtonStateMerger::default();
+        let hid = |report_id, button: Option<RemoteButton>| ChromecastInput::Hid {
+            report_id,
+            buttons: button.into_iter().collect(),
+        };
+        let edge = |button, is_pressed| ButtonEdge { button, is_pressed };
+        assert_eq!(
+            merger.update_chromecast(hid(1, Some(RemoteButton::Home))),
+            [edge(RemoteButton::Home, true)]
+        );
+        assert!(merger
+            .update_chromecast(hid(2, Some(RemoteButton::Home)))
+            .is_empty());
+        assert_eq!(
+            merger.update_chromecast(hid(2, Some(RemoteButton::VolumeUp))),
+            [edge(RemoteButton::VolumeUp, true)]
+        );
+        assert_eq!(
+            merger.update_chromecast(hid(2, None)),
+            [edge(RemoteButton::VolumeUp, false)]
+        );
+        assert_eq!(
+            merger.active_button_set(),
+            BTreeSet::from([RemoteButton::Home])
+        );
+        assert_eq!(merger.release_all(), [edge(RemoteButton::Home, false)]);
+        merger.forget_chromecast_sources();
+        assert_eq!(
+            merger.update_chromecast(hid(2, Some(RemoteButton::Home))),
+            [edge(RemoteButton::Home, true)]
+        );
+    }
+
+    #[test]
+    fn chromecast_keyboard_fallback_ignores_voice_and_xiaomi_keys() {
+        let raw = |virtual_key| RawKeyboardEvent {
+            virtual_key,
+            make_code: 0,
+            flags: 0,
+            message: 0x0100,
+        };
+        assert_eq!(
+            raw(0x0D).chromecast_edge(),
+            Some(ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: true,
+            })
+        );
+        for vk in [0x74, 0xC0, 0x5D, 0xFF] {
+            assert_eq!(raw(vk).chromecast_edge(), None);
+        }
+    }
+
+    #[test]
+    fn chromecast_vendor_keys_decode_press_and_release() {
+        // 2026-11-10 HCI 实测载荷：8 字节，首字节键码（与 legacy 位索引同表）。
+        assert_eq!(
+            decode_chromecast_vendor_key(&[0x07, 0, 0, 0, 0, 0, 0, 0]),
+            Some(ChromecastVendorKey::Press(RemoteButton::Ok))
+        );
+        assert_eq!(
+            decode_chromecast_vendor_key(&[0x0B, 0, 0, 0, 0, 0, 0, 0]),
+            Some(ChromecastVendorKey::Press(RemoteButton::Back))
+        );
+        assert_eq!(
+            decode_chromecast_vendor_key(&[0x00, 0, 0, 0, 0, 0, 0, 0]),
+            Some(ChromecastVendorKey::ReleaseAll)
+        );
+        // 未知键码与空包都不产生输入（调用方计 unsupported）。
+        assert_eq!(decode_chromecast_vendor_key(&[0x02, 0]), None);
+        assert_eq!(decode_chromecast_vendor_key(&[]), None);
+    }
+
+    #[test]
+    fn chromecast_vendor_press_release_edges() {
+        let mut merger = ButtonStateMerger::default();
+        let edge = |button, is_pressed| ButtonEdge { button, is_pressed };
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+                RemoteButton::Ok
+            ))),
+            [edge(RemoteButton::Ok, true)]
+        );
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll)),
+            [edge(RemoteButton::Ok, false)]
+        );
+        // 无按键时的释放是空操作；重复按下再释放只产生一对边沿。
+        assert!(merger
+            .update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll))
+            .is_empty());
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+                RemoteButton::VolumeUp
+            ))),
+            [edge(RemoteButton::VolumeUp, true)]
+        );
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+                RemoteButton::VolumeDown
+            ))),
+            [edge(RemoteButton::VolumeDown, true)]
+        );
+        // 键码 0 释放厂商通道当前按住的全部键。
+        let mut released =
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll));
+        released.sort_by_key(|edge| edge.button);
+        assert_eq!(
+            released,
+            [
+                edge(RemoteButton::VolumeUp, false),
+                edge(RemoteButton::VolumeDown, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn chromecast_vendor_and_hid_sources_stay_exclusive() {
+        // 每键单来源仲裁：厂商通道先按下的键，HID 报文不得重复置按下，
+        // 反之亦然——与既有 Hid(1)/Hid(2) 互斥行为一致。
+        let mut merger = ButtonStateMerger::default();
+        merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+            RemoteButton::Ok,
+        )));
+        assert!(merger
+            .update_chromecast(ChromecastInput::Hid {
+                report_id: 1,
+                buttons: BTreeSet::from([RemoteButton::Ok]),
+            })
+            .is_empty());
+        assert_eq!(
+            merger.active_button_set(),
+            BTreeSet::from([RemoteButton::Ok])
+        );
+        // 厂商释放只影响厂商持有的键。
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll)),
+            [ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: false
+            }]
+        );
+    }
+
+    #[test]
+    fn chromecast_identity_and_reports_are_separate_from_xiaomi() {
+        let path = r"\\?\hid#vid_18d1&pid_9450#fixture";
+        assert!(device_path_matches_supported_remote(path));
+        assert!(!device_path_matches_xiaomi_remote(path));
+        assert!(!device_path_matches_supported_remote(
+            r"\\?\hid#vid_18d1&pid_9999#fixture"
+        ));
+        assert!(device_path_matches_supported_remote(
+            r"BTHLE#DEV_VID&0218D1_PID&9450#fixture"
+        ));
+        assert_eq!(select_single_device_path(&[path.to_owned()]).unwrap(), path);
+        for (usage, button) in [
+            (3, RemoteButton::Up),
+            (4, RemoteButton::Down),
+            (5, RemoteButton::Left),
+            (6, RemoteButton::Right),
+            (7, RemoteButton::Ok),
+            (8, RemoteButton::VolumeMute),
+            (10, RemoteButton::Home),
+            (11, RemoteButton::Back),
+            (12, RemoteButton::VolumeUp),
+            (13, RemoteButton::VolumeDown),
+            (14, RemoteButton::Youtube),
+            (15, RemoteButton::Netflix),
+            (1, RemoteButton::Power),
+            (17, RemoteButton::Input),
+        ] {
+            assert_eq!(
+                decode_chromecast_report(&[1, usage]).unwrap(),
+                BTreeSet::from([button])
+            );
+        }
+        assert!(decode_chromecast_report(&[1, 0]).unwrap().is_empty());
+        assert!(decode_chromecast_report(&[2, 3]).is_err());
+        assert!(decode_chromecast_report(&[1]).is_err());
+        assert!(decode_chromecast_report(&[1, 0xFF]).is_err());
+        assert_eq!(
+            decode_chromecast_report(&[2, 0x42, 0]).unwrap(),
+            BTreeSet::from([RemoteButton::Up])
+        );
+        assert_eq!(
+            decode_chromecast_report(&[2, 0x77, 0]).unwrap(),
+            BTreeSet::from([RemoteButton::Youtube])
+        );
+        assert!(decode_chromecast_report(&[2, 0, 0]).unwrap().is_empty());
+    }
+
+    #[test]
     fn report_path_accepted_follows_the_current_target() {
         // 两条同型号遥控器（只差地址）与"同一支的另一个 HID 实例"（只差实例号）。
         let address = 0xc05d_39c2_d9db_u64;
@@ -493,6 +978,35 @@ mod tests {
         assert!(report_path_accepted(bound, None, &bound.to_uppercase()));
         assert!(!report_path_accepted(bound, None, sibling));
         assert!(!report_path_accepted(bound, None, other));
+    }
+
+    #[test]
+    fn chromecast_report_route_requires_confirmed_address_and_pinned_hid_ids() {
+        use crate::remote_target::Target;
+        let address = 0x1122_3344_5566;
+        let cast = r"\\?\hid#profile_dev_vid&0118D1_pid&9450_rev&0000_112233445566#slot";
+        let other_cast = r"\\?\hid#profile_dev_vid&0118d1_pid&9450_rev&0000_a112233445566#slot";
+        let other_pid = r"\\?\hid#profile_dev_vid&0118d1_pid&9450a_rev&0000_112233445566#slot";
+        let xiaomi = r"\\?\hid#profile_dev_vid&012717_pid&32b8_rev&0000_112233445566#slot";
+        assert_eq!(
+            report_route(xiaomi, Target::Chromecast(Some(address)), cast),
+            Some(ReportRoute::Chromecast(address))
+        );
+        assert_eq!(report_route(cast, Target::Chromecast(None), cast), None);
+        assert_eq!(
+            report_route(cast, Target::XiaomiOrUnselected(Some(address)), cast),
+            None
+        );
+        for unrelated in [other_cast, other_pid, xiaomi] {
+            assert_eq!(
+                report_route(unrelated, Target::Chromecast(Some(address)), unrelated),
+                None
+            );
+        }
+        assert_eq!(
+            report_route(xiaomi, Target::XiaomiOrUnselected(Some(address)), xiaomi),
+            Some(ReportRoute::Xiaomi)
+        );
     }
 
     fn report(usages: &[u16]) -> Vec<u8> {
@@ -606,13 +1120,12 @@ mod tests {
 
     #[test]
     fn enhanced_capture_usage_table_is_a_complete_bijection() {
-        assert_eq!(ENHANCED_CAPTURE_BUTTON_USAGES.len(), ALL_BUTTONS.len());
         let usages: BTreeSet<_> = ENHANCED_CAPTURE_BUTTON_USAGES
             .iter()
             .map(|(_, usage)| *usage)
             .collect();
-        assert_eq!(usages.len(), ALL_BUTTONS.len());
-        for button in ALL_BUTTONS {
+        assert_eq!(usages.len(), ENHANCED_CAPTURE_BUTTON_USAGES.len());
+        for (button, _) in ENHANCED_CAPTURE_BUTTON_USAGES {
             let usage = usage_for_button(button);
             assert_eq!(button_for_usage(usage), Some(button));
         }

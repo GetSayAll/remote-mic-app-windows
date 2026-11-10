@@ -1,9 +1,10 @@
-//! 普通按键手势识别（单击/双击/长按/按住连续触发），语义对齐 Mac 原版
+//! 普通按键手势识别（单击/双击/三击/长按/按住连续触发），语义对齐 Mac 原版
 //! `RemoteButtonGestureRecognizer` + `HIDRemoteScheduler`，并按 Windows 产品
 //! 口径扩展（2026-10-05）：「按住连续触发」是显式开关（每键至多一个槽位）。
 //!
-//! - 双击窗口 300ms、长按阈值 550ms、连续触发起始 350ms（逐键间隔：
+//! - 连击间隔 300ms（从松开到下一次按下）、长按阈值 550ms、连续触发起始 350ms（逐键间隔：
 //!   返回 50ms、其余按键 100ms，见 `RemoteButton::repeat_interval`）。
+//!   配置三击后，双击等待下一次按下。三击完成后不再触发本组单击或双击。
 //! - 开关取值与行为（`ButtonActions::hold_repeat`）：
 //!   - 关闭 → 单击在按下沿立即触发（无双击/长按时）或经双击窗确认；按住不连续；
 //!   - 单击 → 按住连续触发单击动作：无双击时 350ms 起连拍；有双击时按住超过
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use crate::raw_input::RemoteButton;
 use crate::send_input::{ButtonAction, ButtonMappings, ButtonTrigger};
 
-/// 双击判定窗口（第二击按下沿之间的最大间隔），Mac 同款。
+/// 连击判定窗口（松开后到下一次按下），沿用双击的 300ms。
 pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 /// 长按阈值（按住多久触发长按），Mac 同款。
 pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(550);
@@ -38,6 +39,8 @@ pub struct GestureConfig {
     pub single_configured: bool,
     /// 双击列已配置 → 单击等待双击窗口。
     pub double_enabled: bool,
+    /// 三击列已配置 → 单击、双击都等待下一次按下。
+    pub triple_enabled: bool,
     /// 长按列已配置 → 按住 550ms 触发长按。
     pub long_enabled: bool,
     /// 单击保持连续触发（开关=单击、动作可连续、非锁屏延迟；长按为空）。
@@ -58,8 +61,10 @@ impl GestureConfig {
         }
         let single_configured = actions.single != ButtonAction::Disabled;
         let double_enabled = actions.double != ButtonAction::Disabled;
+        let triple_enabled = actions.triple != ButtonAction::Disabled;
         let long_enabled = actions.long != ButtonAction::Disabled;
         let defer_single_until_release = !double_enabled
+            && !triple_enabled
             && !long_enabled
             && matches!(&actions.single, ButtonAction::Shortcut { chord }
                 if chord.is_lock_workstation());
@@ -83,6 +88,7 @@ impl GestureConfig {
         Some(Self {
             single_configured,
             double_enabled,
+            triple_enabled,
             long_enabled,
             repeat_single,
             repeat_long,
@@ -94,23 +100,26 @@ impl GestureConfig {
     /// Mac 同款），开关=单击时按住按间隔连续触发（无连发能力的按键不重复）。
     fn raw_path(&self) -> bool {
         self.single_configured
-            && !self.double_enabled
+            && !self.uses_click_window()
             && !self.long_enabled
             && !self.defer_single_until_release
+    }
+
+    fn uses_click_window(&self) -> bool {
+        self.double_enabled || self.triple_enabled
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct ButtonGestureState {
     pressed: bool,
-    is_second_press: bool,
-    waiting_for_second: bool,
+    completed_clicks: u8,
     long_fired: bool,
     /// 本次按住已按「超过双击窗」确认为单击（不再补单击、不进双击窗）。
     hold_concluded: bool,
     long_deadline: Option<Instant>,
-    double_deadline: Option<Instant>,
-    /// 双击共存下的按住确认计时器（按下 + 双击窗）。
+    click_deadline: Option<Instant>,
+    /// 连击共存下的按住确认计时器（按下 + 连击窗口）。
     single_conclude_deadline: Option<Instant>,
     /// 单击路径的连续触发计时器。
     repeat_deadline: Option<Instant>,
@@ -118,6 +127,26 @@ struct ButtonGestureState {
     long_repeat_deadline: Option<Instant>,
     /// 上下文点击吞掉本次按压：忽略到释放为止，不触发任何手势。
     swallowing: bool,
+}
+
+impl ButtonGestureState {
+    fn take_expired_clicks(
+        &mut self,
+        config: &GestureConfig,
+        now: Instant,
+    ) -> Option<ButtonTrigger> {
+        if self.click_deadline.is_none_or(|deadline| deadline > now) {
+            return None;
+        }
+        self.click_deadline = None;
+        let clicks = std::mem::take(&mut self.completed_clicks);
+        // Two taps without a double-click binding fall back to one single action.
+        Some(if clicks == 2 && config.double_enabled {
+            ButtonTrigger::Double
+        } else {
+            ButtonTrigger::Single
+        })
+    }
 }
 
 /// 手势识别器：每键独立状态机。所有方法都不会 panic，未配置的按键被忽略。
@@ -154,16 +183,14 @@ impl GestureRecognizer {
         let Some((config, state)) = self.buttons.get_mut(&button) else {
             return Vec::new();
         };
-        if state.swallowing {
+        if state.swallowing || state.pressed {
             // 上下文点击已接管本次按压（见 [`Self::swallow_press`]）：忽略到释放为止。
             return Vec::new();
         }
-        if state.waiting_for_second {
-            // 第二击：取消双击窗口，标记第二击并重启长按计时。
-            state.waiting_for_second = false;
-            state.is_second_press = true;
-            state.double_deadline = None;
-        }
+        // If an input message reaches the worker before an already-due timer,
+        // finish the previous group before treating this press as a new click.
+        let expired = state.take_expired_clicks(config, now);
+        state.click_deadline = None;
         state.pressed = true;
         state.hold_concluded = false;
         if config.long_enabled {
@@ -176,12 +203,12 @@ impl GestureRecognizer {
             }
             return vec![ButtonTrigger::Single];
         }
-        if config.double_enabled && config.repeat_single.is_some() {
+        if config.uses_click_window() && config.repeat_single.is_some() {
             // 开关=单击 + 双击：按住超过双击窗即确认为单击（不补发第一击）。
             state.single_conclude_deadline = Some(now + DOUBLE_CLICK_WINDOW);
             state.repeat_deadline = Some(now + REPEAT_START_DELAY);
         }
-        Vec::new()
+        expired.into_iter().collect()
     }
 
     /// 释放沿：返回立即触发的手势（双击/单击）。
@@ -194,6 +221,9 @@ impl GestureRecognizer {
             *state = ButtonGestureState::default();
             return Vec::new();
         }
+        if !state.pressed {
+            return Vec::new();
+        }
         state.pressed = false;
         state.long_deadline = None;
         state.repeat_deadline = None;
@@ -202,23 +232,27 @@ impl GestureRecognizer {
         if state.hold_concluded {
             // 本次按住已确认为单击（可能已连续触发）：静默收尾，不进双击窗。
             state.hold_concluded = false;
-            state.is_second_press = false;
+            state.completed_clicks = 0;
             return Vec::new();
         }
         if state.long_fired {
             // 长按已触发：静默收尾。
             state.long_fired = false;
-            state.is_second_press = false;
+            state.completed_clicks = 0;
             return Vec::new();
         }
-        if state.is_second_press {
-            state.is_second_press = false;
-            return vec![ButtonTrigger::Double];
-        }
-        if config.double_enabled {
-            state.waiting_for_second = true;
-            state.double_deadline = Some(now + DOUBLE_CLICK_WINDOW);
-            return Vec::new();
+        if config.uses_click_window() {
+            state.completed_clicks += 1;
+            let trigger = match (state.completed_clicks, config.triple_enabled) {
+                (3, true) => ButtonTrigger::Triple,
+                (2, false) => ButtonTrigger::Double,
+                _ => {
+                    state.click_deadline = Some(now + DOUBLE_CLICK_WINDOW);
+                    return Vec::new();
+                }
+            };
+            state.completed_clicks = 0;
+            return vec![trigger];
         }
         if config.raw_path() {
             // 原始路径已在按下沿触发，释放只取消连续触发。
@@ -266,13 +300,8 @@ impl GestureRecognizer {
         let mut fired = Vec::new();
         let mut ticks = Vec::new();
         for (button, (config, state)) in &mut self.buttons {
-            if state
-                .double_deadline
-                .is_some_and(|deadline| deadline <= now)
-            {
-                state.double_deadline = None;
-                state.waiting_for_second = false;
-                fired.push((*button, ButtonTrigger::Single));
+            if let Some(trigger) = state.take_expired_clicks(config, now) {
+                fired.push((*button, trigger));
             }
             if state
                 .single_conclude_deadline
@@ -283,8 +312,7 @@ impl GestureRecognizer {
                     // 按住超过双击判定窗：不是双击（也不是快速点按），确认为
                     // 单击并进入连续触发；第二击同样适用（取消未完成的双击）。
                     state.hold_concluded = true;
-                    state.is_second_press = false;
-                    state.waiting_for_second = false;
+                    state.completed_clicks = 0;
                     fired.push((*button, ButtonTrigger::Single));
                 }
             }
@@ -319,7 +347,8 @@ impl GestureRecognizer {
                     .is_some_and(|deadline| deadline <= now)
                 {
                     // 双击共存时，必须先在双击窗结束时确认为单击才允许起拍。
-                    let ready = state.pressed && (!config.double_enabled || state.hold_concluded);
+                    let ready =
+                        state.pressed && (!config.uses_click_window() || state.hold_concluded);
                     // 未就绪（按住中但尚未确认）不留过去时刻的截止时间，否则
                     // next_deadline 会让引擎以 0 超时空转（2026-10-05 评审发现 5）。
                     state.repeat_deadline = if ready { Some(now + interval) } else { None };
@@ -340,7 +369,7 @@ impl GestureRecognizer {
             .flat_map(|(_, state)| {
                 [
                     state.long_deadline,
-                    state.double_deadline,
+                    state.click_deadline,
                     state.single_conclude_deadline,
                     state.repeat_deadline,
                     state.long_repeat_deadline,
@@ -398,12 +427,147 @@ mod tests {
             ButtonActions {
                 single: action(single),
                 double: action(double),
+                triple: ButtonAction::Disabled,
                 long: action(long),
                 hold_repeat,
                 ok_context_click: false,
             },
         );
         mappings
+    }
+
+    fn mappings_with_triple(double: bool, long: bool) -> ButtonMappings {
+        let mut mappings = mappings_with(
+            RemoteButton::Ok,
+            Some(KeyCode::Enter),
+            double.then_some(KeyCode::Space),
+            long.then_some(KeyCode::Delete),
+        );
+        mappings.actions.get_mut(&RemoteButton::Ok).unwrap().triple = ButtonAction::Shortcut {
+            chord: KeyChord {
+                keys: vec![KeyCode::LeftShift, KeyCode::Enter],
+            },
+        };
+        mappings
+    }
+
+    fn tap_ok(recognizer: &mut GestureRecognizer, at: Instant) -> Vec<ButtonTrigger> {
+        assert!(recognizer.press(RemoteButton::Ok, at).is_empty());
+        recognizer.release(RemoteButton::Ok, at + Duration::from_millis(20))
+    }
+
+    #[test]
+    fn triple_click_dispatches_once_without_single_or_double() {
+        let now = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with_triple(true, false));
+
+        assert!(tap_ok(&mut recognizer, now).is_empty());
+        assert!(tap_ok(&mut recognizer, now + Duration::from_millis(270)).is_empty());
+        assert_eq!(
+            tap_ok(&mut recognizer, now + Duration::from_millis(540)),
+            vec![ButtonTrigger::Triple]
+        );
+        assert!(recognizer.advance(now + Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn triple_window_falls_back_to_mapped_double_or_one_single() {
+        let now = Instant::now();
+        let two_taps = Duration::from_millis(150);
+        for (double, expected) in [
+            (true, ButtonTrigger::Double),
+            (false, ButtonTrigger::Single),
+        ] {
+            let mut recognizer = GestureRecognizer::new();
+            recognizer.configure(&mappings_with_triple(double, false));
+
+            assert!(tap_ok(&mut recognizer, now).is_empty());
+            assert!(tap_ok(&mut recognizer, now + two_taps).is_empty());
+            let deadline = now + two_taps + Duration::from_millis(20) + DOUBLE_CLICK_WINDOW;
+            assert!(recognizer
+                .advance(deadline - Duration::from_millis(1))
+                .is_empty());
+            assert_eq!(
+                recognizer.advance(deadline),
+                vec![(RemoteButton::Ok, expected)]
+            );
+            assert!(recognizer
+                .advance(deadline + DOUBLE_CLICK_WINDOW)
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn triple_window_flushes_expired_group_when_new_press_arrives_before_timer() {
+        let now = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings_with_triple(true, false));
+
+        assert!(tap_ok(&mut recognizer, now).is_empty());
+        assert!(tap_ok(&mut recognizer, now + Duration::from_millis(100)).is_empty());
+        let after_timeout = now + Duration::from_millis(430);
+        assert_eq!(
+            recognizer.press(RemoteButton::Ok, after_timeout),
+            vec![ButtonTrigger::Double]
+        );
+        assert!(recognizer
+            .release(RemoteButton::Ok, after_timeout)
+            .is_empty());
+        assert_eq!(
+            recognizer.advance(after_timeout + DOUBLE_CLICK_WINDOW),
+            vec![(RemoteButton::Ok, ButtonTrigger::Single)]
+        );
+    }
+
+    #[test]
+    fn long_press_or_reconfiguration_cancels_pending_triple_sequence() {
+        let now = Instant::now();
+        let mappings = mappings_with_triple(true, true);
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+
+        assert!(tap_ok(&mut recognizer, now).is_empty());
+        assert!(tap_ok(&mut recognizer, now + Duration::from_millis(100)).is_empty());
+        let third_press = now + Duration::from_millis(220);
+        assert!(recognizer.press(RemoteButton::Ok, third_press).is_empty());
+        assert_eq!(
+            recognizer.advance(third_press + LONG_PRESS_THRESHOLD),
+            vec![(RemoteButton::Ok, ButtonTrigger::Long)]
+        );
+        let release = third_press + Duration::from_secs(1);
+        assert!(recognizer.release(RemoteButton::Ok, release).is_empty());
+        assert!(tap_ok(&mut recognizer, release + Duration::from_millis(100)).is_empty());
+        recognizer.configure(&mappings);
+        assert!(recognizer
+            .advance(release + Duration::from_secs(1))
+            .is_empty());
+    }
+
+    #[test]
+    fn triple_binding_preserves_single_hold_repeat_without_an_extra_release_action() {
+        let now = Instant::now();
+        let mut mappings = mappings_with_triple(true, false);
+        mappings
+            .actions
+            .get_mut(&RemoteButton::Ok)
+            .unwrap()
+            .hold_repeat = Some(ButtonTrigger::Single);
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&mappings);
+
+        assert!(recognizer.press(RemoteButton::Ok, now).is_empty());
+        assert_eq!(
+            recognizer.advance(now + DOUBLE_CLICK_WINDOW),
+            vec![(RemoteButton::Ok, ButtonTrigger::Single)]
+        );
+        let (fired, ticks) = recognizer.advance_with_ticks(now + REPEAT_START_DELAY);
+        assert_eq!(fired, vec![(RemoteButton::Ok, ButtonTrigger::Single)]);
+        assert_eq!(ticks, fired);
+        assert!(recognizer
+            .release(RemoteButton::Ok, now + Duration::from_millis(360))
+            .is_empty());
+        assert!(recognizer.advance(now + Duration::from_secs(1)).is_empty());
     }
 
     #[test]
@@ -457,6 +621,7 @@ mod tests {
                     },
                 },
                 double: ButtonAction::Disabled,
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
@@ -483,6 +648,7 @@ mod tests {
             ButtonActions {
                 single: ButtonAction::FocusInput,
                 double: ButtonAction::Disabled,
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
@@ -522,6 +688,7 @@ mod tests {
                         keys: vec![KeyCode::Tab],
                     },
                 },
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
@@ -1054,6 +1221,7 @@ mod tests {
                         keys: vec![KeyCode::Space],
                     },
                 },
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,

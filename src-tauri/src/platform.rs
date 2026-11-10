@@ -4,8 +4,8 @@ use sayall_windows::rc003_bridge::BridgeSnapshot;
 use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
 use sayall_windows::transcript_capture::CapturedTranscript;
 use sayall_windows::{
-    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
-    PlatformSnapshot, UsageCounters, WindowsPlatform,
+    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, LocalDictationStatus, PairedRemote,
+    PlatformError, PlatformSnapshot, UsageCounters, WindowsPlatform,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -17,6 +17,18 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn connection_snapshot(&self) -> ConnectionSnapshot;
     fn connect_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError>;
     fn disconnect_remote(&self) -> Result<ConnectionSnapshot, PlatformError>;
+    fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        Err(PlatformError::UnsupportedPlatform)
+    }
+    fn local_dictation_status(&self, _token: u64) -> LocalDictationStatus {
+        LocalDictationStatus::Idle
+    }
+    fn take_local_dictation(&self, _token: u64) -> Option<Vec<i16>> {
+        None
+    }
+    fn cancel_local_dictation(&self, _token: u64) -> bool {
+        false
+    }
     #[cfg(windows)]
     fn restore_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError>;
     fn list_audio_endpoints(&self) -> Result<Vec<AudioEndpoint>, PlatformError>;
@@ -47,6 +59,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn test_focus_input(&self) -> Result<(), PlatformError>;
     /// 打开/激活目标应用并按聚焦档案聚焦（UI「测试打开与聚焦」）。
     fn test_app_focus(&self, target: String) -> Result<(), PlatformError>;
+    fn test_chromecast_app_focus(&self, target: String) -> Result<(), PlatformError> {
+        self.test_app_focus(target)
+    }
     /// 「学习输入框」：阻塞至多 6 秒，返回捕获到的可编辑目标特征。
     fn learn_focus_target(
         &self,
@@ -96,6 +111,14 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     }
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
+    fn chromecast_button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
+        sayall_windows::send_input::ButtonMappings::default()
+    }
+    fn set_chromecast_button_mappings(
+        &self,
+        _mappings: sayall_windows::send_input::ButtonMappings,
+    ) {
+    }
     /// 键位方案覆盖层（私有组件注入后调用；公开构建永不调用）。
     /// 默认 no-op：仿真与不支持方案覆盖的平台保持基础映射。
     fn set_button_profile_overlay(
@@ -202,6 +225,22 @@ impl PlatformRuntime for WindowsPlatform {
         self.disconnect_remote()
     }
 
+    fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        WindowsPlatform::arm_local_dictation(self)
+    }
+
+    fn local_dictation_status(&self, token: u64) -> LocalDictationStatus {
+        WindowsPlatform::local_dictation_status(self, token)
+    }
+
+    fn take_local_dictation(&self, token: u64) -> Option<Vec<i16>> {
+        WindowsPlatform::take_local_dictation(self, token)
+    }
+
+    fn cancel_local_dictation(&self, token: u64) -> bool {
+        WindowsPlatform::cancel_local_dictation(self, token)
+    }
+
     #[cfg(windows)]
     fn restore_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
         self.restore_remote(device_id)
@@ -273,6 +312,13 @@ impl PlatformRuntime for WindowsPlatform {
         WindowsPlatform::test_app_focus(self, &target)
     }
 
+    #[cfg(windows)]
+    fn test_chromecast_app_focus(&self, target: String) -> Result<(), PlatformError> {
+        self.button_mapping_runtime()
+            .launch_chromecast_app_and_focus_now(&target)
+            .map_err(PlatformError::SendInput)
+    }
+
     fn learn_focus_target(
         &self,
     ) -> Result<sayall_windows::focus::RecordedFocusTarget, PlatformError> {
@@ -340,6 +386,17 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
         WindowsPlatform::set_button_mappings(self, mappings)
+    }
+
+    #[cfg(windows)]
+    fn chromecast_button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
+        self.button_mapping_runtime().chromecast_mappings()
+    }
+
+    #[cfg(windows)]
+    fn set_chromecast_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
+        self.button_mapping_runtime()
+            .set_chromecast_mappings(mappings);
     }
 
     fn set_button_profile_overlay(
@@ -491,6 +548,7 @@ mod simulation {
         /// `AtvvVoicePipeline::set_gain_db` 的同一调用形状。
         gain_db: Mutex<f32>,
         button_mappings: Mutex<sayall_windows::send_input::ButtonMappings>,
+        chromecast_button_mappings: Mutex<sayall_windows::send_input::ButtonMappings>,
     }
 
     /// 手写 Debug：订阅者闭包没有 Debug，跳过 `*_sinks` 两个字段。
@@ -1067,6 +1125,17 @@ mod simulation {
 
         fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
             *lock(&self.button_mappings) = mappings;
+        }
+
+        fn chromecast_button_mappings(&self) -> sayall_windows::send_input::ButtonMappings {
+            lock(&self.chromecast_button_mappings).clone()
+        }
+
+        fn set_chromecast_button_mappings(
+            &self,
+            mappings: sayall_windows::send_input::ButtonMappings,
+        ) {
+            *lock(&self.chromecast_button_mappings) = mappings;
         }
 
         fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot {

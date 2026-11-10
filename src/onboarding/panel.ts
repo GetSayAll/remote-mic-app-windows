@@ -30,6 +30,7 @@ export interface SidePanel {
 
 /** 右栏推导的全部输入（页面统一收集后调用；全部为只读事实）。 */
 export interface SidePanelContext {
+  observeOnly?: boolean;
   connectionPhase: ConnectionPhase;
   bleVoiceReady: boolean;
   remoteButtonObserved: boolean;
@@ -75,15 +76,16 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
             label: t("遥控器已连接"),
             state: connected ? "ok" : connecting ? "busy" : "pending",
           },
-          {
+          ...(!ctx.observeOnly ? [{
             label: t("控制按键已收到"),
-            state: ctx.remoteButtonObserved ? "ok" : "pending",
-          },
+            state: ctx.remoteButtonObserved ? "ok" as const : "pending" as const,
+          }] : []),
         ],
       };
     }
 
     case "full_key":
+      if (ctx.observeOnly) return { visual: "remote" };
       return {
         visual: "remote",
         cardTitle: t("全按键支持"),
@@ -210,6 +212,7 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
     }
 
     case "controls": {
+      if (ctx.observeOnly) return { visual: "remote" };
       const n = ctx.distinctButtons;
       return {
         visual: "remote",

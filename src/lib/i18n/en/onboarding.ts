@@ -1,5 +1,8 @@
 // English strings for onboarding. Key = exact Chinese source passed to t().
 export default {
+  "查看遥控器按键": "Observe remote buttons",
+  "Chromecast 可在「按键」页配置普通按键。这里可以直接继续设置听写。": "Configure Chromecast buttons on the Buttons page. You can continue to set up dictation.",
+  "这一页只检查是否收到普通按键。你可以直接继续，之后到「按键」页配置单击、双击、三击和长按。": "This page checks for button presses. You can continue now and configure single, double, triple, and long presses on the Buttons page.",
   // ---- Shell / navigation ----
   "设置阶段": "Setup stage",
   "准备": "Prepare",
@@ -35,15 +38,15 @@ export default {
     "SayAll supports only the Xiaomi Bluetooth Voice Remote 2 and 2 Pro (RC001 / RC003).",
   "正在扫描…": "Scanning…",
   "扫描已配对设备": "Scan for paired devices",
-  "已配对的小米蓝牙语音遥控器": "Paired Xiaomi Bluetooth Voice Remote",
+  "已配对的遥控器": "Paired remote",
   "正在连接…": "Connecting…",
   "已连接": "Connected",
   "连接": "Connect",
   "已收到遥控器按键": "Remote button received",
   "等待控制按键": "Waiting for a control button",
-  "正在寻找小米遥控器…": "Looking for Xiaomi remotes…",
-  "找到 1 个已配对的小米遥控器": "Found 1 paired Xiaomi remote",
-  "找到 {count} 个已配对的小米遥控器": "Paired Xiaomi remotes found: {count}",
+  "正在寻找遥控器…": "Looking for remotes…",
+  "找到 1 个已配对的遥控器": "Found 1 paired remote",
+  "找到 {count} 个已配对的遥控器": "Paired remotes found: {count}",
   "按一下遥控器上的普通按键（比如主页键），不要按语音键。":
     "Press a regular button on the remote, such as Home. Do not press the voice button.",
   "先按一下普通按键；仍无反应时，按下面的步骤重新配对。":

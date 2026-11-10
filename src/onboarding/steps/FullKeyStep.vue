@@ -15,6 +15,7 @@ const props = defineProps<{
   enabled: boolean;
   /** 本机能否使用该功能（ARM64 等不可用时置灰开关）。 */
   available: boolean;
+  observeOnly?: boolean;
   /** 开启/关闭请求进行中。 */
   busy: boolean;
   /** 首次读取状态中：开关先置灰，避免把"还没读到"显示成"关着"。 */
@@ -48,7 +49,11 @@ watch(
 </script>
 
 <template>
-  <section class="onboarding-step">
+  <section v-if="observeOnly" class="onboarding-step">
+    <h1>{{ t("全按键支持") }}</h1>
+    <p class="onboarding-lede">{{ t("Chromecast 可在「按键」页配置普通按键。这里可以直接继续设置听写。") }}</p>
+  </section>
+  <section v-else class="onboarding-step">
     <h1>{{ t("开启全按键支持") }}</h1>
     <p class="onboarding-lede">
       {{

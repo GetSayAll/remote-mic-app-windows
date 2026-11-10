@@ -9,6 +9,7 @@ const props = defineProps<{
   tool: VoiceInputTool | null;
   hotkeyLabel: string;
   captureEnabled: boolean;
+  chromecast?: boolean;
   captureBusy: boolean;
   captureHint: string;
   conflict: boolean;
@@ -37,7 +38,7 @@ const TOOL_CARDS = computed<Array<{ id: VoiceInputTool; title: string; blurb: st
   {
     id: "wechat",
     title: t("微信输入法"),
-    blurb: t("按住遥控器语音键 = 左 Ctrl + 左 Win"),
+    blurb: props.chromecast ? t("推荐用于 Chrome 听写") : t("按住遥控器语音键 = 左 Ctrl + 左 Win"),
   },
   { id: "vokie", title: "Vokie", blurb: t("按住遥控器语音键 = 右 Alt") },
   { id: "other", title: t("其他工具"), blurb: t("自己选一个语音键") },
@@ -108,15 +109,17 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
       <OptionCard
         v-for="card in TOOL_CARDS"
         :key="card.id"
+        :disabled="chromecast && card.id !== 'wechat'"
         :selected="tool === card.id"
         @select="$emit('selectTool', card.id)"
       >
         <strong>{{ card.title }}</strong>
-        <small>{{ card.blurb }}</small>
+        <small v-if="chromecast && card.id !== 'wechat'">{{ t("当前遥控器请使用微信输入法和默认语音键。") }}</small>
+        <small v-else>{{ card.blurb }}</small>
       </OptionCard>
     </div>
 
-    <div v-if="tool === 'doubao'" class="onboarding-card">
+    <div v-if="tool === 'doubao' && !chromecast" class="onboarding-card">
       <h4>{{ t("按住遥控器语音键 = {hotkey}", { hotkey: hotkeyLabel }) }}<span class="onboarding-tag">{{ t("本次设置") }}</span></h4>
       <p>{{ t("在豆包里把麦克风选为 CABLE Output；长按语音键保持右 Alt（出厂默认就是它）。") }}</p>
       <div class="onboarding-switch-row">
@@ -143,6 +146,7 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
     <div v-else-if="tool === 'wechat'" class="onboarding-card">
       <h4>{{ t("按住遥控器语音键 = 左 Ctrl + 左 Win") }}<span class="onboarding-tag">{{ t("本次设置") }}</span></h4>
       <p>{{ t("在微信输入法里把麦克风选为 CABLE Output；语音需要联网，按住约半秒以上再说话。") }}</p>
+      <p v-if="chromecast">{{ t("先点 Chrome 里的草稿框，再按住语音键说话。等文字出现在草稿里，确认内容后手动发送。说话时请留在当前输入框。") }}</p>
     </div>
 
     <div v-else-if="tool === 'vokie'" class="onboarding-card">

@@ -48,6 +48,30 @@ function makeContext(
 }
 
 describe("onboarding step order", () => {
+  it("requires the WeType preset on Chromecast despite a saved tool or capture setting", () => {
+    const context = makeContext({
+      remote: { model: "chromecast" },
+      voiceTool: { tool: "doubao", doubaoCaptureEnabled: true },
+    });
+    expect(evaluateGate("voice_tool", context).code).toBe("tool.chromecast.wetype_required");
+    expect(evaluateGate("complete", context).code).toBe("tool.chromecast.wetype_required");
+    context.voiceTool.tool = "wechat";
+    expect(evaluateGate("voice_tool", context).code).toBe("tool.chromecast.wetype_required");
+    context.voiceTool.weTypeChordReady = true;
+    expect(evaluateGate("voice_tool", context).ok).toBe(true);
+  });
+
+  it("allows Chromecast without ordinary buttons while still requiring voice evidence", () => {
+    const context = makeContext({
+      remote: { model: "chromecast", remoteButtonObserved: false, rawInputPhase: "awaiting" },
+      controls: { distinctButtons: 0 },
+      voiceTool: { weTypeChordReady: true },
+      voiceTest: { verified: false },
+    });
+    expect(evaluateGate("remote", context).ok).toBe(true);
+    expect(evaluateGate("controls", context).ok).toBe(true);
+    expect(evaluateGate("complete", context).code).toBe("voice_test.not_verified");
+  });
   it("keeps the confirmed order plus the optional full-key step after the audio device", () => {
     expect(ONBOARDING_STEPS).toEqual([
       "welcome",

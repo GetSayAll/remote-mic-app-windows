@@ -31,6 +31,7 @@ windows = { version = "0.62", features = [
     "Foundation",
     "Storage_Streams",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Security",

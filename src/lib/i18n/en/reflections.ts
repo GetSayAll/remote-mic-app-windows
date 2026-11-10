@@ -137,4 +137,63 @@ export default {
   "这个客户端已经有一份有效授权，请先使用现有授权或撤销后再创建。":
     "This client already has an active authorization. Use it or revoke it before creating another.",
   "本地 Agent 访问操作失败，请稍后重试。": "Local Agent access failed. Try again later.",
+  "本地 Whisper 转写": "Local Whisper transcription",
+  "请在 SayAll 主窗口打开本地转写。": "Open local transcription in the main SayAll window.",
+  "本地转写需要在 SayAll Windows 客户端中使用。": "Local transcription is available in the SayAll Windows app.",
+  "用本机模型把 WAV 音频转成可编辑草稿。选好文件后，点击开始转写。":
+    "Turn a WAV file into an editable draft on this device. Choose your files, then start transcription.",
+  "也可以等待下一次 Chromecast 听写。点击等待后，按住遥控器语音键说话，松开生成草稿。":
+    "To use the Chromecast remote, start waiting, hold the voice button while speaking, and release it to create a draft.",
+  "支持 whisper.cpp v1.9.1 的 Windows x64 CPU 版和 ggml-base-q5_1.bin 模型。":
+    "Use the Windows x64 CPU build of whisper.cpp v1.9.1 and the ggml-base-q5_1.bin model.",
+  "音频需为 16 kHz、16 位、单声道 PCM WAV，时长 0.2 至 60 秒。":
+    "Audio must be 16 kHz, 16-bit, mono PCM WAV and 0.2 to 60 seconds long.",
+  "选择转写程序": "Choose executable",
+  "选择模型": "Choose model",
+  "选择 WAV 音频": "Choose WAV audio",
+  "尚未选择": "No file selected",
+  "转写语言": "Transcription language",
+  "中文": "Chinese",
+  "自动识别": "Detect automatically",
+  "开始转写": "Start transcription",
+  "等待遥控器听写": "Wait for remote dictation",
+  "正在验证本地模型和遥控器…": "Checking the local model and remote…",
+  "正在接收遥控器语音。松开语音键结束。": "Receiving remote audio. Release the voice button to finish.",
+  "请按住遥控器语音键说话。": "Hold the remote's voice button while speaking.",
+  "本次遥控器听写已超时，请重新点击等待。": "Remote dictation timed out. Start waiting again.",
+  "取消转写": "Cancel transcription",
+  "正在取消转写…": "Cancelling transcription…",
+  "正在本机转写…": "Transcribing on this device…",
+  "已取消转写。": "Transcription cancelled.",
+  "草稿已复制。": "Draft copied.",
+  "转写完成。音频 {duration} 秒，耗时 {elapsed} 秒。":
+    "Transcription complete. {duration} seconds of audio took {elapsed} seconds.",
+  "转写草稿": "Transcript draft",
+  "复制草稿": "Copy draft",
+  "新转写已完成。当前草稿有改动，请选择要保留的内容。":
+    "A new transcript is ready. Choose whether to keep the draft you edited.",
+  "保留当前草稿": "Keep current draft",
+  "使用新转写": "Use new transcript",
+  "已有转写在运行，请稍后再试。": "Transcription is already running. Try again shortly.",
+  "无法打开文件选择器。": "Could not open the file picker.",
+  "无法读取所选文件，请重新选择本机文件。": "Could not read the selected file. Select a local file again.",
+  "无法验证转写程序。请选择受支持的 Whisper 程序，并保留同包 DLL。":
+    "The executable could not be verified. Choose the supported Whisper build and keep its DLLs together.",
+  "无法验证 Whisper 模型，请重新选择受支持的模型文件。":
+    "The Whisper model could not be verified. Choose the supported model file.",
+  "请选择 16 kHz、16 位、单声道 PCM WAV 音频。": "Select a 16 kHz, 16-bit, mono PCM WAV file.",
+  "这段音频超出转写长度范围。请选择 0.2 至 60 秒的音频。":
+    "This audio is outside the supported duration. Choose 0.2 to 60 seconds of audio.",
+  "本地转写超时，请缩短音频后重试。": "Local transcription timed out. Try a shorter recording.",
+  "无法启动 Whisper 转写程序。": "Could not start Whisper.",
+  "Whisper 转写失败，请核对程序、模型和音频格式。":
+    "Whisper transcription failed. Check the executable, model, and audio format.",
+  "Whisper 返回的文字无法读取。": "Could not read the text returned by Whisper.",
+  "没有识别出文字，请检查音频内容。": "No speech was recognized. Check the audio.",
+  "无法准备本地转写所需的文件。": "Could not prepare the files for local transcription.",
+  "遥控器语音会话不可用。请确认 Chromecast 遥控器已连接，然后重试。":
+    "Remote dictation is unavailable. Connect your Chromecast remote and try again.",
+  "本地转写失败，请稍后重试。": "Local transcription failed. Try again later.",
+  "无法复制草稿，你可以手动选中文字。": "Could not copy the draft. You can select the text manually.",
+  "取消请求失败，请重试。": "Could not request cancellation. Try again.",
 };
