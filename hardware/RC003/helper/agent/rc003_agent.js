@@ -87,7 +87,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-10-23.release-hold';
+var AGENT_BUILD = '2026-11-10.cast-report-class';
 
 var TARGET_IOCTL = 0x80018483;
 var TARGET_USAGES = [
@@ -110,6 +110,24 @@ var TARGET_NAMES = {
   0x0080: 'volume_up', 0x0081: 'volume_down'
 };
 var REPORT_ID = 0x01;
+
+/* Chromecast 报告类（CAST-13，ADR 0004）。同一 IOCTL 的另一类输出：
+ * 3 字节 [0x02, usage_lo, usage_hi]，usage 为 16 位小端消费页值、0=释放帧。
+ * vibe-mote（MIT）在真机验证的格式；usage 白名单是
+ * sayall-windows `raw_input::chromecast_button_for_consumer_usage` 的镜像
+ * （两处必须同步改）。该类报告只观察+清零，不参与 synth/gate。 */
+var CAST_REPORT_ID = 0x02;
+var CAST_REPORT_LEN = 3;
+var CAST_TARGET_USAGES = [
+  0x019E, 0x0042, 0x0043, 0x0044, 0x0045, 0x0041, 0x0224, 0x0223,
+  0x00E9, 0x00EA, 0x00E2, 0x0077, 0x0078, 0x0089, 0x0189
+];
+var CAST_TARGET_NAMES = {
+  0x019E: 'power', 0x0042: 'up', 0x0043: 'down', 0x0044: 'left',
+  0x0045: 'right', 0x0041: 'ok', 0x0224: 'back', 0x0223: 'home',
+  0x00E9: 'volume_up', 0x00EA: 'volume_down', 0x00E2: 'volume_mute',
+  0x0077: 'youtube', 0x0078: 'netflix', 0x0089: 'input', 0x0189: 'input'
+};
 
 var LEASE_MS = 2000;          /* 超过此时间未收到续约就停止清键 */
 var HB_MS = 500;              /* 所有权心跳周期；须显著短于 2s 租约 */
@@ -199,6 +217,13 @@ var stat = {
   target_hits: 0,
   /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。 */
   canary_hits: 0,
+  /* Chromecast 报告类（CAST-13）：观察/命中/清零/边沿。无 HID 流的主机上
+     cast_reports 恒零即是"本机不适用"的直接诊断。 */
+  cast_reports: 0,
+  cast_target_hits: 0,
+  cast_clears_ok: 0,
+  cast_clears_fail: 0,
+  cast_edges_sent: 0,
   clears_ok: 0,
   clears_fail: 0,
   restores_ok: 0,
@@ -245,6 +270,12 @@ var pressed = {};             /* 当前按下的目标 usage（绝对状态） *
    在外部看不出差别 —— 清一个本来可用的键（如主页 0x4A）才能让清空是否生效变得可见。 */
 var reportUsages = [];
 var clearUsages = [];
+/* Chromecast 报告类的并行状态（CAST-13）。castReportUsages/castClearUsages 由
+   targets 命令的 castReport/castClear 字段下发；castPressed 记绝对状态，
+   usage==0 的释放帧据此批量发释放边沿。 */
+var castReportUsages = [];
+var castClearUsages = [];
+var castPressed = {};
 var targetGeneration = 0;
 
 /* ------------------------------------------------------- 编解码与传输 */
@@ -500,8 +531,39 @@ function handleCommand(line) {
     clearUsages = clr.slice();
     targetGeneration = Math.floor(nextGeneration);
     emitEdgesIfChanged(retained);
+    /* Chromecast 目标集（CAST-13）：castReport/castClear 可选字段，独立白名单
+       校验（CAST_TARGET_USAGES），clear 必须覆盖 report。字段缺席时保持现状
+       ——旧版助手/主程序发的 targets 命令行为不变。 */
+    var castAck = null;
+    if (cmd.castReport !== undefined || cmd.castClear !== undefined) {
+      var cRep = usageArrayOf(cmd.castReport);
+      var cClr = usageArrayOf(cmd.castClear);
+      if (cRep === null || cClr === null) {
+        stat.cmd_rejected++; logLine('targets:cast_rejected_bad_array');
+      } else {
+        var castOk = true;
+        for (var ci = 0; ci < cRep.length && castOk; ci++) {
+          if (CAST_TARGET_USAGES.indexOf(cRep[ci]) < 0) castOk = false;
+        }
+        for (var ck = 0; ck < cRep.length && castOk; ck++) {
+          if (cClr.indexOf(cRep[ck]) < 0) castOk = false;
+        }
+        if (!castOk) {
+          stat.cmd_rejected++; logLine('targets:cast_rejected_outside_whitelist');
+        } else {
+          castReportUsages = cRep.slice();
+          castClearUsages = cClr.slice();
+          castAck = { report: castReportUsages.slice(), clear: castClearUsages.slice() };
+          logLine('targets:cast_applied report=' + usagesHex(castReportUsages)
+            + ' clear=' + usagesHex(castClearUsages));
+        }
+      }
+    }
     stat.targets_applied++;
-    sendLine({ type: 'targets_ack', t: Date.now(), generation: targetGeneration, usages: reportUsages });
+    sendLine({
+      type: 'targets_ack', t: Date.now(), generation: targetGeneration,
+      usages: reportUsages, cast: castAck
+    });
     logLine('targets:applied generation=' + targetGeneration + ' report=' + usagesHex(reportUsages)
       + ' clear=' + usagesHex(clearUsages));
     return;
@@ -546,9 +608,20 @@ function handleCommand(line) {
 function releaseEdges(reason) {
   var usages = [];
   for (var u in pressed) if (pressed[u]) usages.push(parseInt(u, 10));
-  if (usages.length === 0) return;
-  pressed = {};
-  sendLine({ type: 'edge', t: Date.now(), usages: [], released_all: true, reason: reason });
+  if (usages.length > 0) {
+    pressed = {};
+    sendLine({ type: 'edge', t: Date.now(), usages: [], released_all: true, reason: reason });
+  }
+  /* Chromecast 按下状态同样随租约失效/复位一并释放（device=cast）。 */
+  var castHeld = [];
+  for (var cu in castPressed) if (castPressed[cu]) castHeld.push(parseInt(cu, 10));
+  if (castHeld.length > 0) {
+    castPressed = {};
+    sendLine({
+      type: 'edge', device: 'cast', t: Date.now(),
+      usages: [], released_all: true, reason: reason
+    });
+  }
 }
 
 /* ------------------------------------------------------------ 读泵 */
@@ -796,6 +869,57 @@ function writeReport(ptr, bytes) {
   }
 }
 
+/* Chromecast 消费页报告（CAST-13，ADR 0004）。
+ *
+ * 格式（vibe-mote 真机验证 + 本仓库 ADR 0004 调研）：3 字节
+ * [0x02, usage_lo, usage_hi]，usage 16 位小端；usage==0 是释放帧（无和弦、
+ * 无长按重发，可能出现孤立释放——解析端一律按"绝对状态"处理）。
+ *
+ * 处理：① usage 非零且在白名单 ⇒ 记按下、发边沿（device=cast）；
+ * ② usage==0 ⇒ 对当前记住的按下批量发释放；③ 已映射键（castClearUsages）
+ * 在租约有效 + clear 模式下，**快照上报之后**把 usage 两字节原地清零——
+ * 驱动以为没按键，Windows 原生动作不再发生（与 RC003 清键同款安全门禁，
+ * 只写偏移 1..2，绝不触碰 report_id）。观察模式一个字节都不写。 */
+function handleCastReport(outPtr) {
+  stat.cast_reports++;
+  var bytes;
+  try {
+    bytes = new Uint8Array(outPtr.readByteArray(CAST_REPORT_LEN));
+  } catch (e) {
+    stat.errors++;
+    return;
+  }
+  var usage = bytes[1] | (bytes[2] << 8);
+  if (usage === 0) {
+    /* 释放帧：清掉记住的按下并发一条批量释放边沿。 */
+    var held = [];
+    for (var u in castPressed) if (castPressed[u]) held.push(parseInt(u, 10));
+    if (held.length === 0) return;          /* 孤立释放：忽略 */
+    castPressed = {};
+    stat.cast_edges_sent++;
+    sendLine({
+      type: 'edge', device: 'cast', t: Date.now(),
+      usages: [], released_all: true, reason: 'report'
+    });
+    return;
+  }
+  if (CAST_TARGET_USAGES.indexOf(usage) < 0) return;   /* 非语义键：不动不报 */
+  stat.cast_target_hits++;
+  castPressed[usage] = true;
+  stat.cast_edges_sent++;
+  sendLine({
+    type: 'edge', device: 'cast', t: Date.now(),
+    usages: [usage],
+    buttons: [CAST_TARGET_NAMES[usage] || ('0x' + usage.toString(16))],
+    n: 1,
+    reason: 'state'
+  });
+  if (!(leaseOk() && mode === 'clear')) return;
+  if (castClearUsages.indexOf(usage) < 0) return;
+  var res = writeReport(outPtr, new Uint8Array([CAST_REPORT_ID, 0, 0]));
+  if (res.ok) { stat.cast_clears_ok++; } else { stat.cast_clears_fail++; }
+}
+
 function installHook() {
   var ntdll = Process.getModuleByName('ntdll.dll');
   var fn = ntdll.getExportByName('NtDeviceIoControlFile');
@@ -813,7 +937,7 @@ function installHook() {
 
         var inLen = args[7].toUInt32();
         var outLen = args[9].toUInt32();
-        if (inLen !== 8 || outLen < 9) return;
+        if (inLen !== 8) return;
 
         var outPtr = args[8];
         if (outPtr === null || outPtr.isNull()) return;
@@ -823,7 +947,16 @@ function installHook() {
         var inBytes = new Uint8Array(inPtr.readByteArray(8));
         if (inBytes[4] !== 0x02 || inBytes[5] !== 0x01) return;
 
-        if (outPtr.readU8() !== REPORT_ID) return;
+        var firstByte = outPtr.readU8();
+        /* Chromecast 消费页报告类（CAST-13）：3 字节 [0x02, u16 usage]。
+           独立于键盘报告路径处理，处理完即返回——两类报告不会共用状态。 */
+        if (firstByte === CAST_REPORT_ID && outLen === CAST_REPORT_LEN) {
+          handleCastReport(outPtr);
+          return;
+        }
+
+        if (outLen < 9) return;
+        if (firstByte !== REPORT_ID) return;
 
         this.hit = true;
         this.outPtr = outPtr;
@@ -1015,6 +1148,14 @@ function heartbeat() {
        此前这只能靠助手侧推断，agent 实际用的是什么都没人知道。 */
     report_usages: usagesHex(reportUsages),
     clear_usages: usagesHex(clearUsages),
+    /* Chromecast 报告类观测面（CAST-13）：无 HID 流主机上 cast_reports 恒零
+       即"本机不适用"的直接判据。 */
+    cast_report_usages: usagesHex(castReportUsages),
+    cast_clear_usages: usagesHex(castClearUsages),
+    cast_reports: stat.cast_reports,
+    cast_target_hits: stat.cast_target_hits,
+    cast_clears_ok: stat.cast_clears_ok,
+    cast_clears_fail: stat.cast_clears_fail,
     synth_from: synthFrom,
     synth_to: synthTo,
     gate_delay_ms: gateDelayMs,

@@ -13,6 +13,7 @@
   - [x] CAST-10 · 确定键与实时反馈 · 支持当前 Windows HID 描述符的 3 字节 Report 1。用实际设备描述符合成按下和释放，验证手势、组合键派发和界面高亮的各层。保留原有 2 字节 Report 1 和 3 字节 Report 2 兼容。实体无线报文和 Codex 收键仍列在 CAST-09。
   - [x] CAST-11 · P0 按键诊断 · 按连接代次记录匹配接口、报文接收与过滤、解码、按键边沿、手势和快捷键提交结果。回放覆盖 OK 映射 Enter、Shift+Enter 和 Ctrl+Enter。实体按键定位及应用收键仍列在 CAST-09。
   - [~] CAST-12 · P0 普通键报文捕获 · **已由 2026-11-10 HCI 抓包结案（结论推翻 Helper 前提）**：该遥控器对 Windows 主机**从不发送 HID 输入报告**（Raw Input/共享直读全零是必然），普通按键走 Google 键事件服务 `{D343BFC0-…}` 的 `D343BFC5` 特征通知（8 字节：首字节键码、0=释放；键码与 legacy report-1 位索引同表）。已实现订阅+解码+接入映射引擎（commit fe84680）。**遗留**：写 CCCD 后该固件停发键通知（写前无人订阅时反而持续发送）——需重配对复测 + 空中轨迹定位"写 CCCD 停发"的固件行为，候选方案为免写 CCCD 的只听订阅。原"Google 专用 Helper"路线作废：无 HID 报文可捕获。证据见 [Testing/WindowsChromecast.md](Testing/WindowsChromecast.md)。
+  - [ ] CAST-13 · P0 Google 报告层 Helper · 复用 RC003 增强捕获框架为 Chromecast 接入按键（ADR 0004）。开源先例 vibe-mote 已验证同款遥控器、同款注入路径（`NtDeviceIoControlFile` IOCTL 0x80018483 输出缓冲区，3 字节 `[0x02,u16 usage]` 报告 + 映射键 usage 原地清零）。分层：① agent 新增 0x02 报告类（观察+清零）与逻辑测试；② helper edge 消息带 `device=cast` 维度并按设备隔离目标/租约；③ 主程序 `rc003_task.rs` 泛化 + `ChromecastInput` 新来源接 `chromecast_button_for_consumer_usage` + `capture_support()` 放开；④ ATTRIBUTION 登记 vibe-mote；⑤ 有 HID 流真机 13 键矩阵 + fail-open + 哨兵键验收。**覆盖边界**：测试机这类空中无 HID 流主机不在覆盖内（计数恒零须可诊断）。
 
 ### 本地听写与转写
 
