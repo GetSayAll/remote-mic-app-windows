@@ -323,3 +323,58 @@ snippets, with one-step undo while the modified draft remains untouched.
 - Physical remote timing and same-subscription ATVV ordering are native
   acceptance cases. Chrome draft binding and Codex shortcut receipt have
   separate acceptance criteria.
+
+## Vendor key transport — HCI capture verdict (2026-11-10)
+
+Microsoft Bluetooth Virtual Sniffer (BTP 1.14.0, `btvs.exe -Mode Wireshark`)
+captured the live HCI stream while the preview was connected. Two labeled
+button sessions plus one voice press were recorded; the pcap evidence is
+summarized below (packet payloads sanitized to codes and handles only).
+
+- **The remote never sends HID input reports to this Windows host.** Across
+  the entire capture the only notifying handles were battery (`0x001d`,
+  level 99–100), the key-event stream (`0x0029`), ATVV audio (`0x003c`) and
+  ATVV control (`0x003f`). Raw Input and the shared HID reader observing zero
+  packets is therefore expected and permanent for this pairing; the CAST-12
+  idea of a Google report-layer Helper has nothing to capture.
+- **Ordinary keys ride the vendor key service.** Every press produced one
+  8-byte notification on handle `0x0029` — first byte key code, `0x00` for
+  release — always paired with a `StreamStopped` (`[00 02]`) control
+  notification. A 19-press labeled session mapped the codes exactly onto the
+  legacy report-1 index table already decoded in `raw_input.rs` (1=Power,
+  3=Up, 4=Down, 5=Left, 6=Right, 7=OK, 8=Mute, 10=Home, 11=Back, 12=Vol+,
+  13=Vol−, 14=YouTube, 15=Netflix, 17=Input). The voice key is not on this
+  channel; it uses the ATVV control stream as before.
+- **Service identity.** Windows enumerates the notify-capable characteristic
+  as `D343BFC5-5A21-4F05-BC7D-AF01F617B664` inside service
+  `{D343BFC0-5A21-4F05-BC7D-AF01F617B664}` (same UUID base as ATVV, five
+  characteristics, exactly one notify-capable). The ATVV service itself
+  exposes only transmit/audio/control, and transmit (`0xAB5E0002`) is
+  write-only per Windows properties — subscribing it fails with
+  "特征不支持 Notify 或 Indicate".
+
+### Implementation state
+
+Commit `fe84680` discovers the key service (uncached), picks the
+notify-capable characteristic by property (excluding the known ATVV UUIDs,
+falling back to the ATVV service for future firmware), subscribes it as a
+`Transmit` worker channel, decodes the 8-byte reports via
+`decode_chromecast_vendor_key`, and forwards edges to the mapping engine as
+a `Vendor` source with the existing per-key single-source arbitration.
+Session cleanup unsubscribes and closes the retained service
+(service+characteristic+token triple, mirroring the battery subscription —
+dropping the `GattDeviceService` kills WinRT notification routing).
+
+### Open firmware question (blocks live button acceptance)
+
+Before any host CCCD write, the remote streamed key notifications
+unconditionally (nobody was subscribed during the captures). After the first
+explicit `CCCD=Notify` write on `D343BFC5`, key notifications stopped while
+control/audio kept flowing: the app then observed only `[00 02]` shadows per
+press and zero `direction=K` packets. Suspected firmware behavior: the CCCD
+write (or the app-restart churn around it) disables the default-on notify.
+Next evidence steps: re-pair the remote with a capture running to reset the
+bond store and observe the fresh default, then decide between a listen-only
+subscription (register `ValueChanged` without writing the CCCD) and
+re-writing the CCCD after connect. Native button acceptance (CAST-09 matrix)
+remains blocked on this question.

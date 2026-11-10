@@ -3806,16 +3806,16 @@ struct BleSession {
     audio_token: i64,
     control_token: i64,
     connection_token: i64,
-    /// 厂商服务按键通知特征的订阅令牌：仅 Chromecast 订阅，小米为 None。
-    vendor_key_token: Option<i64>,
+    /// 厂商按键特征的订阅令牌（全部候选逐一订阅；小米为空）。
+    vendor_key_tokens: Vec<i64>,
     /// 厂商键事件服务对象：必须与特征、令牌一起持有（与电池订阅三件套同
     /// 理由）——GattDeviceService 被释放后，特征的 ValueChanged 通知路由
     /// 随之失效，出现"订阅成功但永无回调"。fallback 走 ATVV 服务时为
     /// None（该服务由会话本体持有并关闭）。
     vendor_key_service: Option<GattDeviceService>,
-    /// 厂商服务里被订阅的按键通知特征（Google 私有，非 ATVV 四特征）。
-    /// cleanup 退订需要同一对象。
-    vendor_key_characteristic: Option<GattCharacteristic>,
+    /// 被订阅的全部按键通知特征（Windows 属性缓存与遥控器空中表在键服务
+    /// 区错位，须全订阅覆盖真实句柄）。cleanup 退订需要同一对象。
+    vendor_key_characteristics: Vec<GattCharacteristic>,
     params_token: Option<i64>,
     /// GATT 电量订阅（0x180F/0x2A19，可选增强）：订阅成功时持有三件套并在
     /// cleanup 成对释放；失败或设备无 BAS 时为 None，由 60s 缓存轮询兜底。
@@ -3850,9 +3850,9 @@ struct PendingBleConnection {
     control: Option<GattCharacteristic>,
     audio_token: Option<i64>,
     control_token: Option<i64>,
-    vendor_key_token: Option<i64>,
+    vendor_key_tokens: Vec<i64>,
     vendor_key_service: Option<GattDeviceService>,
-    vendor_key_characteristic: Option<GattCharacteristic>,
+    vendor_key_characteristics: Vec<GattCharacteristic>,
     connection_token: Option<i64>,
     params_token: Option<i64>,
     params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
@@ -3871,8 +3871,8 @@ impl PendingBleConnection {
             audio_token: None,
             control_token: None,
             vendor_key_service: None,
-            vendor_key_token: None,
-            vendor_key_characteristic: None,
+            vendor_key_tokens: Vec::new(),
+            vendor_key_characteristics: Vec::new(),
             connection_token: None,
             params_token: None,
             params_request: None,
@@ -3901,10 +3901,8 @@ impl PendingBleConnection {
             .expect("pending control characteristic is owned")
     }
 
-    fn vendor_keys(&self) -> &GattCharacteristic {
-        self.vendor_key_characteristic
-            .as_ref()
-            .expect("pending vendor key characteristic is owned")
+    fn vendor_keys(&self) -> &[GattCharacteristic] {
+        &self.vendor_key_characteristics
     }
 
     fn transmit(&self) -> &GattCharacteristic {
@@ -3956,9 +3954,9 @@ impl PendingBleConnection {
                 .connection_token
                 .take()
                 .expect("pending connection subscription is owned"),
-            vendor_key_token: self.vendor_key_token.take(),
+            vendor_key_tokens: std::mem::take(&mut self.vendor_key_tokens),
             vendor_key_service: self.vendor_key_service.take(),
-            vendor_key_characteristic: self.vendor_key_characteristic.take(),
+            vendor_key_characteristics: std::mem::take(&mut self.vendor_key_characteristics),
             params_token: self.params_token.take(),
             params_request: self.params_request.take(),
             microphone_opened: false,
@@ -4325,33 +4323,43 @@ impl BleSession {
             },
         )?);
 
-        // Google 遥控器的普通按键在厂商服务 transmit 通知上（2026-11-10
-        // HCI 抓包实证，见 Testing/WindowsChromecast.md）：只有 Chromecast
-        // 订阅；小米继续只用 transmit 的写入方向，行为不变。订阅失败按
-        // 连接阶段失败处理——按键功能是 Chromecast 的核心能力，不静默降级。
+        // Google 遥控器的普通按键在 Google 键事件服务的特征通知上（2026-11-10
+        // HCI 抓包实证，见 Testing/WindowsChromecast.md）。Windows 属性缓存与
+        // 遥控器空中表在键服务区句柄错位（单选会订到不通知的句柄），因此把
+        // 服务内全部 Notify/Indicate 候选逐一订阅。小米不订阅，行为不变。
+        // 订阅失败按连接阶段失败处理——按键功能是 Chromecast 的核心能力。
         if model == RemoteModel::Chromecast {
-            let (vendor_key_service, vendor_key_characteristic) = connect_stage(
+            let (vendor_key_service, vendor_key_characteristics) = connect_stage(
                 reconnecting,
                 reconnect_attempt,
-                "vendor_key_characteristic",
-                || find_vendor_key_characteristic(pending.device(), pending.service()),
+                "vendor_key_characteristics",
+                || find_vendor_key_characteristics(pending.device(), pending.service()),
             )?;
             pending.vendor_key_service = vendor_key_service;
-            pending.vendor_key_characteristic = Some(vendor_key_characteristic);
-            pending.vendor_key_token = Some(connect_stage(
+            pending.vendor_key_characteristics = vendor_key_characteristics;
+            connect_stage(
                 reconnecting,
                 reconnect_attempt,
                 "subscribe_vendor_keys",
                 || {
-                    subscribe(
-                        pending.vendor_keys(),
-                        transmit_sender.clone(),
-                        WorkerChannel::Transmit,
-                        connection_generation,
-                        None,
-                    )
+                    let mut tokens = Vec::new();
+                    for characteristic in pending.vendor_keys() {
+                        tokens.push(subscribe(
+                            characteristic,
+                            transmit_sender.clone(),
+                            WorkerChannel::Transmit,
+                            connection_generation,
+                            None,
+                        )?);
+                    }
+                    gatt_note(format!(
+                        "vendor_key_subscriptions total={} connection_generation={connection_generation}",
+                        tokens.len()
+                    ));
+                    pending.vendor_key_tokens = tokens;
+                    Ok(())
                 },
-            )?);
+            )?;
         }
 
         let mut connected = pending.finish(name, model, f5_callback_active);
@@ -4573,12 +4581,14 @@ impl BleSession {
             if self.control.RemoveValueChanged(self.control_token).is_err() {
                 best_effort_failures += 1;
             }
-            let vendor_keys_subscribed = self.vendor_key_token.take();
-            if let Some(token) = vendor_keys_subscribed {
-                if let Some(characteristic) = &self.vendor_key_characteristic {
-                    if characteristic.RemoveValueChanged(token).is_err() {
-                        best_effort_failures += 1;
-                    }
+            let vendor_keys_subscribed = !self.vendor_key_tokens.is_empty();
+            for (token, characteristic) in self
+                .vendor_key_tokens
+                .drain(..)
+                .zip(self.vendor_key_characteristics.iter())
+            {
+                if characteristic.RemoveValueChanged(token).is_err() {
+                    best_effort_failures += 1;
                 }
             }
             // 三件套收尾：特征退订后关闭键事件服务对象（与电池服务同模式）。
@@ -4609,14 +4619,12 @@ impl BleSession {
                 if disable_notifications(&self.control).is_err() {
                     best_effort_failures += 1;
                 }
-                if vendor_keys_subscribed.is_some()
-                    && self
-                        .vendor_key_characteristic
-                        .as_ref()
-                        .map(|characteristic| disable_notifications(characteristic).is_err())
-                        .unwrap_or(false)
-                {
-                    best_effort_failures += 1;
+                if vendor_keys_subscribed {
+                    for characteristic in &self.vendor_key_characteristics {
+                        if disable_notifications(characteristic).is_err() {
+                            best_effort_failures += 1;
+                        }
+                    }
                 }
             }
             if let Some(request) = self.params_request.take() {
@@ -5374,23 +5382,22 @@ fn find_characteristic(
     characteristics.GetAt(0).map_err(windows_error)
 }
 
-/// 找普通按键的通知特征。
+/// 找普通按键的通知特征（返回全部候选，逐一订阅）。
 ///
-/// 2026-11-10 现场实证（HCI 抓包 + Windows 属性表对账）：该遥控器的按键
-/// 通知不在 ATVV 服务（0xAB5E0001 只有 transmit/audio/control 三个特征，
-/// transmit 0xAB5E0002 只写），而在同 UUID 基座的 Google 键事件服务
-/// {D343BFC0-5A21-4F05-BC7D-AF01F617B664}（HCI 句柄 0x29，8 字节载荷：
-/// 首字节键码、0=释放，键码空间与 legacy report-1 位索引一致）。
-///
-/// 选择策略：优先在该键事件服务内按属性挑选（Notify/Indicate）；服务
-/// 缺席时回退到 ATVV 服务内挑选（排除 audio/control/transmit），为未来
-/// 固件把特征并回 ATVV 服务留路径。命中多个时选 UUID 序最小者保证确定
-/// 性行为，并落前 8 位供对账。两处都找不到视为设备异常（连接失败），
-/// 不静默降级成"按键不可用"。
-fn find_vendor_key_characteristic(
+/// 2026-11-10 现场实证（HCI 抓包 + CCCD 写入对账）：该遥控器的按键通知
+/// 不在 ATVV 服务（transmit 0xAB5E0002 只写），而在 Google 键事件服务
+/// {D343BFC0-…} 的特征上（空中句柄 0x29，8 字节载荷：首字节键码、0=
+/// 释放，键码与 legacy report-1 位索引同表）。**且 Windows 的 GATT 属性
+/// 缓存与遥控器空中表在键服务区错位**：按缓存表挑中的单个特征（CCCD
+/// 0x37）不是实际通知的句柄（0x29），`Uncached` 查询也被缓存短路（重连
+/// 零发现流量）。因此不做单选——把键事件服务（缺席时回退 ATVV 服务）
+/// 内**所有** Notify/Indicate 特征（排除 audio/control/transmit）全部
+/// 订阅：任何一路命中真实句柄即恢复投递；解码层按载荷形状自证。全部
+/// 候选连同服务对象一起持有，cleanup 成对退订。零候选视为设备异常。
+fn find_vendor_key_characteristics(
     device: &BluetoothLEDevice,
     atvv_service: &GattDeviceService,
-) -> Result<(Option<GattDeviceService>, GattCharacteristic), PlatformError> {
+) -> Result<(Option<GattDeviceService>, Vec<GattCharacteristic>), PlatformError> {
     let key_service = (|| -> Option<GattDeviceService> {
         let operation = device
             .GetGattServicesForUuidWithCacheModeAsync(
@@ -5437,7 +5444,7 @@ fn find_vendor_key_characteristic(
     )?;
     let characteristics = result.Characteristics().map_err(windows_error)?;
     let count = characteristics.Size().map_err(windows_error)?;
-    let mut candidates: Vec<(String, GattCharacteristic)> = Vec::new();
+    let mut candidates: Vec<GattCharacteristic> = Vec::new();
     for index in 0..count {
         let characteristic = characteristics.GetAt(index).map_err(windows_error)?;
         let uuid = characteristic.Uuid().map_err(windows_error)?;
@@ -5452,25 +5459,23 @@ fn find_vendor_key_characteristic(
         {
             continue;
         }
-        candidates.push((format!("{uuid:?}"), characteristic));
+        let prefix = format!("{uuid:?}");
+        let prefix = prefix.trim_start_matches('{').get(..8).unwrap_or(&prefix);
+        gatt_note(format!(
+            "vendor_key_characteristic candidate uuid_prefix={prefix}"
+        ));
+        candidates.push(characteristic);
     }
     gatt_note(format!(
         "vendor_key_characteristic candidates={} service_characteristics={count}",
         candidates.len()
     ));
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates
-        .into_iter()
-        .map(|(uuid, characteristic)| {
-            gatt_note(format!(
-                "vendor_key_characteristic selected uuid_prefix={} ",
-                uuid.trim_start_matches('{').get(..8).unwrap_or(&uuid)
-            ));
-            characteristic
-        })
-        .next()
-        .map(|characteristic| (key_service, characteristic))
-        .ok_or_else(|| PlatformError::Gatt("厂商服务里没有可订阅的按键通知特征".to_owned()))
+    if candidates.is_empty() {
+        return Err(PlatformError::Gatt(
+            "厂商服务里没有可订阅的按键通知特征".to_owned(),
+        ));
+    }
+    Ok((key_service, candidates))
 }
 
 /// 是否需要读取 2A24 型号（纯判定，便于单测）。

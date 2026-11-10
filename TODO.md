@@ -12,7 +12,7 @@
   - [ ] CAST-09 · 按键真机 · 逐键记录可收到的 HID 报文、单/双/三击和释放，验证配置重启保留及切换回小米时恢复原设置。区分自定义动作与 Windows/红外原生动作。需要独占按键时单独验证 Google 报告层捕获。
   - [x] CAST-10 · 确定键与实时反馈 · 支持当前 Windows HID 描述符的 3 字节 Report 1。用实际设备描述符合成按下和释放，验证手势、组合键派发和界面高亮的各层。保留原有 2 字节 Report 1 和 3 字节 Report 2 兼容。实体无线报文和 Codex 收键仍列在 CAST-09。
   - [x] CAST-11 · P0 按键诊断 · 按连接代次记录匹配接口、报文接收与过滤、解码、按键边沿、手势和快捷键提交结果。回放覆盖 OK 映射 Enter、Shift+Enter 和 Ctrl+Enter。实体按键定位及应用收键仍列在 CAST-09。
-  - [ ] CAST-12 · P0 普通键报文捕获 · 对照小米 Raw Input 和 Chromecast Windows 报告层。先确认当前设备的实体按下和释放能在哪一层观测到；仅在标准 HID 路径无报文且证据支持时，在隔离环境验证 Google 专用可选 Helper，复用现有映射引擎。验证设备归属、键盘隔离、断连回退、重复触发和目标应用换行。
+  - [~] CAST-12 · P0 普通键报文捕获 · **已由 2026-11-10 HCI 抓包结案（结论推翻 Helper 前提）**：该遥控器对 Windows 主机**从不发送 HID 输入报告**（Raw Input/共享直读全零是必然），普通按键走 Google 键事件服务 `{D343BFC0-…}` 的 `D343BFC5` 特征通知（8 字节：首字节键码、0=释放；键码与 legacy report-1 位索引同表）。已实现订阅+解码+接入映射引擎（commit fe84680）。**遗留**：写 CCCD 后该固件停发键通知（写前无人订阅时反而持续发送）——需重配对复测 + 空中轨迹定位"写 CCCD 停发"的固件行为，候选方案为免写 CCCD 的只听订阅。原"Google 专用 Helper"路线作废：无 HID 报文可捕获。证据见 [Testing/WindowsChromecast.md](Testing/WindowsChromecast.md)。
 
 ### 本地听写与转写
 
