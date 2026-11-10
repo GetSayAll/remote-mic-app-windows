@@ -762,6 +762,10 @@ impl ButtonMappingRuntime {
         if let Ok(mut slot) = app_switcher_sender_slot().lock() {
             *slot = Some(sender.clone());
         }
+        // BLE 层厂商服务键事件（Chromecast transmit 通知）经同一通道进引擎。
+        if let Ok(mut slot) = chromecast_input_sender_slot().lock() {
+            *slot = Some(sender.clone());
+        }
 
         let runtime = Self {
             mappings: Arc::clone(&mappings),
@@ -1174,6 +1178,35 @@ static APP_SWITCHER_SENDER: std::sync::OnceLock<Mutex<Option<Sender<EngineMessag
 
 fn app_switcher_sender_slot() -> &'static Mutex<Option<Sender<EngineMessage>>> {
     APP_SWITCHER_SENDER.get_or_init(|| Mutex::new(None))
+}
+
+/// BLE 层 Chromecast 输入（厂商服务 transmit 键事件）的引擎通道。
+///
+/// 与语音/应用切换器同一模式：进程内单引擎，未创建或已关闭时发送失败是
+/// 安全的空操作。
+static CHROMECAST_INPUT_SENDER: std::sync::OnceLock<Mutex<Option<Sender<EngineMessage>>>> =
+    std::sync::OnceLock::new();
+
+fn chromecast_input_sender_slot() -> &'static Mutex<Option<Sender<EngineMessage>>> {
+    CHROMECAST_INPUT_SENDER.get_or_init(|| Mutex::new(None))
+}
+
+/// BLE 工作线程转发 Chromecast 输入（`ChromecastInput::Vendor` 等）给引擎。
+/// 调用方（ble.rs）负责目标地址/代次校验。
+pub(crate) fn send_chromecast_input(
+    address: u64,
+    target_generation: u64,
+    input: crate::raw_input::ChromecastInput,
+) {
+    if let Ok(slot) = chromecast_input_sender_slot().lock() {
+        if let Some(sender) = slot.as_ref() {
+            let _ = sender.send(EngineMessage::Chromecast {
+                address,
+                target_generation,
+                input,
+            });
+        }
+    }
 }
 
 fn request_app_switcher_start() -> Result<(), String> {

@@ -230,14 +230,39 @@ pub enum ChromecastInput {
         buttons: BTreeSet<RemoteButton>,
     },
     Keyboard(ButtonEdge),
+    /// Google 厂商服务 transmit（0xAB5E0002）通知的按键事件。
+    /// HCI 抓包实证（2026-11-10）：该遥控器对 Windows 主机从不发 HID 输入
+    /// 报告，普通按键全部走这条 8 字节通知（首字节键码，0=全部释放），
+    /// 键码空间与 legacy report-1 位索引一致。
+    Vendor(ChromecastVendorKey),
     CollectionRemoved,
     ReportRejected,
+}
+
+/// transmit 通知解码结果：按下（带键）或全部释放（键码 0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromecastVendorKey {
+    Press(RemoteButton),
+    ReleaseAll,
+}
+
+/// 解码 Google 厂商服务的 8 字节键事件通知。
+///
+/// 实测载荷：`[键码, 0×7]`；键码 0 表示释放当前按住的键。未知键码返回
+/// `None`（由调用方计数），空包同样返回 `None`。
+pub fn decode_chromecast_vendor_key(payload: &[u8]) -> Option<ChromecastVendorKey> {
+    let code = *payload.first()?;
+    if code == 0 {
+        return Some(ChromecastVendorKey::ReleaseAll);
+    }
+    chromecast_button_for_legacy_index(code).map(ChromecastVendorKey::Press)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChromecastSource {
     Hid(u8),
     Keyboard,
+    Vendor,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -338,8 +363,20 @@ pub fn decode_chromecast_report(
     if report[0] != 1 {
         return Err(RawInputDecodeError::InvalidReportPrefix);
     }
-    let button = match report[1] {
-        0 => return Ok(BTreeSet::new()),
+    if report[1] == 0 {
+        return Ok(BTreeSet::new());
+    }
+    let button = chromecast_button_for_legacy_index(report[1])
+        .ok_or(RawInputDecodeError::InvalidReportPrefix)?;
+    Ok(BTreeSet::from([button]))
+}
+
+/// Chromecast 遥控器 legacy 键码表：HID report-1 位索引（vRemoter, MIT）
+/// 与厂商服务 transmit 通知首字节共用同一键码空间（2026-11-10 HCI 抓包
+/// 实测 19 键全对齐：1=Power 3=Up 4=Down 5=Left 6=Right 7=OK 8=Mute
+/// 10=Home 11=Back 12=Vol+ 13=Vol- 14=YouTube 15=Netflix 17=Input）。
+pub fn chromecast_button_for_legacy_index(index: u8) -> Option<RemoteButton> {
+    Some(match index {
         1 => RemoteButton::Power,
         3 => RemoteButton::Up,
         4 => RemoteButton::Down,
@@ -354,9 +391,8 @@ pub fn decode_chromecast_report(
         14 => RemoteButton::Youtube,
         15 => RemoteButton::Netflix,
         17 => RemoteButton::Input,
-        _ => return Err(RawInputDecodeError::InvalidReportPrefix),
-    };
-    Ok(BTreeSet::from([button]))
+        _ => return None,
+    })
 }
 
 pub fn normalize_device_path(path: &str) -> String {
@@ -639,6 +675,26 @@ impl ButtonStateMerger {
                     self.chromecast.entry(button).or_insert((source, true));
                 }
             }
+            ChromecastInput::Vendor(ChromecastVendorKey::Press(button))
+                if button.is_chromecast_mappable() =>
+            {
+                self.apply_chromecast_edge(
+                    ButtonEdge {
+                        button,
+                        is_pressed: true,
+                    },
+                    ChromecastSource::Vendor,
+                );
+            }
+            ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll) => {
+                // 键码 0 是"释放当前按住的键"：只释放厂商通道自己持有的
+                // 按下状态，不动 HID/键盘来源（每键单来源仲裁不变）。
+                for (_, (owner, pressed)) in &mut self.chromecast {
+                    if *owner == ChromecastSource::Vendor {
+                        *pressed = false;
+                    }
+                }
+            }
             _ => {}
         }
         edges_between(&before, &self.active_buttons())
@@ -760,6 +816,97 @@ mod tests {
         for vk in [0x74, 0xC0, 0x5D, 0xFF] {
             assert_eq!(raw(vk).chromecast_edge(), None);
         }
+    }
+
+    #[test]
+    fn chromecast_vendor_keys_decode_press_and_release() {
+        // 2026-11-10 HCI 实测载荷：8 字节，首字节键码（与 legacy 位索引同表）。
+        assert_eq!(
+            decode_chromecast_vendor_key(&[0x07, 0, 0, 0, 0, 0, 0, 0]),
+            Some(ChromecastVendorKey::Press(RemoteButton::Ok))
+        );
+        assert_eq!(
+            decode_chromecast_vendor_key(&[0x0B, 0, 0, 0, 0, 0, 0, 0]),
+            Some(ChromecastVendorKey::Press(RemoteButton::Back))
+        );
+        assert_eq!(
+            decode_chromecast_vendor_key(&[0x00, 0, 0, 0, 0, 0, 0, 0]),
+            Some(ChromecastVendorKey::ReleaseAll)
+        );
+        // 未知键码与空包都不产生输入（调用方计 unsupported）。
+        assert_eq!(decode_chromecast_vendor_key(&[0x02, 0]), None);
+        assert_eq!(decode_chromecast_vendor_key(&[]), None);
+    }
+
+    #[test]
+    fn chromecast_vendor_press_release_edges() {
+        let mut merger = ButtonStateMerger::default();
+        let edge = |button, is_pressed| ButtonEdge { button, is_pressed };
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+                RemoteButton::Ok
+            ))),
+            [edge(RemoteButton::Ok, true)]
+        );
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll)),
+            [edge(RemoteButton::Ok, false)]
+        );
+        // 无按键时的释放是空操作；重复按下再释放只产生一对边沿。
+        assert!(merger
+            .update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll))
+            .is_empty());
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+                RemoteButton::VolumeUp
+            ))),
+            [edge(RemoteButton::VolumeUp, true)]
+        );
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+                RemoteButton::VolumeDown
+            ))),
+            [edge(RemoteButton::VolumeDown, true)]
+        );
+        // 键码 0 释放厂商通道当前按住的全部键。
+        let mut released =
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll));
+        released.sort_by_key(|edge| edge.button);
+        assert_eq!(
+            released,
+            [
+                edge(RemoteButton::VolumeUp, false),
+                edge(RemoteButton::VolumeDown, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn chromecast_vendor_and_hid_sources_stay_exclusive() {
+        // 每键单来源仲裁：厂商通道先按下的键，HID 报文不得重复置按下，
+        // 反之亦然——与既有 Hid(1)/Hid(2) 互斥行为一致。
+        let mut merger = ButtonStateMerger::default();
+        merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::Press(
+            RemoteButton::Ok,
+        )));
+        assert!(merger
+            .update_chromecast(ChromecastInput::Hid {
+                report_id: 1,
+                buttons: BTreeSet::from([RemoteButton::Ok]),
+            })
+            .is_empty());
+        assert_eq!(
+            merger.active_button_set(),
+            BTreeSet::from([RemoteButton::Ok])
+        );
+        // 厂商释放只影响厂商持有的键。
+        assert_eq!(
+            merger.update_chromecast(ChromecastInput::Vendor(ChromecastVendorKey::ReleaseAll)),
+            [ButtonEdge {
+                button: RemoteButton::Ok,
+                is_pressed: false
+            }]
+        );
     }
 
     #[test]
