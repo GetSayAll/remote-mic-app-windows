@@ -15,6 +15,7 @@ import connection from "./i18n/en/connection";
 import onboarding from "./i18n/en/onboarding";
 import permissions from "./i18n/en/permissions";
 import reflections from "./i18n/en/reflections";
+import draftRules from "./i18n/en/draft-rules";
 import lib from "./i18n/en/lib";
 import membership from "./i18n/en/membership";
 import commonPhrases from "./i18n/en/common-phrases";
@@ -133,6 +134,7 @@ describe("全 UI i18n 完整性", () => {
       onboarding,
       permissions,
       reflections,
+      draftRules,
       lib,
       membership,
       commonPhrases,

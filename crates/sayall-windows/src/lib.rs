@@ -22,6 +22,8 @@ mod audio;
 pub mod battery;
 #[cfg(windows)]
 mod ble;
+mod local_dictation;
+pub use local_dictation::LocalDictationStatus;
 #[cfg(windows)]
 mod bluetooth_radio;
 mod button_gestures;
@@ -1317,6 +1319,52 @@ impl WindowsPlatform {
         }
     }
 
+    /// Opt in to the next utterance from the currently connected Chromecast.
+    pub fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.runtime.arm_local_dictation()
+        }
+        #[cfg(not(windows))]
+        {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn local_dictation_status(&self, _token: u64) -> LocalDictationStatus {
+        #[cfg(windows)]
+        {
+            self.runtime.local_dictation_status(_token)
+        }
+        #[cfg(not(windows))]
+        {
+            LocalDictationStatus::Idle
+        }
+    }
+
+    /// Move the completed 16 kHz mono PCM out once; the receiver owns its lifetime.
+    pub fn take_local_dictation(&self, _token: u64) -> Option<Vec<i16>> {
+        #[cfg(windows)]
+        {
+            self.runtime.take_local_dictation(_token)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    pub fn cancel_local_dictation(&self, _token: u64) -> bool {
+        #[cfg(windows)]
+        {
+            self.runtime.cancel_local_dictation(_token)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     pub fn connect_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
         #[cfg(windows)]
         {
@@ -1623,6 +1671,10 @@ pub enum PlatformError {
     WorkerUnavailable,
     #[error("BLE operation timed out")]
     OperationTimedOut,
+    #[error("请先连接已就绪的 Google Chromecast 遥控器")]
+    LocalDictationNotReady,
+    #[error("已有语音会话，请先完成或取消后再试")]
+    LocalDictationBusy,
     #[error("Xiaomi voice remote GATT service is missing")]
     VoiceServiceMissing,
     #[error("Xiaomi voice remote GATT characteristic {0} is missing")]

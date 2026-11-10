@@ -1,5 +1,7 @@
-//! Explicit local file-to-draft transcription through an allowlisted Whisper CLI.
+//! Explicit local WAV and one-shot remote dictation through an allowlisted Whisper CLI.
 
+use crate::{platform::PlatformRuntime, AppState};
+use sayall_windows::LocalDictationStatus;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -20,6 +22,9 @@ const MAX_PCM_BYTES: usize = SAMPLE_RATE * 2 * 60;
 const MAX_WAV_BYTES: usize = MAX_PCM_BYTES + 64 * 1024;
 const MAX_TEXT_BYTES: usize = 128 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(120);
+const REMOTE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(95);
+const REMOTE_POLL: Duration = Duration::from_millis(50);
+const MAX_IPC_TOKEN: u64 = (1 << 53) - 1;
 const CLI_NAME: &str = "whisper-cli.exe";
 const MODEL_NAME: &str = "ggml-base-q5_1.bin";
 const MODEL_BYTES: u64 = 59_707_625;
@@ -110,12 +115,42 @@ pub(crate) struct WhisperRequest {
     language: WhisperLanguage,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize)]
+pub(crate) struct LiveWhisperRequest {
+    executable: PathBuf,
+    model: PathBuf,
+    language: WhisperLanguage,
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WhisperDraft {
     text: String,
     duration_ms: u64,
     elapsed_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct LiveWhisperArm {
+    token: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub(crate) enum LiveWhisperStatus {
+    Armed,
+    Capturing,
+    Transcribing,
+    Ready { draft: WhisperDraft },
+    Cancelled,
+    Expired,
+    Failed { error: &'static str },
+}
+
+impl LiveWhisperStatus {
+    fn active(&self) -> bool {
+        matches!(self, Self::Armed | Self::Capturing | Self::Transcribing)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -132,16 +167,30 @@ struct Jobs {
 #[derive(Debug, Default)]
 struct JobState {
     shutting_down: bool,
-    active: Option<Arc<AtomicBool>>,
+    active: Option<ActiveJob>,
+    live: Option<(u64, LiveWhisperStatus)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JobKind {
+    File,
+    Live,
+}
+
+#[derive(Debug)]
+struct ActiveJob {
+    kind: JobKind,
+    cancelled: Arc<AtomicBool>,
 }
 
 struct Reservation {
     jobs: Arc<Jobs>,
     cancelled: Arc<AtomicBool>,
+    live_token: Option<u64>,
 }
 
 impl WhisperRuntime {
-    fn reserve(&self) -> WhisperResult<Reservation> {
+    fn reserve(&self, kind: JobKind) -> WhisperResult<Reservation> {
         let mut state = self.jobs.state.lock().map_err(|_| "whisper_io_error")?;
         if state.shutting_down {
             return Err("whisper_cancelled");
@@ -150,21 +199,60 @@ impl WhisperRuntime {
             return Err("whisper_busy");
         }
         let cancelled = Arc::new(AtomicBool::new(false));
-        state.active = Some(Arc::clone(&cancelled));
+        state.active = Some(ActiveJob {
+            kind,
+            cancelled: Arc::clone(&cancelled),
+        });
         Ok(Reservation {
             jobs: Arc::clone(&self.jobs),
             cancelled,
+            live_token: None,
         })
     }
 
-    fn cancel(&self) -> bool {
+    fn cancel_file(&self) -> bool {
         let Ok(state) = self.jobs.state.lock() else {
             return false;
         };
-        state.active.as_ref().is_some_and(|cancelled| {
-            cancelled.store(true, Ordering::Release);
+        state.active.as_ref().is_some_and(|job| {
+            if job.kind != JobKind::File {
+                return false;
+            }
+            job.cancelled.store(true, Ordering::Release);
             true
         })
+    }
+
+    fn live_status(&self, token: u64) -> LiveWhisperStatus {
+        self.jobs
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| {
+                let (latest, status) = state.live.as_ref()?;
+                (*latest == token).then(|| status.clone())
+            })
+            .unwrap_or(LiveWhisperStatus::Cancelled)
+    }
+
+    fn cancel_live(&self, token: u64) -> bool {
+        let Ok(mut state) = self.jobs.state.lock() else {
+            return false;
+        };
+        if !matches!(state.live.as_ref(), Some((latest, status)) if *latest == token && status.active())
+        {
+            return false;
+        }
+        let Some(job) = state
+            .active
+            .as_ref()
+            .filter(|job| job.kind == JobKind::Live)
+        else {
+            return false;
+        };
+        job.cancelled.store(true, Ordering::Release);
+        state.live = Some((token, LiveWhisperStatus::Cancelled));
+        true
     }
 
     pub(crate) fn cancel_for_exit(&self) {
@@ -172,8 +260,8 @@ impl WhisperRuntime {
             return;
         };
         state.shutting_down = true;
-        if let Some(cancelled) = &state.active {
-            cancelled.store(true, Ordering::Release);
+        if let Some(job) = &state.active {
+            job.cancelled.store(true, Ordering::Release);
         }
         drop(
             self.jobs
@@ -189,11 +277,62 @@ impl Reservation {
     fn transcribe(self, request: WhisperRequest) -> WhisperResult<WhisperDraft> {
         transcribe(request, &self.cancelled, TIMEOUT)
     }
+
+    fn bind_live(&mut self, token: u64) -> WhisperResult<()> {
+        let mut state = self.jobs.state.lock().map_err(|_| "whisper_io_error")?;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err("whisper_cancelled");
+        }
+        state.live = Some((token, LiveWhisperStatus::Armed));
+        self.live_token = Some(token);
+        Ok(())
+    }
+
+    fn publish_live(&self, status: LiveWhisperStatus) {
+        let Some(token) = self.live_token else {
+            return;
+        };
+        if let Ok(mut state) = self.jobs.state.lock() {
+            // Serializing updates with cancellation prevents a late result from
+            // restoring a draft after cancellation. Release the slot at the terminal update.
+            let cancelled = self.cancelled.load(Ordering::Acquire);
+            if cancelled && status.active() {
+                return;
+            }
+            if !status.active() {
+                state.active = None;
+                self.jobs.finished.notify_all();
+            }
+            let status = if cancelled {
+                LiveWhisperStatus::Cancelled
+            } else {
+                status
+            };
+            state.live = Some((token, status));
+        }
+    }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
         if let Ok(mut state) = self.jobs.state.lock() {
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|job| Arc::ptr_eq(&job.cancelled, &self.cancelled))
+            {
+                return;
+            }
+            if let Some(token) = self.live_token {
+                let status = if self.cancelled.load(Ordering::Acquire) {
+                    LiveWhisperStatus::Cancelled
+                } else {
+                    LiveWhisperStatus::Failed {
+                        error: "whisper_engine_failed",
+                    }
+                };
+                state.live = Some((token, status));
+            }
             state.active = None;
             self.jobs.finished.notify_all();
         }
@@ -209,7 +348,7 @@ pub(crate) async fn transcribe_local_whisper(
     if window.label() != "main" {
         return Err("whisper_access_denied".to_owned());
     }
-    let reservation = state.reserve()?;
+    let reservation = state.reserve(JobKind::File)?;
     tauri::async_runtime::spawn_blocking(move || reservation.transcribe(request))
         .await
         .map_err(|_| "whisper_engine_failed")?
@@ -221,7 +360,136 @@ pub(crate) fn cancel_local_whisper(
     state: tauri::State<'_, WhisperRuntime>,
     window: tauri::WebviewWindow,
 ) -> bool {
-    window.label() == "main" && state.cancel()
+    window.label() == "main" && state.cancel_file()
+}
+
+#[tauri::command]
+pub(crate) async fn arm_local_whisper(
+    request: LiveWhisperRequest,
+    state: tauri::State<'_, WhisperRuntime>,
+    app_state: tauri::State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> Result<LiveWhisperArm, String> {
+    if window.label() != "main" {
+        return Err("whisper_access_denied".to_owned());
+    }
+    let mut reservation = state.reserve(JobKind::Live)?;
+    let platform = Arc::clone(&app_state.platform);
+    tauri::async_runtime::spawn_blocking(move || {
+        let deadline = Instant::now() + TIMEOUT;
+        let work = prepare_engine(
+            &request.executable,
+            &request.model,
+            &reservation.cancelled,
+            deadline,
+        )?;
+        check_job(&reservation.cancelled, deadline)?;
+        let token = platform
+            .arm_local_dictation()
+            .map_err(|_| "whisper_remote_unavailable")?;
+        let capture = LiveCapture { platform, token };
+        if token == 0 || token > MAX_IPC_TOKEN {
+            return Err("whisper_remote_unavailable");
+        }
+        reservation.bind_live(token)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            run_live_session(reservation, work, request.language, move |reservation| {
+                capture.wait(reservation)
+            });
+        });
+        Ok(LiveWhisperArm { token })
+    })
+    .await
+    .map_err(|_| "whisper_engine_failed")?
+    .map_err(str::to_owned)
+}
+
+#[tauri::command]
+pub(crate) fn get_local_whisper_status(
+    token: u64,
+    state: tauri::State<'_, WhisperRuntime>,
+    window: tauri::WebviewWindow,
+) -> Result<LiveWhisperStatus, String> {
+    if window.label() != "main" {
+        return Err("whisper_access_denied".to_owned());
+    }
+    Ok(state.live_status(token))
+}
+
+#[tauri::command]
+pub(crate) fn cancel_live_local_whisper(
+    token: u64,
+    state: tauri::State<'_, WhisperRuntime>,
+    app_state: tauri::State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> bool {
+    if window.label() != "main" || !state.cancel_live(token) {
+        return false;
+    }
+    app_state.platform.cancel_local_dictation(token);
+    true
+}
+
+struct LiveCapture {
+    platform: Arc<dyn PlatformRuntime>,
+    token: u64,
+}
+
+impl LiveCapture {
+    fn wait(&self, reservation: &Reservation) -> Result<Vec<i16>, LiveWhisperStatus> {
+        let deadline = Instant::now() + REMOTE_CAPTURE_TIMEOUT;
+        loop {
+            if reservation.cancelled.load(Ordering::Acquire) {
+                return Err(LiveWhisperStatus::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                return Err(LiveWhisperStatus::Expired);
+            }
+            match self.platform.local_dictation_status(self.token) {
+                LocalDictationStatus::Armed => {}
+                LocalDictationStatus::Capturing => {
+                    reservation.publish_live(LiveWhisperStatus::Capturing);
+                }
+                LocalDictationStatus::Ready => {
+                    return self
+                        .platform
+                        .take_local_dictation(self.token)
+                        .ok_or(LiveWhisperStatus::Cancelled);
+                }
+                LocalDictationStatus::Idle | LocalDictationStatus::Cancelled => {
+                    return Err(LiveWhisperStatus::Cancelled);
+                }
+                LocalDictationStatus::Expired => return Err(LiveWhisperStatus::Expired),
+            }
+            std::thread::sleep(REMOTE_POLL);
+        }
+    }
+}
+
+impl Drop for LiveCapture {
+    fn drop(&mut self) {
+        self.platform.cancel_local_dictation(self.token);
+    }
+}
+
+fn run_live_session(
+    reservation: Reservation,
+    work: tempfile::TempDir,
+    language: WhisperLanguage,
+    read_capture: impl FnOnce(&Reservation) -> Result<Vec<i16>, LiveWhisperStatus>,
+) {
+    let status = match read_capture(&reservation) {
+        Ok(samples) => {
+            reservation.publish_live(LiveWhisperStatus::Transcribing);
+            match transcribe_live_pcm(work.path(), samples, language, &reservation.cancelled) {
+                Ok(draft) => LiveWhisperStatus::Ready { draft },
+                Err(error) => LiveWhisperStatus::Failed { error },
+            }
+        }
+        Err(status) => status,
+    };
+    drop(work);
+    reservation.publish_live(status);
 }
 
 fn local_path(path: &Path) -> bool {
@@ -375,7 +643,28 @@ fn transcribe(
     let start = Instant::now();
     let deadline = start + timeout;
     check_job(cancelled, deadline)?;
-    let executable = local_file(&request.executable)?;
+    let wav = local_file(&request.wav)?;
+    let wav_bytes = read_bounded(&wav, MAX_WAV_BYTES, "whisper_audio_too_long")?;
+    let pcm = wave_pcm(&wav_bytes)?;
+    let work = prepare_engine(&request.executable, &request.model, cancelled, deadline)?;
+    transcribe_prepared(
+        work.path(),
+        pcm,
+        request.language,
+        cancelled,
+        deadline,
+        start,
+    )
+}
+
+fn prepare_engine(
+    executable: &Path,
+    model: &Path,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> WhisperResult<tempfile::TempDir> {
+    check_job(cancelled, deadline)?;
+    let executable = local_file(executable)?;
     if !executable
         .file_name()
         .is_some_and(|name| name.eq_ignore_ascii_case(CLI_NAME))
@@ -383,17 +672,13 @@ fn transcribe(
         return Err("whisper_unverified_engine");
     }
     let engine = executable.parent().ok_or("whisper_invalid_path")?;
-    let model = local_file(&request.model)?;
+    let model = local_file(model)?;
     if !model
         .file_name()
         .is_some_and(|name| name.eq_ignore_ascii_case(MODEL_NAME))
     {
         return Err("whisper_invalid_model");
     }
-    let wav = local_file(&request.wav)?;
-    let wav_bytes = read_bounded(&wav, MAX_WAV_BYTES, "whisper_audio_too_long")?;
-    let pcm = wave_pcm(&wav_bytes)?;
-
     let temp_root = std::env::temp_dir()
         .canonicalize()
         .map_err(|_| "whisper_io_error")?;
@@ -423,9 +708,43 @@ fn transcribe(
         (cancelled, deadline),
         "whisper_invalid_model",
     )?;
+    Ok(work)
+}
+
+fn transcribe_live_pcm(
+    dir: &Path,
+    samples: Vec<i16>,
+    language: WhisperLanguage,
+    cancelled: &AtomicBool,
+) -> WhisperResult<WhisperDraft> {
+    let start = Instant::now();
+    let deadline = start + TIMEOUT;
+    check_job(cancelled, deadline)?;
+    if samples.len() < MIN_PCM_BYTES / 2 {
+        return Err("whisper_invalid_wav");
+    }
+    if samples.len() > MAX_PCM_BYTES / 2 {
+        return Err("whisper_audio_too_long");
+    }
+    let mut pcm = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        pcm.extend_from_slice(&sample.to_le_bytes());
+    }
+    transcribe_prepared(dir, &pcm, language, cancelled, deadline, start)
+}
+
+fn transcribe_prepared(
+    dir: &Path,
+    pcm: &[u8],
+    language: WhisperLanguage,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    start: Instant,
+) -> WhisperResult<WhisperDraft> {
+    check_job(cancelled, deadline)?;
     write_clean_wave(&dir.join("input.wav"), pcm)?;
     check_job(cancelled, deadline)?;
-    run_engine(dir, request.language, cancelled, deadline)?;
+    run_engine(dir, language, cancelled, deadline)?;
     let output = read_bounded(
         &dir.join("draft.txt"),
         MAX_TEXT_BYTES,
@@ -581,17 +900,128 @@ mod tests {
     #[test]
     fn cancellation_is_scoped_and_clears_after_a_job_finishes() {
         let runtime = WhisperRuntime::default();
-        let first = runtime.reserve().unwrap();
-        assert!(matches!(runtime.reserve(), Err("whisper_busy")));
-        assert!(runtime.cancel());
+        let first = runtime.reserve(JobKind::File).unwrap();
+        assert!(matches!(
+            runtime.reserve(JobKind::Live),
+            Err("whisper_busy")
+        ));
+        assert!(!runtime.cancel_live(1));
+        assert!(runtime.cancel_file());
         assert_eq!(
             check_job(&first.cancelled, Instant::now() + TIMEOUT),
             Err("whisper_cancelled")
         );
         drop(first);
-        assert!(!runtime.cancel());
-        let next = runtime.reserve().unwrap();
+        assert!(!runtime.cancel_file());
+        let next = runtime.reserve(JobKind::File).unwrap();
         assert!(check_job(&next.cancelled, Instant::now() + TIMEOUT).is_ok());
+    }
+
+    #[test]
+    fn live_cancellation_discards_late_result_and_does_not_release_job_early() {
+        let runtime = WhisperRuntime::default();
+        let mut first = runtime.reserve(JobKind::Live).unwrap();
+        first.bind_live(1).unwrap();
+        assert!(!runtime.cancel_file());
+        assert!(!runtime.cancel_live(2));
+        assert!(runtime.cancel_live(1));
+        assert!(!runtime.cancel_live(1));
+        first.publish_live(LiveWhisperStatus::Transcribing);
+        assert!(matches!(
+            runtime.reserve(JobKind::File),
+            Err("whisper_busy")
+        ));
+        first.publish_live(LiveWhisperStatus::Ready {
+            draft: WhisperDraft {
+                text: "不应显示".to_owned(),
+                duration_ms: 1000,
+                elapsed_ms: 100,
+            },
+        });
+        assert!(matches!(
+            runtime.live_status(1),
+            LiveWhisperStatus::Cancelled
+        ));
+        let mut second = runtime.reserve(JobKind::Live).unwrap();
+        second.bind_live(2).unwrap();
+        drop(first);
+        assert!(matches!(runtime.live_status(2), LiveWhisperStatus::Armed));
+        assert!(!runtime.cancel_live(1));
+        assert!(matches!(
+            runtime.reserve(JobKind::File),
+            Err("whisper_busy")
+        ));
+    }
+
+    #[test]
+    fn live_pcm_rejects_invalid_duration_or_cancelled_work_before_writing_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = |samples, cancelled| {
+            transcribe_live_pcm(
+                dir.path(),
+                samples,
+                WhisperLanguage::Zh,
+                &AtomicBool::new(cancelled),
+            )
+            .unwrap_err()
+        };
+        assert_eq!(process(Vec::new(), false), "whisper_invalid_wav");
+        assert_eq!(
+            process(vec![0; MAX_PCM_BYTES / 2 + 1], false),
+            "whisper_audio_too_long"
+        );
+        assert_eq!(
+            process(vec![0; MIN_PCM_BYTES / 2], true),
+            "whisper_cancelled"
+        );
+        assert!(!dir.path().join("input.wav").exists());
+    }
+
+    #[test]
+    #[ignore = "requires the pinned CLI, model, and synthetic Chinese WAV fixture"]
+    fn live_whisper_real_engine_from_decoded_pcm() {
+        let path = |name| std::env::var_os(name).map(PathBuf::from).unwrap();
+        let runtime = WhisperRuntime::default();
+        let mut reservation = runtime.reserve(JobKind::Live).unwrap();
+        let work = prepare_engine(
+            &path("SAYALL_WHISPER_E2E_EXE"),
+            &path("SAYALL_WHISPER_E2E_MODEL"),
+            &reservation.cancelled,
+            Instant::now() + TIMEOUT,
+        )
+        .unwrap();
+        let fixture = read_bounded(
+            &path("SAYALL_WHISPER_E2E_WAV"),
+            MAX_WAV_BYTES,
+            "whisper_audio_too_long",
+        )
+        .unwrap();
+        let samples = wave_pcm(&fixture)
+            .unwrap()
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        let work_path = work.path().to_owned();
+        reservation.bind_live(1).unwrap();
+        run_live_session(reservation, work, WhisperLanguage::Zh, |reservation| {
+            reservation.publish_live(LiveWhisperStatus::Capturing);
+            Ok(samples)
+        });
+        let status = runtime.live_status(1);
+        let LiveWhisperStatus::Ready { draft } = status else {
+            panic!("synthetic PCM session status: {status:?}");
+        };
+        assert!(
+            draft.text.contains("中国") || draft.text.contains("中國"),
+            "synthetic Chinese transcript: {}",
+            draft.text
+        );
+        println!(
+            "verified synthetic zh PCM transcript: {}; input_ms={}; elapsed_ms={}",
+            draft.text, draft.duration_ms, draft.elapsed_ms
+        );
+        assert!(!work_path.exists());
+        assert!(runtime.reserve(JobKind::File).is_ok());
     }
 
     #[test]

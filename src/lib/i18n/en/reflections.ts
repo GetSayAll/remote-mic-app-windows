@@ -142,6 +142,8 @@ export default {
   "本地转写需要在 SayAll Windows 客户端中使用。": "Local transcription is available in the SayAll Windows app.",
   "用本机模型把 WAV 音频转成可编辑草稿。选好文件后，点击开始转写。":
     "Turn a WAV file into an editable draft on this device. Choose your files, then start transcription.",
+  "也可以等待下一次 Chromecast 听写。点击等待后，按住遥控器语音键说话，松开生成草稿。":
+    "To use the Chromecast remote, start waiting, hold the voice button while speaking, and release it to create a draft.",
   "支持 whisper.cpp v1.9.1 的 Windows x64 CPU 版和 ggml-base-q5_1.bin 模型。":
     "Use the Windows x64 CPU build of whisper.cpp v1.9.1 and the ggml-base-q5_1.bin model.",
   "音频需为 16 kHz、16 位、单声道 PCM WAV，时长 0.2 至 60 秒。":
@@ -154,6 +156,11 @@ export default {
   "中文": "Chinese",
   "自动识别": "Detect automatically",
   "开始转写": "Start transcription",
+  "等待遥控器听写": "Wait for remote dictation",
+  "正在验证本地模型和遥控器…": "Checking the local model and remote…",
+  "正在接收遥控器语音。松开语音键结束。": "Receiving remote audio. Release the voice button to finish.",
+  "请按住遥控器语音键说话。": "Hold the remote's voice button while speaking.",
+  "本次遥控器听写已超时，请重新点击等待。": "Remote dictation timed out. Start waiting again.",
   "取消转写": "Cancel transcription",
   "正在取消转写…": "Cancelling transcription…",
   "正在本机转写…": "Transcribing on this device…",
@@ -163,6 +170,10 @@ export default {
     "Transcription complete. {duration} seconds of audio took {elapsed} seconds.",
   "转写草稿": "Transcript draft",
   "复制草稿": "Copy draft",
+  "新转写已完成。当前草稿有改动，请选择要保留的内容。":
+    "A new transcript is ready. Choose whether to keep the draft you edited.",
+  "保留当前草稿": "Keep current draft",
+  "使用新转写": "Use new transcript",
   "已有转写在运行，请稍后再试。": "Transcription is already running. Try again shortly.",
   "无法打开文件选择器。": "Could not open the file picker.",
   "无法读取所选文件，请重新选择本机文件。": "Could not read the selected file. Select a local file again.",
@@ -180,6 +191,8 @@ export default {
   "Whisper 返回的文字无法读取。": "Could not read the text returned by Whisper.",
   "没有识别出文字，请检查音频内容。": "No speech was recognized. Check the audio.",
   "无法准备本地转写所需的文件。": "Could not prepare the files for local transcription.",
+  "遥控器语音会话不可用。请确认 Chromecast 遥控器已连接，然后重试。":
+    "Remote dictation is unavailable. Connect your Chromecast remote and try again.",
   "本地转写失败，请稍后重试。": "Local transcription failed. Try again later.",
   "无法复制草稿，你可以手动选中文字。": "Could not copy the draft. You can select the text manually.",
   "取消请求失败，请重试。": "Could not request cancellation. Try again.",

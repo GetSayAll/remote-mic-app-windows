@@ -4,8 +4,8 @@ use sayall_windows::rc003_bridge::BridgeSnapshot;
 use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendInputSnapshot};
 use sayall_windows::transcript_capture::CapturedTranscript;
 use sayall_windows::{
-    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
-    PlatformSnapshot, UsageCounters, WindowsPlatform,
+    AudioEndpoint, AudioSnapshot, ConnectionSnapshot, LocalDictationStatus, PairedRemote,
+    PlatformError, PlatformSnapshot, UsageCounters, WindowsPlatform,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -17,6 +17,18 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     fn connection_snapshot(&self) -> ConnectionSnapshot;
     fn connect_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError>;
     fn disconnect_remote(&self) -> Result<ConnectionSnapshot, PlatformError>;
+    fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        Err(PlatformError::UnsupportedPlatform)
+    }
+    fn local_dictation_status(&self, _token: u64) -> LocalDictationStatus {
+        LocalDictationStatus::Idle
+    }
+    fn take_local_dictation(&self, _token: u64) -> Option<Vec<i16>> {
+        None
+    }
+    fn cancel_local_dictation(&self, _token: u64) -> bool {
+        false
+    }
     #[cfg(windows)]
     fn restore_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError>;
     fn list_audio_endpoints(&self) -> Result<Vec<AudioEndpoint>, PlatformError>;
@@ -211,6 +223,22 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn disconnect_remote(&self) -> Result<ConnectionSnapshot, PlatformError> {
         self.disconnect_remote()
+    }
+
+    fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        WindowsPlatform::arm_local_dictation(self)
+    }
+
+    fn local_dictation_status(&self, token: u64) -> LocalDictationStatus {
+        WindowsPlatform::local_dictation_status(self, token)
+    }
+
+    fn take_local_dictation(&self, token: u64) -> Option<Vec<i16>> {
+        WindowsPlatform::take_local_dictation(self, token)
+    }
+
+    fn cancel_local_dictation(&self, token: u64) -> bool {
+        WindowsPlatform::cancel_local_dictation(self, token)
     }
 
     #[cfg(windows)]

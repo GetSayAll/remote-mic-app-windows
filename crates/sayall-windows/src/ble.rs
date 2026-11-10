@@ -5,19 +5,20 @@ use crate::wetype_revive::{
 use crate::{
     audio::AudioRuntime,
     disconnect_loop::{DisconnectCause, DisconnectLoopDetector, LoopReport},
+    local_dictation::{Capture as LocalCapture, Stream as LocalStream},
     power::PowerNotifications,
     reconnect::ReconnectBackoff,
     remote_model_from_model_number, remote_model_from_name,
     send_input::{KeyChord, KeyCode},
     send_input_windows::SendInputRuntime,
-    ConnectionPhase, ConnectionSnapshot, PlatformError, RemoteModel, UsageCounters,
-    VoiceAudioHealth,
+    ConnectionPhase, ConnectionSnapshot, LocalDictationStatus, PlatformError, RemoteModel,
+    UsageCounters, VoiceAudioHealth,
 };
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, Receiver, Sender, SyncSender},
     Arc, Mutex, MutexGuard, OnceLock,
 };
 use std::thread::{self, JoinHandle};
@@ -49,6 +50,7 @@ const MODEL_NUMBER_UUID: GUID = GUID::from_u128(0x00002a2400001000800000805f9b34
 const BATTERY_SERVICE_UUID: GUID = GUID::from_u128(0x0000180f00001000800000805f9b34fb);
 const BATTERY_LEVEL_UUID: GUID = GUID::from_u128(0x00002a1900001000800000805f9b34fb);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_ARM_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// WinRT 异步操作的硬上限（2026-10-21 现场）：旧的半死链路上
 /// `BluetoothLEDevice` 已经拿到、`Name()` 也能读，但随后的 GATT 查询
@@ -96,6 +98,7 @@ enum ChromecastVoiceStage {
     Streaming,
     CancelledBeforeStart,
     OpenCommandFailed,
+    LocalCaptureAborted,
 }
 
 impl ChromecastVoiceStage {
@@ -104,7 +107,9 @@ impl ChromecastVoiceStage {
             Self::WaitingForStart => CHROMECAST_START_TIMEOUT,
             Self::WaitingForPcm => CHROMECAST_FIRST_PCM_TIMEOUT,
             Self::Streaming => VOICE_AUDIO_STALL_TIMEOUT,
-            Self::CancelledBeforeStart | Self::OpenCommandFailed => Duration::ZERO,
+            Self::CancelledBeforeStart | Self::OpenCommandFailed | Self::LocalCaptureAborted => {
+                Duration::ZERO
+            }
         }
     }
 
@@ -115,6 +120,7 @@ impl ChromecastVoiceStage {
             Self::Streaming => "audio_stall",
             Self::CancelledBeforeStart => "stopped_before_start",
             Self::OpenCommandFailed => "mic_open_failed",
+            Self::LocalCaptureAborted => "local_capture_aborted",
         }
     }
 
@@ -125,6 +131,7 @@ impl ChromecastVoiceStage {
             Self::Streaming => "Google 遥控器音频流中断，已结束本次语音",
             Self::CancelledBeforeStart => "Google 遥控器已在开始收音前松开语音键",
             Self::OpenCommandFailed => "未能确认 Google 遥控器已收到开麦命令",
+            Self::LocalCaptureAborted => "Google 遥控器本次本地录音已结束",
         }
     }
 }
@@ -710,6 +717,7 @@ mod stuck_voice_synth_tests {
 pub struct BleRuntime {
     sender: Sender<WorkerMessage>,
     state: Arc<Mutex<ConnectionSnapshot>>,
+    local_capture: Arc<Mutex<LocalCapture>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     power_notifications: Mutex<Option<PowerNotifications>>,
 }
@@ -729,6 +737,8 @@ impl BleRuntime {
         crate::remote_target::set(None);
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
+        let local_capture = Arc::new(Mutex::new(LocalCapture::default()));
+        let worker_local_capture = Arc::clone(&local_capture);
         let worker_state = Arc::clone(&state);
         let worker_sender = sender.clone();
         let worker_capture = Arc::clone(&transcript_capture);
@@ -746,6 +756,7 @@ impl BleRuntime {
                     voice_input_tool,
                     gain_db,
                     worker_capture,
+                    worker_local_capture,
                 )
             });
 
@@ -755,6 +766,7 @@ impl BleRuntime {
                 Self {
                     sender,
                     state,
+                    local_capture,
                     worker: Mutex::new(Some(worker)),
                     power_notifications: Mutex::new(power_notifications),
                 }
@@ -764,6 +776,7 @@ impl BleRuntime {
                 Self {
                     sender,
                     state,
+                    local_capture,
                     worker: Mutex::new(None),
                     power_notifications: Mutex::new(None),
                 }
@@ -773,6 +786,37 @@ impl BleRuntime {
 
     pub fn snapshot(&self) -> ConnectionSnapshot {
         self.decorate_snapshot(lock(&self.state).clone())
+    }
+
+    pub fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        // A successful send requires the caller to receive the token. If the caller
+        // times out first, the worker immediately retracts the unused lease.
+        let (reply, response) = mpsc::sync_channel(0);
+        self.sender
+            .send(WorkerMessage::ArmLocalDictation { reply })
+            .map_err(|_| PlatformError::WorkerUnavailable)?;
+        response
+            .recv_timeout(LOCAL_ARM_REQUEST_TIMEOUT)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => PlatformError::OperationTimedOut,
+                mpsc::RecvTimeoutError::Disconnected => PlatformError::WorkerUnavailable,
+            })?
+    }
+
+    pub fn local_dictation_status(&self, token: u64) -> LocalDictationStatus {
+        lock(&self.local_capture).status(token, Instant::now())
+    }
+
+    pub fn take_local_dictation(&self, token: u64) -> Option<Vec<i16>> {
+        lock(&self.local_capture).take(token, Instant::now())
+    }
+
+    pub fn cancel_local_dictation(&self, token: u64) -> bool {
+        let cancelled = lock(&self.local_capture).cancel(token, Instant::now());
+        if cancelled {
+            let _ = self.sender.send(WorkerMessage::LocalDictationCancelled);
+        }
+        cancelled
     }
 
     pub fn connect(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
@@ -889,6 +933,10 @@ impl Drop for BleRuntime {
 }
 
 pub(crate) enum WorkerMessage {
+    ArmLocalDictation {
+        reply: SyncSender<Result<u64, PlatformError>>,
+    },
+    LocalDictationCancelled,
     Connect {
         device_id: String,
         reply: Sender<Result<ConnectionSnapshot, PlatformError>>,
@@ -987,6 +1035,7 @@ fn worker_loop(
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
     gain_db: Arc<Mutex<f32>>,
     transcript_capture: Arc<crate::transcript_capture::TranscriptCaptureRuntime>,
+    local_capture: Arc<Mutex<LocalCapture>>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -1023,6 +1072,11 @@ fn worker_loop(
     // 链路已静默，主动收尾并释放按住说话快捷键。只在 Streaming 期间有意义。
     let mut last_voice_audio_at: Option<Instant> = None;
     let mut chromecast_voice_deadline: Option<ChromecastVoiceDeadline> = None;
+    // The route is worker-owned and remains pinned even after the shared lease is
+    // cancelled. Only the physical STOP or rotating the GATT subscription clears it.
+    // ATVV v1 audio/STOP are unnumbered, so packets within one subscription still
+    // rely on the delivery order of that notification stream.
+    let mut local_route: Option<(u64, u64)> = None;
     // 提前重连的状态（2026-10-13，issue #206）：上次连接尝试结束的时刻，
     // 供安静窗判定；以及被安静窗抑制的触发累计数（折叠日志；成功提前或成功连上即清零，
     // 保证"首条"日志按 episode 计，不被上一轮的大数字吞掉）。
@@ -1047,14 +1101,38 @@ fn worker_loop(
         // Check before receiving a message, so a queue full of malformed audio cannot
         // indefinitely postpone the first valid PCM deadline.
         let now = Instant::now();
+        local_route = local_route.filter(|(connection, _)| *connection == connection_generation);
+        let local_deadline = {
+            let mut capture = lock(&local_capture);
+            capture.expire(now);
+            if let Some((_, token)) = local_route {
+                if matches!(
+                    capture.status(token, now),
+                    LocalDictationStatus::Cancelled | LocalDictationStatus::Expired
+                ) {
+                    chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                        ChromecastVoiceStage::LocalCaptureAborted,
+                        connection_generation,
+                        now,
+                    ));
+                }
+            }
+            capture.deadline()
+        };
         if let Some(voice_deadline) = chromecast_voice_deadline {
             if voice_deadline.connection_generation != connection_generation {
                 chromecast_voice_deadline = None;
             } else if voice_deadline.is_due(connection_generation, now) {
                 chromecast_voice_deadline = None;
-                if voice_deadline.stage == ChromecastVoiceStage::CancelledBeforeStart {
+                lock(&local_capture).invalidate();
+                let was_local = local_route.take().is_some();
+                if matches!(
+                    voice_deadline.stage,
+                    ChromecastVoiceStage::CancelledBeforeStart
+                        | ChromecastVoiceStage::LocalCaptureAborted
+                ) {
                     gatt_note(
-                        "voice_session feature=chromecast phase=completed terminal_result=cancelled reason=stopped_before_start".to_owned(),
+                        format!("voice_session feature=chromecast phase=completed terminal_result=cancelled reason={}", voice_deadline.stage.error_code()),
                     );
                 } else {
                     gatt_note(format!(
@@ -1062,9 +1140,11 @@ fn worker_loop(
                         voice_deadline.stage.error_code()
                     ));
                 }
-                transcript_capture.cancel(voice_deadline.stage.error_code());
-                transcript_capture.cancel_audio();
-                transcript_pending_started = false;
+                if !was_local {
+                    transcript_capture.cancel(voice_deadline.stage.error_code());
+                    transcript_capture.cancel_audio();
+                    transcript_pending_started = false;
+                }
                 voice_session_epoch.fetch_add(1, Ordering::SeqCst);
                 voice_level.log_and_reset("unknown", voice_deadline.stage.error_code());
                 active_voice_samples = 0;
@@ -1110,10 +1190,13 @@ fn worker_loop(
             None
         };
         let deadline = nearest_deadline(
-            nearest_deadline(capabilities_deadline, reconnect_deadline),
+            local_deadline,
             nearest_deadline(
-                nearest_deadline(extend_deadline, voice_stall_deadline),
-                chromecast_voice_deadline.map(ChromecastVoiceDeadline::expires),
+                nearest_deadline(capabilities_deadline, reconnect_deadline),
+                nearest_deadline(
+                    nearest_deadline(extend_deadline, voice_stall_deadline),
+                    chromecast_voice_deadline.map(ChromecastVoiceDeadline::expires),
+                ),
             ),
         );
         let message = match deadline {
@@ -1122,8 +1205,9 @@ fn worker_loop(
                     Ok(message) => message,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let now = Instant::now();
-                        if chromecast_voice_deadline
-                            .is_some_and(|deadline| deadline.is_due(connection_generation, now))
+                        if local_deadline.is_some_and(|deadline| deadline <= now)
+                            || chromecast_voice_deadline
+                                .is_some_and(|deadline| deadline.is_due(connection_generation, now))
                         {
                             continue;
                         }
@@ -1279,6 +1363,10 @@ fn worker_loop(
                                             Err(error) => {
                                                 lock(&state).last_error =
                                                     Some(format!("发送 MIC_EXTEND 失败：{error}"));
+                                                if let Some((_, token)) = local_route {
+                                                    lock(&local_capture)
+                                                        .cancel(token, Instant::now());
+                                                }
                                             }
                                         }
                                     }
@@ -1296,7 +1384,62 @@ fn worker_loop(
             },
         };
 
+        // Revoke any unconsumed audio before a lifecycle handler can block on GATT.
+        // Stale callbacks from a previous subscription must leave the new lease alone.
+        let invalidate_local = match &message {
+            WorkerMessage::Connect { .. }
+            | WorkerMessage::Disconnect { .. }
+            | WorkerMessage::Restore { .. }
+            | WorkerMessage::SystemSuspended
+            | WorkerMessage::Shutdown { .. } => true,
+            WorkerMessage::ConnectionChanged {
+                connection_generation: generation,
+                status,
+            } => {
+                *generation == connection_generation
+                    && *status == BluetoothConnectionStatus::Disconnected
+            }
+            WorkerMessage::CallbackError {
+                connection_generation: generation,
+                ..
+            } => *generation == connection_generation,
+            _ => false,
+        };
+        if invalidate_local {
+            lock(&local_capture).invalidate();
+        }
+
         match message {
+            WorkerMessage::ArmLocalDictation { reply } => {
+                let cast_phase = {
+                    let snapshot = lock(&state);
+                    (snapshot.remote_model == RemoteModel::Chromecast).then_some(snapshot.phase)
+                };
+                let result =
+                    if system_suspended || session.is_none() || pipeline.capabilities().is_none() {
+                        Err(PlatformError::LocalDictationNotReady)
+                    } else if matches!(
+                        cast_phase,
+                        Some(ConnectionPhase::Streaming | ConnectionPhase::Draining)
+                    ) {
+                        Err(PlatformError::LocalDictationBusy)
+                    } else if cast_phase != Some(ConnectionPhase::Ready) {
+                        Err(PlatformError::LocalDictationNotReady)
+                    } else if pipeline.state() != VoiceSessionState::Idle
+                        || chromecast_voice_deadline.is_some()
+                        || local_route.is_some()
+                    {
+                        Err(PlatformError::LocalDictationBusy)
+                    } else {
+                        lock(&local_capture)
+                            .arm(connection_generation, Instant::now())
+                            .ok_or(PlatformError::LocalDictationBusy)
+                    };
+                if let Err(mpsc::SendError(Ok(token))) = reply.send(result) {
+                    lock(&local_capture).cancel(token, Instant::now());
+                }
+            }
+            WorkerMessage::LocalDictationCancelled => {}
             WorkerMessage::Connect { device_id, reply } => {
                 // 换遥控器：先把上一支**显式断开**（2026-10-13 现场要求：同时有多支遥控器时，
                 // 连接另一支之前应先把之前那支断开——同屏只保持一条遥控器链路，旧链路的状态、
@@ -1498,7 +1641,8 @@ fn worker_loop(
                 // 未变（未被新会话替换）时执行。
                 // Validate before taking ownership: a stale retry must never
                 // discard the chord needed to release the current session.
-                if pipeline.state() != VoiceSessionState::Streaming
+                if local_route.is_some()
+                    || pipeline.state() != VoiceSessionState::Streaming
                     || voice_session_epoch.load(Ordering::SeqCst) != epoch
                 {
                     gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
@@ -1609,6 +1753,9 @@ fn worker_loop(
                         &mut transcript_pending_started,
                         &mut voice_level,
                         &mut chromecast_voice_deadline,
+                        &local_capture,
+                        &mut local_route,
+                        connection_generation,
                         &bytes,
                     );
                     // 正常收尾（StreamStopped 等）：本轮电平在此落盘。
@@ -1624,6 +1771,7 @@ fn worker_loop(
                         lock(&state).reconnect_attempt = 0;
                     }
                     if phase == ConnectionPhase::Failed {
+                        lock(&local_capture).invalidate();
                         let error = lock(&state)
                             .last_error
                             .clone()
@@ -1678,6 +1826,8 @@ fn worker_loop(
                         &usage,
                         &transcript_capture,
                         &mut voice_level,
+                        &local_capture,
+                        local_route,
                     );
                     if let Some(deadline) = chromecast_voice_deadline {
                         let enqueued_pcm = active_voice_samples > previous_sample_count;
@@ -1689,7 +1839,8 @@ fn worker_loop(
                                 .saturating_duration_since(deadline.started_at)
                                 .as_millis();
                             gatt_note(format!(
-                                "voice_session feature=chromecast phase=observed reason=first_pcm_enqueued elapsed_ms={elapsed_ms}"
+                                "voice_session feature=chromecast phase=observed reason={} elapsed_ms={elapsed_ms}",
+                                if local_route.is_some() { "first_pcm_captured" } else { "first_pcm_enqueued" }
                             ));
                         }
                     }
@@ -1917,6 +2068,7 @@ fn worker_loop(
             }
         }
     }
+    lock(&local_capture).invalidate();
 }
 
 /// 断连循环的结构化取证行（2026-10-20）：同一轮循环只落一条。
@@ -2632,6 +2784,9 @@ fn handle_control(
     transcript_pending_started: &mut bool,
     voice_level: &mut VoiceLevelMeter,
     chromecast_voice_deadline: &mut Option<ChromecastVoiceDeadline>,
+    local_capture: &Mutex<LocalCapture>,
+    local_route: &mut Option<(u64, u64)>,
+    connection_generation: u64,
     bytes: &[u8],
 ) {
     let remote_model = lock(state).remote_model;
@@ -2677,6 +2832,9 @@ fn handle_control(
     let output = match pipeline.handle_control(bytes) {
         Ok(output) => output,
         Err(error) => {
+            if let Some((_, token)) = *local_route {
+                lock(local_capture).cancel(token, Instant::now());
+            }
             let mut snapshot = lock(state);
             snapshot.last_error = Some(error.to_string());
             if snapshot.phase == ConnectionPhase::AwaitingCapabilities {
@@ -2690,6 +2848,12 @@ fn handle_control(
 
     match output {
         PipelineOutput::Ready(capabilities) => {
+            if let Some((_, token)) = *local_route {
+                // A capabilities update during a claimed utterance changes the
+                // decoder contract. Reconnect without handing off partial audio.
+                lock(local_capture).cancel(token, Instant::now());
+                return;
+            }
             if lock(state).remote_model == RemoteModel::Chromecast {
                 // A model switch must disable Xiaomi keyboard suppression immediately,
                 // before the Raw Input binding audit catches up with the BLE target.
@@ -2727,7 +2891,14 @@ fn handle_control(
             let Some(capabilities) = pipeline.capabilities() else {
                 return;
             };
+            if is_chromecast && local_route.is_none() {
+                *local_route = lock(local_capture)
+                    .reserve(connection_generation, Instant::now())
+                    .map(|token| (connection_generation, token));
+            }
+            let is_local = local_route.is_some();
             if is_chromecast
+                && !is_local
                 && !chromecast_voice_binding_supported(
                     *lock(voice_input_tool),
                     lock(voice_hold_hotkey).as_ref(),
@@ -2741,15 +2912,17 @@ fn handle_control(
             }
             // 语音键开始：应用切换器（Alt+Tab）会话必须释放 Alt，否则按住说话
             // 快捷键会带着按住的 Alt 进入输入法（对齐 Mac：语音开始取消切换器）。
-            crate::button_mapping::note_voice_session_started();
-            // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
-            // HID F5 代替——普通键盘 F5 也会被误计。
-            usage.begin_voice_session(crate::foreground::foreground_application_name());
-            // 回眸基线：MIC_OPEN 比 StreamStarted 早，趁注入前先把目标输入框文字取下来。
-            // 同一次会话重复收到 MIC_OPEN 时不要重置刚取到的基线。
-            if !*transcript_pending_started {
-                transcript_capture.begin_pending(voice_timestamp_ms());
-                *transcript_pending_started = true;
+            if !is_local {
+                crate::button_mapping::note_voice_session_started();
+                // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
+                // HID F5 代替——普通键盘 F5 也会被误计。
+                usage.begin_voice_session(crate::foreground::foreground_application_name());
+                // 回眸基线：MIC_OPEN 比 StreamStarted 早，趁注入前先把目标输入框文字取下来。
+                // 同一次会话重复收到 MIC_OPEN 时不要重置刚取到的基线。
+                if !*transcript_pending_started {
+                    transcript_capture.begin_pending(voice_timestamp_ms());
+                    *transcript_pending_started = true;
+                }
             }
             if let Some(session) = session {
                 match session
@@ -2772,9 +2945,11 @@ fn handle_control(
                         lock(state).last_error = Some(user_facing_connection_error(&error, true));
                         // 收不到 STREAM_START 就不会有 STREAM_STOP；这里清掉本轮
                         // pending 标记，否则下一次按键会误以为基线已经取过。
-                        transcript_capture.cancel("microphone_open_failed");
-                        *transcript_pending_started = false;
-                        usage.finish_voice_session();
+                        if !is_local {
+                            transcript_capture.cancel("microphone_open_failed");
+                            *transcript_pending_started = false;
+                            usage.finish_voice_session();
+                        }
                         if is_chromecast {
                             // A write timeout cannot prove that the peer missed the command.
                             // Fence the subscription before a late START can reach the IME.
@@ -2793,6 +2968,49 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            if is_chromecast && local_route.is_none() {
+                *local_route = lock(local_capture)
+                    .reserve(connection_generation, Instant::now())
+                    .map(|token| (connection_generation, token));
+            }
+            if let Some((connection, token)) = *local_route {
+                let now = Instant::now();
+                let stream = LocalStream {
+                    connection,
+                    generation,
+                    session_id,
+                };
+                if let Some(session) = session {
+                    session.microphone_opened = true;
+                }
+                if !lock(local_capture).start(token, stream, now) {
+                    // A cancellation racing START must still suppress the regular voice path.
+                    *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                        ChromecastVoiceStage::LocalCaptureAborted,
+                        connection,
+                        now,
+                    ));
+                    return;
+                }
+                *active_voice_samples = 0;
+                voice_session_epoch.fetch_add(1, Ordering::SeqCst);
+                *extend_deadline = Some(now + MICROPHONE_EXTEND_INTERVAL);
+                *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                    ChromecastVoiceStage::WaitingForPcm,
+                    connection,
+                    now,
+                ));
+                {
+                    let mut snapshot = lock(state);
+                    snapshot.phase = ConnectionPhase::Streaming;
+                    apply_input_connection_phase(snapshot.phase, remote_model);
+                    snapshot.voice_state = VoiceSessionState::Streaming;
+                    snapshot.generation = generation;
+                    snapshot.last_error = None;
+                }
+                gatt_note("local_dictation source=chromecast phase=capturing".to_owned());
+                return;
+            }
             *chromecast_voice_deadline = None;
             // Recheck immediately before side effects. Use this same tool/chord snapshot
             // for activation and injection; a concurrent settings change cannot substitute
@@ -3120,9 +3338,56 @@ fn handle_control(
                 }
             }
         }
-        PipelineOutput::StreamStopped { generation, .. } => {
+        PipelineOutput::StreamStopped {
+            generation,
+            session_id,
+            discarded_partial_bytes,
+        } => {
             *chromecast_voice_deadline = None;
             *last_voice_audio_at = None;
+            if let Some((connection, token)) = local_route.take() {
+                if let Some(session) = session {
+                    session.microphone_opened = false;
+                }
+                *extend_deadline = None;
+                *active_voice_samples = 0;
+                let drained = pipeline.complete_drain(generation);
+                if drained.is_err() {
+                    pipeline.interrupt();
+                }
+                {
+                    let mut snapshot = lock(state);
+                    snapshot.phase = ConnectionPhase::Ready;
+                    apply_input_connection_phase(snapshot.phase, remote_model);
+                    snapshot.voice_state = VoiceSessionState::Idle;
+                    snapshot.last_error = drained.as_ref().err().map(ToString::to_string);
+                }
+                let now = Instant::now();
+                let ready = {
+                    let mut capture = lock(local_capture);
+                    if drained.is_ok() && discarded_partial_bytes == 0 {
+                        capture.stop(
+                            token,
+                            LocalStream {
+                                connection,
+                                generation,
+                                session_id,
+                            },
+                            now,
+                        )
+                    } else {
+                        capture.cancel(token, now);
+                        false
+                    }
+                };
+                let (result, reason) = if ready {
+                    ("passed", "stream_stopped")
+                } else {
+                    ("failed", "audio_discarded")
+                };
+                gatt_note(format!("local_dictation source=chromecast phase=completed terminal_result={result} reason={reason}"));
+                return;
+            }
             // 回眸：先记结束时刻，文字稳定等待与音频排空互不影响。
             let transcript_ended_at = voice_timestamp_ms();
             transcript_capture.finish_session(transcript_ended_at);
@@ -3279,8 +3544,43 @@ fn handle_audio(
     usage: &UsageCounters,
     transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
     voice_level: &mut VoiceLevelMeter,
+    local_capture: &Mutex<LocalCapture>,
+    local_route: Option<(u64, u64)>,
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
+        return;
+    }
+    if let Some((connection, token)) = local_route {
+        pipeline.set_gain_db(*lock(gain_db));
+        let Some(session_id) = pipeline.session_id() else {
+            return;
+        };
+        match pipeline.handle_audio(bytes) {
+            Ok(PipelineOutput::Samples {
+                generation,
+                samples,
+            }) => {
+                // Chromecast's decoder already normalizes both codecs to 16 kHz mono.
+                let stream = LocalStream {
+                    connection,
+                    generation,
+                    session_id,
+                };
+                let count =
+                    lock(local_capture).append(token, stream, &samples, Instant::now()) as u64;
+                if count > 0 {
+                    *active_voice_samples = active_voice_samples.saturating_add(count);
+                    let mut snapshot = lock(state);
+                    snapshot.decoded_samples = snapshot.decoded_samples.saturating_add(count);
+                    snapshot.generation = generation;
+                }
+            }
+            Err(error) => {
+                lock(local_capture).cancel(token, Instant::now());
+                lock(state).last_error = Some(error.to_string());
+            }
+            Ok(_) => {}
+        }
         return;
     }
     // 收到任何音频字节都算链路仍然活着（即使解码失败，也不该误判为静默）。
@@ -4375,9 +4675,16 @@ fn gatt_log(kind: &str, bytes: &[u8]) {
     }
     let timestamp = utc_timestamp();
     let metadata = DIAGNOSTIC_LOG_METADATA.get();
+    // Decoder synchronization carries a predictor derived from the audio signal.
+    // Retain the opcode and length for protocol diagnosis without recording it.
+    let preview_len = if kind == "C" && bytes.first() == Some(&0x0A) {
+        1
+    } else {
+        24
+    };
     let preview: String = bytes
         .iter()
-        .take(24)
+        .take(preview_len)
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(" ");

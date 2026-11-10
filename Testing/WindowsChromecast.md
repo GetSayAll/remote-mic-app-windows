@@ -142,3 +142,56 @@ so these records do not establish that any ordinary key runs a mapping.
 
 Product comparison and the local Whisper boundary are recorded in the
 [capability review](../docs/investigations/2026-11-09-sayall-whisper-capability-review.md).
+
+## Ordinary-button diagnostics (2026-11-10)
+
+The `303d3f6` local preview logged a ready voice session, repeated PCM and one
+matched Raw Input collection. The persisted OK single-click action was `Enter`,
+with mapping enabled. No button gesture or dispatch appeared in that run. The
+older log could not distinguish collection enumeration from Windows delivering
+an actual packet to SayAll.
+
+The preview writes to `%LOCALAPPDATA%\SayAllChromecastPreview\Logs\sayall-diagnostic.log`.
+Read these events in order for the same `generation`:
+
+1. `action=button_flow` starts with an audit of the matched collection count.
+   Subsequent changed audits distinguish `accepted_packets` from
+   `rejected_paths`, which counts recognized Chromecast paths rejected for the
+   current target. `action=first_button_packet` records the first accepted
+   packet immediately. Voice readiness is logged separately.
+2. `hid_reports`, `decode_failures` and `keyboard_unmapped` identify what the
+   listener could decode. `engine_forwarded` counts reports queued to the
+   mapping worker. Compare those counts with `map_edges model=chromecast` to
+   confirm the worker produced button down/up edges. Identical reports and
+   reports from a superseded target may produce no edge.
+3. The edge log includes `suspended`. For an active mapping, `map_gesture`
+   gives the resolved trigger and `map_dispatch` distinguishes disabled or
+   unassigned mappings from a rejected or queued shortcut.
+4. `shortcut_queued` means the injection backend accepted the shortcut.
+   `global_hook_echo_delta` counts process-wide hook activity during that
+   window. Confirm receipt separately in the focused application.
+
+The events omit HID paths, Bluetooth addresses and report payloads. Ordinary
+keyboard input is excluded from the Chromecast counters and edge detail.
+
+## One-shot local Whisper dictation (2026-11-10)
+
+In Reflections, open Local Whisper Transcription, select the verified Whisper
+CLI and model, and arm the next Chromecast utterance. The preview keeps the
+armed capture in memory. A normal stop hands decoded 16 kHz mono PCM to the
+local engine, while cancellation, disconnect or an expired capture discards
+it. The completed text is an editable SayAll draft. Copying it is explicit.
+Optional local terminology rules apply literal replacements and spoken text
+snippets, with one-step undo while the modified draft remains untouched.
+
+- The Windows native capture regression feeds synthetic ATVV into the decoder
+  and verifies a single PCM handoff, timeout, bounds and stale-session isolation.
+- The host smoke test feeds synthetic Mandarin PCM to the real pinned Whisper
+  v1.9.1 x64 CPU engine and multilingual `base-q5_1` model. It checks the ready
+  draft and temporary WAV cleanup. A 5.6-second fixture transcribed in about
+  1.1–1.5 seconds after engine preparation, with one recognition error.
+- The frontend regression covers cancellation, late results, existing draft
+  edits and terminology apply/undo. It uses simulated IPC.
+- Physical remote timing and same-subscription ATVV ordering are native
+  acceptance cases. Chrome draft binding and Codex shortcut receipt have
+  separate acceptance criteria.
