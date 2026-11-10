@@ -151,7 +151,52 @@ pub fn capture_support() -> CaptureSupport {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 测试专用覆盖：只替换**本线程**读到的任务文件路径，不碰 SystemRoot
+    /// 或其他进程级环境变量。生产构建编译期就删掉。
+    static TASK_FILE_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        std::cell::RefCell::new(None);
+}
+
+/// 计划任务 XML 的路径。任务文件是否存在与 `schtasks /query` 的成功/失败
+/// 是同一件事，但前者不需要启动子进程。
+fn task_file_path() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(path) = TASK_FILE_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return path;
+        }
+    }
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    std::path::Path::new(&root)
+        .join("System32")
+        .join("Tasks")
+        .join(SCHEDULED_TASK_NAME)
+}
+
+/// 任务文件是否存在。`None` = 判断不了（权限 / IO 错误），不是"不存在"。
+///
+/// 为什么不用 `Path::is_file()`：它把"无权限"和"不存在"都压成 `false`，
+/// 让调用方无法区分「明确不存在」与「需要回退查询」。
+fn task_file_present_at(path: &std::path::Path) -> Option<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+fn task_file_present() -> Option<bool> {
+    task_file_present_at(&task_file_path())
+}
+
 /// 任务是否已注册（= 用户已授权）。只看退出码，不解析 GBK 输出。
+///
+/// 保留 `schtasks /query` 语义，供**启动对账与一次性操作**使用（任务文件存在
+/// 但调度器不可用时，这里仍应返回 false）。**每秒轮询的 `status()` 不调用
+/// 本函数**：系统关机时新进程初始化会失败（`0xc0000142`），`schtasks.exe`
+/// 会弹系统错误框并阻塞关机——2026-11-10 用户反馈的关机弹窗即由此产生。
 pub fn task_installed() -> bool {
     schtasks(&["/query", "/tn", SCHEDULED_TASK_NAME])
         .map(|ok| ok)
@@ -194,6 +239,9 @@ fn silent_command(program: &str) -> std::process::Command {
 ///   用户点否 / 叉掉 UAC 窗口 → 返回 FALSE + GetLastError = ERROR_CANCELLED
 ///   用户允许 → hProcess 有效，等助手退出码（0 = 安装成功）
 pub fn task_install_elevated(helper: &std::path::Path) -> Result<(), String> {
+    if system_is_shutting_down() {
+        return Err("系统正在关机，已取消计划任务授权。".to_string());
+    }
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_CANCELLED, HANDLE};
@@ -412,14 +460,7 @@ fn clear_reauth_marker() {
 /// 计划任务 XML 原文（UTF-16LE，带 BOM）。读不到就返回 `None`：任务缺失、被删除
 /// 或当前用户没有读权限都走这一条。
 fn task_xml() -> Option<String> {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    let bytes = std::fs::read(
-        std::path::Path::new(&root)
-            .join("System32")
-            .join("Tasks")
-            .join(SCHEDULED_TASK_NAME),
-    )
-    .ok()?;
+    let bytes = std::fs::read(task_file_path()).ok()?;
     let units: Vec<u16> = bytes
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
@@ -517,7 +558,12 @@ pub fn task_power_policy_matches() -> Option<bool> {
 /// `enabled` 来自持久化的用户意图（AppSettings.rc003_capture_enabled），
 /// **不是**"任务是否存在"——两者是不同的状态（见 TaskStatus 注释）。
 pub fn status(enabled: bool) -> TaskStatus {
-    let installed = task_installed();
+    // 本函数由按键页 / 连接页每秒调用一次（`get_rc003_task_status`）。
+    // **绝不能启动 schtasks.exe**：系统关机时子进程初始化会失败
+    // （`0xc0000142`），每次失败都弹一个系统错误框，关机被拖住 8–11 秒
+    // （2026-11-10 用户反馈）。任务文件读不到时按"未安装"处理；界面开关
+    // 读的是 `enabled`，`installed` 只用于诊断，不参与开关状态。
+    let installed = task_file_present().unwrap_or(false);
     TaskStatus {
         installed,
         // 每次开启都会触发系统授权（UAC）——2026-10-03 起恒为 true，
@@ -529,7 +575,21 @@ pub fn status(enabled: bool) -> TaskStatus {
     }
 }
 
+/// 当前会话是否正在关机 / 重启。
+///
+/// 关机阶段系统会拒绝新进程初始化，`schtasks.exe` 起不来时由系统弹出
+/// 「应用程序无法正常启动(0xc0000142)」错误框；每个框都会拖住关机。任何
+/// 后台线程（如常驻对账）都必须先问这里，不能再尝试拉起子进程。
+fn system_is_shutting_down() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+    // SAFETY: GetSystemMetrics 只读取当前会话的系统指标，无副作用。
+    unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
+}
+
 fn run_schtasks(args: &[&str], label: &str) -> Result<(), String> {
+    if system_is_shutting_down() {
+        return Err("系统正在关机，已跳过计划任务操作。".to_string());
+    }
     let output = silent_command("schtasks")
         .args(args)
         .output()
@@ -547,6 +607,9 @@ fn run_schtasks(args: &[&str], label: &str) -> Result<(), String> {
 
 /// `schtasks /query` 的成功/失败就是"存在/不存在"，不需要碰输出编码。
 fn schtasks(args: &[&str]) -> Option<bool> {
+    if system_is_shutting_down() {
+        return None;
+    }
     silent_command("schtasks")
         .args(args)
         .output()
@@ -759,5 +822,55 @@ mod tests {
         ));
         assert!(support.helper_expected.ends_with(".exe"));
         assert_eq!(support.available, support.reason.is_none());
+    }
+
+    struct TaskFileGuard {
+        previous: Option<std::path::PathBuf>,
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl TaskFileGuard {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "sayall-rc003-status-{}-{label}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("创建临时目录");
+            let path = dir.join(SCHEDULED_TASK_NAME);
+            let previous = TASK_FILE_OVERRIDE.with(|slot| slot.replace(Some(path.clone())));
+            Self {
+                previous,
+                dir,
+                path,
+            }
+        }
+    }
+
+    impl Drop for TaskFileGuard {
+        fn drop(&mut self) {
+            TASK_FILE_OVERRIDE.with(|slot| *slot.borrow_mut() = self.previous.take());
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn status_reads_task_file_when_present() {
+        // 2026-11-10 关机弹窗回归：`status()` 每秒被界面调用，绝不能启动
+        // `schtasks.exe`。任务文件存在时应直接判 installed=true。
+        //
+        // 本测试与下一条合起来是"先红后绿"的回归：
+        // * 机器上有真实任务时，缺文件那条在旧实现下会返回 true；
+        // * 机器上没有真实任务时，有文件那条在旧实现下会返回 false。
+        let guard = TaskFileGuard::new("present");
+        std::fs::write(&guard.path, "<Task/>").expect("写临时任务文件");
+        assert!(status(false).installed);
+    }
+
+    #[test]
+    fn status_reports_not_installed_when_task_file_is_missing() {
+        let _guard = TaskFileGuard::new("missing");
+        assert!(!status(false).installed);
     }
 }
