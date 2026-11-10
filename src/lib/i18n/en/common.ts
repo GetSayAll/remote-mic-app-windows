@@ -54,14 +54,9 @@ export default {
     "No app selected. Choose one from the two sections above.",
   "已选择": "Selected",
   "还没有选择应用": "No app selected",
-  "选中后会在这里显示名称、来源和路径。":
-    "The selected app's name, source, and path appear here.",
   "取消选择": "Clear Selection",
-  "确认后会把当前配置切换到这个应用":
-    "Confirming switches the current configuration to this app.",
-  "一次只能选择一个应用": "One app at a time",
   "正在保存…": "Saving…",
-  "使用这个应用": "Use This App",
+  "添加应用": "Add App",
   "已选择：{name}": "Selected: {name}",
   "关闭应用选择": "Close app picker",
   "搜索本机应用": "Search installed apps",

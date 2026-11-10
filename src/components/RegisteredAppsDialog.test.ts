@@ -35,6 +35,8 @@ describe("registered app picker", () => {
 
     expect(scanRegisteredApps).toHaveBeenCalledOnce();
     expect(wrapper.find('input[aria-label="全选当前结果"]').exists()).toBe(false);
+    expect(wrapper.find(".picker-foot-hint").exists()).toBe(false);
+    expect(wrapper.find(".picker-selection-sub").exists()).toBe(false);
     expect(wrapper.findAll('input[type="radio"]')).toHaveLength(3);
     const alpha = wrapper.get('input[aria-label="Alpha"]');
     expect((alpha.element as HTMLInputElement).disabled).toBe(false);
@@ -90,12 +92,33 @@ describe("registered app picker", () => {
     wrapper.unmount();
   });
 
+  it("shows a real icon for a manually picked shortcut", async () => {
+    vi.mocked(pickCustomApp).mockResolvedValue({
+      name: "Custom",
+      path: "C:\\Apps\\Custom.lnk",
+    });
+    vi.mocked(getApplicationIcon).mockResolvedValueOnce("data:image/png;base64,file");
+    const wrapper = mount(RegisteredAppsDialog, {
+      props: { knownApps: [], saving: false, saveError: null },
+    });
+    await flushPromises();
+    await wrapper.get(".picker-program-pick").trigger("click");
+    await flushPromises();
+
+    expect(getApplicationIcon).toHaveBeenCalledWith("C:\\Apps\\Custom.lnk");
+    expect(wrapper.get("img.picker-app-icon").attributes("src")).toBe(
+      "data:image/png;base64,file",
+    );
+    wrapper.unmount();
+  });
+
   it("confirms one scanned app with source scan", async () => {
     const wrapper = mount(RegisteredAppsDialog, {
       props: { knownApps: [], saving: false, saveError: null },
     });
     await flushPromises();
     await wrapper.get('input[aria-label="Alpha"]').setValue(true);
+    expect(wrapper.get(".picker-actions .primary-button").text()).toBe("添加应用");
     await wrapper.get(".picker-actions .primary-button").trigger("click");
 
     expect(wrapper.emitted("select")?.[0]).toEqual([apps[0], "scan"]);
@@ -117,7 +140,8 @@ describe("registered app picker", () => {
 
     expect(wrapper.get(".picker-selection").text()).toContain("Custom");
     expect(wrapper.get(".picker-selection").text()).toContain("程序选择");
-    expect(wrapper.get(".picker-selection").text()).toContain("C:\\Apps\\Custom.exe");
+    expect(wrapper.get(".picker-selection").text()).not.toContain("C:\\Apps\\Custom.exe");
+    expect(wrapper.find(".picker-selection-path").exists()).toBe(false);
 
     await wrapper.get(".picker-actions .primary-button").trigger("click");
     expect(wrapper.emitted("select")?.[0]).toEqual([
@@ -160,7 +184,7 @@ describe("registered app picker", () => {
     expect(wrapper.get(".picker-hint").text()).toContain(
       "No app selected. Choose one from the two sections above.",
     );
-    expect(wrapper.get(".picker-actions .primary-button").text()).toBe("Use This App");
+    expect(wrapper.get(".picker-actions .primary-button").text()).toBe("Add App");
     expect(wrapper.get(".picker-added").text()).toBe("Added");
 
     await wrapper.get('input[aria-label="Alpha"]').setValue(true);

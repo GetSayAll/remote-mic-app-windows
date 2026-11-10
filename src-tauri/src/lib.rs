@@ -3561,7 +3561,7 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
-/// 从可执行文件提取真实应用图标（PNG data URL）。失败返回 None，由前端显示通用图标。
+/// 从可执行文件或快捷方式提取真实应用图标（PNG data URL）。失败返回 None，由前端显示通用图标。
 #[tauri::command]
 fn get_application_icon(path: String) -> Option<String> {
     let shell = path.to_ascii_lowercase().starts_with("shell:appsfolder");
@@ -3574,7 +3574,10 @@ fn get_application_icon(path: String) -> Option<String> {
             )
         })
     } else {
+        // 程序选择可以是 `.lnk`：`PrivateExtractIconsW` 对快捷方式常拿不到图标，
+        // 再向 Shell 要一次（与开始菜单/资源管理器同源），失败才回退首字母。
         sayall_windows::transcript_capture_windows::icon_png_for_executable(&path)
+            .or_else(|| sayall_windows::transcript_capture_windows::icon_png_for_shell_item(&path))
     }?;
     Some(format!(
         "data:image/png;base64,{}",
@@ -6676,6 +6679,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 手动回归（2026-11-10 用户现场）：程序选择返回的 `.lnk` 也必须能拿到 Shell 图标。
+    /// 运行：
+    ///   $env:SAYALL_TEST_SHORTCUT_PATH='C:\...\shortcut.lnk'
+    ///   cargo test -p sayall-windows-app application_icon_from_shortcut -- --ignored
+    #[test]
+    #[ignore]
+    fn application_icon_from_shortcut_returns_data_url() {
+        let path = std::env::var("SAYALL_TEST_SHORTCUT_PATH")
+            .expect("set SAYALL_TEST_SHORTCUT_PATH to a real .lnk");
+        let icon = get_application_icon(path).expect("shortcut icon should be extracted");
+        assert!(icon.starts_with("data:image/png;base64,"));
+        assert!(icon.len() > 1000);
+    }
 
     /// 安装器钩子源码。契约测试要在**构建期**读它：这些断言存在的理由就是
     /// "有人改了一侧、忘了另一侧"（2026-09-16 的僵死 Bug 正是文档写了规则、

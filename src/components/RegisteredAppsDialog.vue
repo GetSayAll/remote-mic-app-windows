@@ -218,7 +218,6 @@ onMounted(() => {
         <span v-else class="picker-app-letter" aria-hidden="true">{{ selectedInitial }}</span>
         <div class="picker-selection-copy">
           <div class="picker-selection-name">{{ selectedApp.name }}</div>
-          <div class="picker-selection-path" :title="selectedApp.path">{{ selectedApp.path }}</div>
         </div>
         <span class="picker-source">{{ sourceLabel }}</span>
         <button type="button" class="picker-clear" :disabled="saving" @click="clearSelection">
@@ -229,7 +228,6 @@ onMounted(() => {
         <span class="picker-selection-empty-icon" aria-hidden="true">+</span>
         <div class="picker-selection-copy">
           <div class="picker-selection-title">{{ t("还没有选择应用") }}</div>
-          <div class="picker-selection-sub">{{ t("选中后会在这里显示名称、来源和路径。") }}</div>
         </div>
       </template>
     </section>
@@ -237,9 +235,6 @@ onMounted(() => {
     <p v-if="error || saveError" class="error-text" role="alert">{{ error ? t(error) : saveError }}</p>
 
     <footer class="picker-footer">
-      <span class="picker-foot-hint">
-        {{ locked ? t("确认后会把当前配置切换到这个应用") : t("一次只能选择一个应用") }}
-      </span>
       <div class="picker-actions">
         <button type="button" class="secondary-button" :disabled="saving" @click="emit('close')">
           {{ t("取消") }}
@@ -250,7 +245,7 @@ onMounted(() => {
           :disabled="!selectedApp || saving || scanning"
           @click="confirm"
         >
-          {{ saving ? t("正在保存…") : t("使用这个应用") }}
+          {{ saving ? t("正在保存…") : t("添加应用") }}
         </button>
       </div>
     </footer>
@@ -314,9 +309,11 @@ onMounted(() => {
 .picker-rescan { height: 34px; padding: 0 10px; font-size: 11.5px; white-space: nowrap; }
 
 .picker-list {
+  height: 270px;
   max-height: 270px;
   margin-top: 9px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border-top: 1px solid var(--border);
 }
 .picker-list-note { margin: 0; padding: 12px 8px; color: var(--muted); font-size: 12.5px; }
@@ -431,7 +428,6 @@ onMounted(() => {
 }
 .picker-selection-copy { flex: 1; min-width: 0; }
 .picker-selection-title { color: var(--text-subtle-strong); font-size: 12.5px; font-weight: 700; }
-.picker-selection-sub { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
 .picker-selection-empty-icon {
   width: 34px;
   height: 34px;
@@ -469,14 +465,6 @@ onMounted(() => {
   font-weight: 700;
 }
 .picker-selection-name { color: var(--text-primary); font-size: 14px; font-weight: 700; }
-.picker-selection-path {
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 10.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .picker-source {
   display: inline-flex;
   align-items: center;
@@ -510,10 +498,8 @@ onMounted(() => {
   padding-top: 16px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
 }
-.picker-foot-hint { color: var(--muted); font-size: 10.5px; }
 .picker-actions { display: flex; gap: 9px; }
 .picker-actions .secondary-button, .picker-actions .primary-button {
   height: 36px;
