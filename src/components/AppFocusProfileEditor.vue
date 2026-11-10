@@ -352,7 +352,7 @@ onUnmounted(() => {
           <path
             fill="currentColor"
             fill-rule="evenodd"
-            d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-3.6 7.4 2.3 2.3 4.8-4.8.9.9-5.7 5.7-3.2-3.2.9-.9Z"
+            d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-3.6 6.2 2.3 2.3 4.8-4.8.9.9-5.7 5.7-3.2-3.2.9-.9Z"
           />
         </svg>
         <svg v-else class="radio-icon" viewBox="0 0 16 16" aria-hidden="true">
