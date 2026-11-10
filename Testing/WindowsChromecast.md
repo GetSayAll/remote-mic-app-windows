@@ -198,14 +198,29 @@ was `Enter`. The mapping engine had no press to act on.
 
 A Windows probe verified that the exact consumer collection can be opened
 read-only with shared access, and that a pending overlapped read can be
-cancelled and reaped. The preview can read report 1 through that collection
-and through Raw Input. The first decoded press chooses one transport for
-report 1 until the target generation changes. If its collection is lost, the
-engine cancels pending gestures and the same transport must report a release
-before it can dispatch again. Separate counts record window-delivered
-reports and `direct_reports`; the transport
-selection is logged with its target generation. Verify physical press and
-release and the focused application's response separately.
+cancelled and reaped. The direct reader and Raw Input both support the known
+report 1 and report 2 formats. The first decoded press chooses one transport
+per report ID until the target generation changes. If its collection is
+lost, the engine cancels pending gestures and the same transport must report
+a release before it can dispatch again. `kernel_completion` records the
+first completed direct read before format filtering, and logs each new report
+shape. Separate counters track Raw Input and decoded `direct_reports`.
+
+During the `2f7c850` physical retry, mappings saved successfully and the voice
+stream reached PCM. There were no forwarded ordinary button reports or mapping
+edges. That build silently skipped non-ID-1 direct reads, so its log cannot
+rule those out. A read-only Windows parser check on the installed Consumer
+Control collection accepted input report 1 and returned
+`HIDP_STATUS_REPORT_DOES_NOT_EXIST` for input report 2. The additional format
+support covers another documented firmware layout.
+
+Xiaomi ordinary keys use the existing device-attributed Raw Input stream.
+Chromecast shares its gesture and shortcut engine, but needs its own source
+of ordinary-button edges. The optional Xiaomi enhanced capture helper is
+device-specific. A separate Google capture path would need a real report
+trace before it can claim to support the installed device. See CAST-12 in
+[the backlog](../TODO.md). Verify the focused application's newline behavior
+after confirming receipt of an actual shortcut.
 
 ## One-shot local Whisper dictation (2026-11-10)
 

@@ -287,24 +287,35 @@ enum CastReportSource {
     DirectHid,
 }
 
-fn accepts_cast_report(
-    owner: &mut Option<CastReportSource>,
-    needs_release: &mut bool,
-    incoming: CastReportSource,
-    pressed: bool,
-) -> bool {
-    if *needs_release {
-        if *owner == Some(incoming) && !pressed {
-            *needs_release = false;
+#[derive(Clone, Copy, Default)]
+struct CastReportRoute {
+    owner: Option<CastReportSource>,
+    needs_release: bool,
+}
+
+impl CastReportRoute {
+    fn accepts(&mut self, incoming: CastReportSource, pressed: bool) -> bool {
+        if self.needs_release {
+            if self.owner == Some(incoming) && !pressed {
+                self.needs_release = false;
+            }
+            return false;
         }
-        return false;
+        // A release cannot claim a transport. Both edges must come from the
+        // same stream once a press has established ownership for this ID.
+        if self.owner.is_none() && pressed {
+            self.owner = Some(incoming);
+        }
+        self.owner == Some(incoming)
     }
-    // A release or initial idle report cannot claim a transport. Once claimed,
-    // both press and release must come from the same stream until it is reset.
-    if owner.is_none() && pressed {
-        *owner = Some(incoming);
+}
+
+fn cast_report_index(report_id: u8) -> Option<usize> {
+    match report_id {
+        1 => Some(0),
+        2 => Some(1),
+        _ => None,
     }
-    *owner == Some(incoming)
 }
 
 struct ListenerContext {
@@ -325,8 +336,7 @@ struct ListenerContext {
     cast_last_audit: Option<(usize, CastRawInputCounters)>,
     cast_reader: Option<CastHidReader>,
     cast_reader_status: Option<&'static str>,
-    cast_report_source: Option<CastReportSource>,
-    cast_report_needs_release: bool,
+    cast_report_routes: [CastReportRoute; 2],
 }
 
 impl ListenerContext {
@@ -340,8 +350,7 @@ impl ListenerContext {
             self.cast_last_audit = None;
             self.cast_reader = None;
             self.cast_reader_status = None;
-            self.cast_report_source = None;
-            self.cast_report_needs_release = false;
+            self.cast_report_routes = [CastReportRoute::default(); 2];
         }
     }
 
@@ -391,7 +400,11 @@ impl ListenerContext {
             if reader.is_finished() {
                 self.cast_reader = None;
                 self.cast_reader_status = None;
-                if self.cast_report_source == Some(CastReportSource::DirectHid) {
+                if self
+                    .cast_report_routes
+                    .iter()
+                    .any(|route| route.owner == Some(CastReportSource::DirectHid))
+                {
                     self.cast_collection_removed(address, generation);
                 }
                 crate::ble::gatt_note(format!(
@@ -399,12 +412,18 @@ impl ListenerContext {
                 ));
                 break;
             }
-            let Some(buttons) = reader.try_recv() else {
+            let Some((report_id, buttons)) = reader.try_recv() else {
                 break;
             };
             self.cast_input.direct_reports += 1;
-            self.cast_input.last_report = Some((1, CAST_DESCRIPTOR_REPORT_BYTES));
-            self.forward_cast_report(address, generation, CastReportSource::DirectHid, 1, buttons);
+            self.cast_input.last_report = Some((report_id, CAST_DESCRIPTOR_REPORT_BYTES));
+            self.forward_cast_report(
+                address,
+                generation,
+                CastReportSource::DirectHid,
+                report_id,
+                buttons,
+            );
         }
     }
 
@@ -444,19 +463,15 @@ impl ListenerContext {
         report_id: u8,
         buttons: BTreeSet<RemoteButton>,
     ) {
-        if report_id == 1 {
-            let previous = self.cast_report_source;
-            if !accepts_cast_report(
-                &mut self.cast_report_source,
-                &mut self.cast_report_needs_release,
-                source,
-                !buttons.is_empty(),
-            ) {
+        if let Some(index) = cast_report_index(report_id) {
+            let route = &mut self.cast_report_routes[index];
+            let previous = route.owner;
+            if !route.accepts(source, !buttons.is_empty()) {
                 return;
             }
             if previous.is_none() {
                 crate::ble::gatt_note(format!(
-                    "raw_input feature=chromecast action=select_button_transport generation={generation} source={source:?}"
+                    "raw_input feature=chromecast action=select_button_transport generation={generation} report_id={report_id} source={source:?}"
                 ));
             }
         }
@@ -550,8 +565,10 @@ impl ListenerContext {
     fn cast_collection_removed(&mut self, address: u64, target_generation: u64) {
         // The other transport can still have a duplicate press queued, and
         // a reopened reader can see a held key. Keep the owner and require
-        // its neutral state before dispatching another report-1 press.
-        self.cast_report_needs_release |= self.cast_report_source.is_some();
+        // its neutral state before dispatching another press on that report ID.
+        for route in &mut self.cast_report_routes {
+            route.needs_release |= route.owner.is_some();
+        }
         let _ = self.engine.send(EngineMessage::Chromecast {
             address,
             target_generation,
@@ -810,8 +827,7 @@ fn run_listener(
             cast_last_audit: None,
             cast_reader: None,
             cast_reader_status: None,
-            cast_report_source: None,
-            cast_report_needs_release: false,
+            cast_report_routes: [CastReportRoute::default(); 2],
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -1349,7 +1365,9 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                     let report_id = report[0];
                     context.cast_input.hid_reports += 1;
                     context.cast_input.last_report = Some((report_id, report.len()));
-                    if report_id == 1 && context.cast_report_source == Some(CastReportSource::DirectHid) {
+                    if cast_report_index(report_id).is_some_and(|index| {
+                        context.cast_report_routes[index].owner == Some(CastReportSource::DirectHid)
+                    }) {
                         continue;
                     }
                     match context.decode_cast_hid(header.hDevice, report) {
@@ -1603,8 +1621,7 @@ pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
         cast_last_audit: None,
         cast_reader: None,
         cast_reader_status: None,
-        cast_report_source: None,
-        cast_report_needs_release: false,
+        cast_report_routes: [CastReportRoute::default(); 2],
     };
     [press, release].map(|report| {
         let mut body = [0; 8 + CAST_DESCRIPTOR_REPORT_BYTES];
@@ -1623,84 +1640,32 @@ pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepts_cast_report, is_descriptor_cast_report, voice_f5_wake_edge, CastReportSource,
-        RawInputRuntime,
+        cast_report_index, is_descriptor_cast_report, voice_f5_wake_edge, CastReportRoute,
+        CastReportSource, RawInputRuntime,
     };
     use crate::button_mapping::EngineMessage;
     use crate::raw_input::RawInputSnapshot;
     use std::sync::{mpsc, Arc, Mutex};
 
     #[test]
-    fn one_transport_owns_chromecast_report_one_until_reset() {
-        for (primary, twin) in [
-            (CastReportSource::DirectHid, CastReportSource::RawInput),
-            (CastReportSource::RawInput, CastReportSource::DirectHid),
-        ] {
-            let mut owner = None;
-            let mut needs_release = false;
-            assert!(!accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                twin,
-                false
-            ));
-            assert!(accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                primary,
-                true
-            ));
-            assert!(accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                primary,
-                false
-            ));
-            assert!(!accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                twin,
-                true
-            ));
-            assert!(!accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                twin,
-                false
-            ));
-            needs_release = true;
-            assert!(!accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                twin,
-                false
-            ));
-            assert!(!accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                primary,
-                true
-            ));
-            assert!(!accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                primary,
-                false
-            ));
-            assert!(accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                primary,
-                true
-            ));
-            owner = None;
-            assert!(accepts_cast_report(
-                &mut owner,
-                &mut needs_release,
-                twin,
-                true
-            ));
+    fn chromecast_report_ids_have_independent_transport_owners() {
+        use CastReportSource::{DirectHid, RawInput};
+        let mut routes = [CastReportRoute::default(); 2];
+        for (id, primary, twin) in [(1, DirectHid, RawInput), (2, RawInput, DirectHid)] {
+            let route = &mut routes[cast_report_index(id).unwrap()];
+            assert!(!route.accepts(twin, false));
+            assert!(route.accepts(primary, true));
+            assert!(route.accepts(primary, false));
+            assert!(!route.accepts(twin, true));
+            assert!(!route.accepts(twin, false));
+            route.needs_release = true;
+            assert!(!route.accepts(twin, false));
+            assert!(!route.accepts(primary, true));
+            assert!(!route.accepts(primary, false));
+            assert!(route.accepts(primary, true));
         }
+        assert_eq!(routes[0].owner, Some(DirectHid));
+        assert_eq!(routes[1].owner, Some(RawInput));
     }
 
     #[test]

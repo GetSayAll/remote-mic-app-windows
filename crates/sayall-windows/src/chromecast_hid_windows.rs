@@ -1,7 +1,8 @@
 //! Shared input reads from the selected Chromecast Consumer Control collection.
 
 use crate::raw_input::{
-    chromecast_button_for_consumer_usage, chromecast_path_matches_target, RemoteButton,
+    chromecast_button_for_consumer_usage, chromecast_path_matches_target, decode_chromecast_report,
+    RemoteButton,
 };
 use std::collections::BTreeSet;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -27,11 +28,14 @@ const CAST_VENDOR: u16 = 0x18d1;
 const CAST_PRODUCT: u16 = 0x9450;
 const CONSUMER_PAGE: u16 = 0x0c;
 const CONSUMER_CONTROL: u16 = 0x01;
-const REPORT_ID: u8 = 1;
+const DESCRIPTOR_REPORT_ID: u8 = 1;
+const CONSUMER_USAGE_REPORT_ID: u8 = 2;
 const REPORT_BYTES: usize = 3;
 const MAX_ACTIVE_USAGES: usize = 128;
 const QUEUE_CAPACITY: usize = 32;
 static WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+type ButtonReport = (u8, BTreeSet<RemoteButton>);
 
 struct WorkerSlot;
 
@@ -52,7 +56,7 @@ impl Drop for WorkerSlot {
 
 pub(super) struct Reader {
     stop: Arc<OwnedHandle>,
-    reports: Receiver<BTreeSet<RemoteButton>>,
+    reports: Receiver<ButtonReport>,
     finished: Arc<AtomicBool>,
 }
 
@@ -118,7 +122,7 @@ impl Reader {
         }))
     }
 
-    pub(super) fn try_recv(&self) -> Option<BTreeSet<RemoteButton>> {
+    pub(super) fn try_recv(&self) -> Option<ButtonReport> {
         self.reports.try_recv().ok()
     }
 
@@ -228,12 +232,29 @@ impl Drop for Descriptor {
     }
 }
 
+fn decode_button_report(
+    report: &mut [u8; REPORT_BYTES],
+    decode_descriptor: impl FnOnce(
+        &mut [u8; REPORT_BYTES],
+    ) -> Result<BTreeSet<RemoteButton>, &'static str>,
+) -> Result<Option<ButtonReport>, &'static str> {
+    let report_id = report[0];
+    let buttons = match report_id {
+        DESCRIPTOR_REPORT_ID => decode_descriptor(report)?,
+        CONSUMER_USAGE_REPORT_ID => {
+            decode_chromecast_report(report).map_err(|_| "consumer_usage_decode_failed")?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((report_id, buttons)))
+}
+
 fn read_loop(
     file: &OwnedHandle,
     descriptor: &Descriptor,
     io_done: &OwnedHandle,
     stop: &OwnedHandle,
-    sender: SyncSender<BTreeSet<RemoteButton>>,
+    sender: SyncSender<ButtonReport>,
     wake: &impl Fn(),
 ) -> Result<(), &'static str> {
     let file = raw(file);
@@ -241,6 +262,7 @@ fn read_loop(
     let stop = raw(stop);
     let waits = [stop, io_done];
     let mut first_read = true;
+    let mut observed_shapes = BTreeSet::new();
     loop {
         if unsafe { WaitForMultipleObjects(&[stop], false, 0) } == WAIT_OBJECT_0 {
             return Ok(());
@@ -282,14 +304,27 @@ fn read_loop(
         let mut bytes = 0;
         unsafe { GetOverlappedResult(file, &operation, &mut bytes, false) }
             .map_err(|_| "read_completion_failed")?;
+        // Observe kernel delivery before interpreting report ID or length. Each
+        // shape is logged once per worker without report bytes or device details.
+        let report_id = (bytes != 0).then_some(report[0]);
+        let first_completion = observed_shapes.is_empty();
+        if observed_shapes.insert((report_id, bytes)) {
+            let id = report_id.map_or_else(|| "none".to_owned(), |id| id.to_string());
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=shared_hid_read phase=kernel_completion first={first_completion} report_id={id} report_bytes={bytes}"
+            ));
+        }
         if bytes as usize != REPORT_BYTES {
             return Err("read_report_length_invalid");
         }
-        if report[0] != REPORT_ID {
+        // Unsupported IDs may belong to another control on the same collection.
+        // A malformed supported report ends this stream so the listener can clear
+        // held state instead of guessing whether the report meant release.
+        let Some(report) = decode_button_report(&mut report, |report| descriptor.decode(report))?
+        else {
             continue;
-        }
-        let buttons = descriptor.decode(&mut report)?;
-        match sender.try_send(buttons) {
+        };
+        match sender.try_send(report) {
             Ok(()) => wake(),
             Err(TrySendError::Disconnected(_)) => return Ok(()),
             Err(TrySendError::Full(_)) => return Err("read_queue_full"),
@@ -301,6 +336,20 @@ fn read_loop(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn consumer_usage_report_preserves_id_for_press_and_release() {
+        let no_descriptor =
+            |_: &mut [u8; REPORT_BYTES]| panic!("Report 2 must use the consumer usage decoder");
+        assert_eq!(
+            decode_button_report(&mut [2, 0x41, 0], no_descriptor),
+            Ok(Some((2, BTreeSet::from([RemoteButton::Ok]))))
+        );
+        assert_eq!(
+            decode_button_report(&mut [2, 0, 0], no_descriptor),
+            Ok(Some((2, BTreeSet::new())))
+        );
+    }
 
     #[test]
     fn unrelated_collection_is_rejected_before_open() {
