@@ -303,7 +303,7 @@ async function clearScrollRegion(): Promise<void> {
 
 async function testScroll(command: ScrollCommand): Promise<void> {
   const row = selectedRow.value;
-  if (!row || !row.installed || !selectedScrollRegion.value || scrollBusy.value) return;
+  if (!row || !row.installed || scrollBusy.value) return;
   scrollTesting.value = command;
   scrollMessage.value = null;
   try {
@@ -480,15 +480,52 @@ onUnmounted(() => {
           <p class="hint">
             {{ t("翻页键会滚动这个 APP 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。") }}
           </p>
-          <div class="scroll-actions">
+          <div class="scroll-learn-row">
             <button
-              class="secondary-button"
+              class="primary-button scroll-learn"
               type="button"
               :disabled="!selectedRow.installed || scrollBusy"
               @click="learnScrollRegionForSelected"
             >
               {{ scrollLearning ? t("正在等待你点击滚动区域…") : t("学习滚动区域") }}
             </button>
+            <span class="spacer"></span>
+            <button
+              class="secondary-button scroll-test"
+              type="button"
+              :disabled="!selectedRow.installed || scrollBusy"
+              @click="testScroll('page_up')"
+            >
+              {{ scrollTesting === "page_up" ? t("执行中…") : t("测试向上翻页") }}
+            </button>
+            <button
+              class="secondary-button scroll-test"
+              type="button"
+              :disabled="!selectedRow.installed || scrollBusy"
+              @click="testScroll('page_down')"
+            >
+              {{ scrollTesting === "page_down" ? t("执行中…") : t("测试向下翻页") }}
+            </button>
+          </div>
+          <div class="scroll-edge-row">
+            <span class="scroll-edge-label">{{ t("滚到两端：") }}</span>
+            <button
+              class="secondary-button scroll-test"
+              type="button"
+              :disabled="!selectedRow.installed || scrollBusy"
+              @click="testScroll('to_top')"
+            >
+              {{ scrollTesting === "to_top" ? t("执行中…") : t("滚到顶部") }}
+            </button>
+            <button
+              class="secondary-button scroll-test"
+              type="button"
+              :disabled="!selectedRow.installed || scrollBusy"
+              @click="testScroll('to_bottom')"
+            >
+              {{ scrollTesting === "to_bottom" ? t("执行中…") : t("滚到底部") }}
+            </button>
+            <span class="spacer"></span>
             <button
               v-if="selectedScrollRegion"
               class="quiet-button"
@@ -497,23 +534,6 @@ onUnmounted(() => {
               @click="clearScrollRegion"
             >
               {{ t("清除滚动区域") }}
-            </button>
-          </div>
-          <div class="scroll-test-row">
-            <button
-              v-for="item in [
-                { command: 'page_up' as ScrollCommand, label: '测试向上翻页' },
-                { command: 'page_down' as ScrollCommand, label: '测试向下翻页' },
-                { command: 'to_top' as ScrollCommand, label: '滚到顶部' },
-                { command: 'to_bottom' as ScrollCommand, label: '滚到底部' },
-              ]"
-              :key="item.command"
-              class="quiet-button"
-              type="button"
-              :disabled="!selectedRow.installed || !selectedScrollRegion || scrollBusy"
-              @click="testScroll(item.command)"
-            >
-              {{ scrollTesting === item.command ? t("执行中…") : t(item.label) }}
             </button>
           </div>
           <p v-if="scrollMessage" class="scroll-message" :class="scrollMessage.tone">
@@ -890,16 +910,29 @@ onUnmounted(() => {
 .scroll-status.learned {
   color: var(--success-text);
 }
-.scroll-actions,
-.scroll-test-row {
+.scroll-learn-row,
+.scroll-edge-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
-.scroll-actions .secondary-button {
-  min-height: 26px;
-  padding: 3px 10px;
+.scroll-learn-row .spacer,
+.scroll-edge-row .spacer {
+  flex: 1 1 auto;
+}
+.scroll-learn {
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+}
+.scroll-test {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.scroll-edge-label {
+  color: var(--muted);
   font-size: 12px;
 }
 .quiet-button {

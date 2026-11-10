@@ -54,6 +54,7 @@ export default {
   "测试向下翻页": "Test Page Down",
   "滚到顶部": "Scroll to Top",
   "滚到底部": "Scroll to Bottom",
+  "滚到两端：": "Scroll to edges:",
   "执行中…": "Working…",
   "滚动区域已记录。": "Scroll region saved.",
   "保存滚动区域失败，请重试。": "Could not save the scroll region. Try again.",
