@@ -407,3 +407,30 @@ table, where the subscribed candidate should be the real key handle. This
 reset and a post-reset capture remain the outstanding verification step;
 the pcap evidence lives at
 `artifacts/cast-vendor-key-evidence-2026-11-10.pcap`.
+
+## Local x64 test executable (2026-11-07)
+
+Built the experimental branch at `409d2be` with Tauri's debug portable build and a separate application identifier for its settings. The build omits the enhanced capture payload and updater artifacts. The EXE is unsigned.
+
+- `target/chromecast-local-preview/SayAll-Chromecast-Windows-x64.exe`
+- SHA-256 `06a958e7f18be597295dec5a0dc0c9647ee146a3ebf318eadf1feb6c4b53a1f0`
+- The frontend embed verifier found all 19 assets. The native test filter `cargo test --locked -p sayall-core -p sayall-windows --lib chromecast` passed all 5 selected tests.
+
+The test executable is ready for manual trial. Windows pairing, physical buttons, microphone streaming and the route to the input method still require hardware acceptance.
+
+### Deep-clean reproduction (2026-11-10, final)
+
+A scorched-earth local reset reproduced the mismatch on a freshly built
+table: all remote device nodes removed (pnputil), the per-device
+`BTHPORT\Parameters\Devices\<addr>` registry key deleted, then re-pair
+(Back+Home). The new pairing still subscribed only the cached
+notify-capable candidate (`D343BFC5`) and still received zero vendor-key
+notifications while voice/audio/control/battery worked. Conclusion: on
+this host the mismatch is not a stale cache — Windows' freshly built
+property table for this firmware does not match the remote's runtime
+notify handle (key service region). Local repair options are exhausted;
+macOS tolerates the same firmware because CoreBluetooth re-discovers and
+subscribes by UUID on every connect. Next decisive step for the product:
+verify on a second Windows machine (the preview EXE is self-contained);
+if it reproduces there too, the only remaining in-app avenue is a
+Google-specific report-layer helper performing raw ATT access.
