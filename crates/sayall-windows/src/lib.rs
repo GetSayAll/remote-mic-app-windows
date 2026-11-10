@@ -106,6 +106,8 @@ pub fn restore_input_method_after_capture() -> String {
 /// 本次开机的引导类型与「快速启动」开关状态（只读取证，2026-10-20）。
 /// 现场背景：hiberboot 开机后部分蓝牙适配器带旧固件状态，链路反复断开。
 pub mod boot_type;
+#[cfg(windows)]
+mod chromecast_hid_windows;
 /// 断连循环检测（纯逻辑）：识别"短时间内连续多次短会话"，只报告不恢复。
 #[cfg_attr(not(windows), allow(dead_code))]
 mod disconnect_loop;

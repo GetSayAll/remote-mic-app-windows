@@ -1,4 +1,5 @@
 use crate::button_mapping::EngineMessage;
+use crate::chromecast_hid_windows::Reader as CastHidReader;
 use crate::key_gate;
 use crate::raw_input::{
     button_for_usage, chromecast_button_for_consumer_usage, chromecast_path_matches_target,
@@ -34,8 +35,8 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, UnregisterClassW,
-    HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT,
-    WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
+    HWND_MESSAGE, MSG, RIM_INPUT, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
+    WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,6 +47,7 @@ const CAST_DESCRIPTOR_REPORT_BYTES: usize = 3;
 const MAX_CAST_PREPARSED_BYTES: usize = 64 * 1024;
 const MAX_CAST_ACTIVE_USAGES: usize = 128;
 const CAST_DECODE_ERROR_PREFIX: &str = "Chromecast HID 报文解码失败";
+const WM_CAST_HID_READY: u32 = WM_APP + 1;
 /// 监听器观察到遥控器活动后武装 key_gate 的宽限（毫秒）。
 /// 2026-09-06 与 key_gate::ARM_GRACE_MS 一致提升为 4s：RC003 键盘孪生
 /// 孤立按压首沿泄漏后由此武装，4s 内后续按压不再泄漏（修复左键双响应，
@@ -271,11 +273,38 @@ struct CastRawInputCounters {
     accepted_packets: u64,
     rejected_paths: u64,
     hid_reports: u64,
+    direct_reports: u64,
     decode_failures: u64,
     keyboard_unmapped: u64,
     engine_forwarded: u64,
     engine_closed: u64,
     last_report: Option<(u8, usize)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CastReportSource {
+    RawInput,
+    DirectHid,
+}
+
+fn accepts_cast_report(
+    owner: &mut Option<CastReportSource>,
+    needs_release: &mut bool,
+    incoming: CastReportSource,
+    pressed: bool,
+) -> bool {
+    if *needs_release {
+        if *owner == Some(incoming) && !pressed {
+            *needs_release = false;
+        }
+        return false;
+    }
+    // A release or initial idle report cannot claim a transport. Once claimed,
+    // both press and release must come from the same stream until it is reset.
+    if owner.is_none() && pressed {
+        *owner = Some(incoming);
+    }
+    *owner == Some(incoming)
 }
 
 struct ListenerContext {
@@ -294,6 +323,10 @@ struct ListenerContext {
     cast_report_rejection_logged: bool,
     cast_input: CastRawInputCounters,
     cast_last_audit: Option<(usize, CastRawInputCounters)>,
+    cast_reader: Option<CastHidReader>,
+    cast_reader_status: Option<&'static str>,
+    cast_report_source: Option<CastReportSource>,
+    cast_report_needs_release: bool,
 }
 
 impl ListenerContext {
@@ -305,6 +338,73 @@ impl ListenerContext {
             self.cast_report_rejection_logged = false;
             self.cast_input = CastRawInputCounters::default();
             self.cast_last_audit = None;
+            self.cast_reader = None;
+            self.cast_reader_status = None;
+            self.cast_report_source = None;
+            self.cast_report_needs_release = false;
+        }
+    }
+
+    fn refresh_cast_reader(&mut self, hwnd: HWND, path: &str, address: u64, generation: u64) {
+        if self.cast_reader.is_some()
+            || crate::remote_target::current() != (Target::Chromecast(Some(address)), generation)
+        {
+            return;
+        }
+        let hwnd = hwnd.0 as usize;
+        let status = match CastHidReader::open(path, address, move || unsafe {
+            let _ = PostMessageW(
+                Some(HWND(hwnd as *mut c_void)),
+                WM_CAST_HID_READY,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }) {
+            Ok(Some(reader)) => {
+                self.cast_reader = Some(reader);
+                "worker_started"
+            }
+            Ok(None) => "no_selected_collection",
+            Err(error) => error,
+        };
+        if self.cast_reader_status != Some(status) {
+            self.cast_reader_status = Some(status);
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=direct_reader generation={generation} status={status}"
+            ));
+        }
+    }
+
+    fn read_cast_reports(&mut self) {
+        let (Target::Chromecast(Some(address)), generation) = crate::remote_target::current()
+        else {
+            self.cast_reader = None;
+            return;
+        };
+        self.set_cast_generation(generation);
+        // The worker posts a wake for each enqueued report. Bound one window
+        // dispatch so an active device cannot starve disconnect/stop messages.
+        for _ in 0..32 {
+            let Some(reader) = self.cast_reader.as_ref() else {
+                break;
+            };
+            if reader.is_finished() {
+                self.cast_reader = None;
+                self.cast_reader_status = None;
+                if self.cast_report_source == Some(CastReportSource::DirectHid) {
+                    self.cast_collection_removed(address, generation);
+                }
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=direct_reader generation={generation} status=stopped"
+                ));
+                break;
+            }
+            let Some(buttons) = reader.try_recv() else {
+                break;
+            };
+            self.cast_input.direct_reports += 1;
+            self.cast_input.last_report = Some((1, CAST_DESCRIPTOR_REPORT_BYTES));
+            self.forward_cast_report(address, generation, CastReportSource::DirectHid, 1, buttons);
         }
     }
 
@@ -318,6 +418,7 @@ impl ListenerContext {
             accepted_packets,
             rejected_paths,
             hid_reports,
+            direct_reports,
             decode_failures,
             keyboard_unmapped,
             engine_forwarded,
@@ -331,8 +432,42 @@ impl ListenerContext {
             |(id, bytes)| format!("report_id={id} report_bytes={bytes}"),
         );
         crate::ble::gatt_note(format!(
-            "raw_input feature=chromecast action=button_flow generation={generation} matched={matched} accepted_packets={accepted_packets} rejected_paths={rejected_paths} hid_reports={hid_reports} decode_failures={decode_failures} keyboard_unmapped={keyboard_unmapped} engine_forwarded={engine_forwarded} engine_closed={engine_closed} {report}"
+            "raw_input feature=chromecast action=button_flow generation={generation} matched={matched} accepted_packets={accepted_packets} rejected_paths={rejected_paths} hid_reports={hid_reports} direct_reports={direct_reports} decode_failures={decode_failures} keyboard_unmapped={keyboard_unmapped} engine_forwarded={engine_forwarded} engine_closed={engine_closed} {report}"
         ));
+    }
+
+    fn forward_cast_report(
+        &mut self,
+        address: u64,
+        generation: u64,
+        source: CastReportSource,
+        report_id: u8,
+        buttons: BTreeSet<RemoteButton>,
+    ) {
+        if report_id == 1 {
+            let previous = self.cast_report_source;
+            if !accepts_cast_report(
+                &mut self.cast_report_source,
+                &mut self.cast_report_needs_release,
+                source,
+                !buttons.is_empty(),
+            ) {
+                return;
+            }
+            if previous.is_none() {
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=select_button_transport generation={generation} source={source:?}"
+                ));
+            }
+        }
+        if source == CastReportSource::DirectHid {
+            self.snapshot.lock().unwrap().raw_event_count += 1;
+        }
+        self.forward_cast_button(
+            address,
+            generation,
+            ChromecastInput::Hid { report_id, buttons },
+        );
     }
 
     fn forward_cast_button(
@@ -412,7 +547,11 @@ impl ListenerContext {
         }
     }
 
-    fn cast_collection_removed(&self, address: u64, target_generation: u64) {
+    fn cast_collection_removed(&mut self, address: u64, target_generation: u64) {
+        // The other transport can still have a duplicate press queued, and
+        // a reopened reader can see a held key. Keep the owner and require
+        // its neutral state before dispatching another report-1 press.
+        self.cast_report_needs_release |= self.cast_report_source.is_some();
         let _ = self.engine.send(EngineMessage::Chromecast {
             address,
             target_generation,
@@ -669,6 +808,10 @@ fn run_listener(
             cast_report_rejection_logged: false,
             cast_input: CastRawInputCounters::default(),
             cast_last_audit: None,
+            cast_reader: None,
+            cast_reader_status: None,
+            cast_report_source: None,
+            cast_report_needs_release: false,
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -783,6 +926,18 @@ unsafe extern "system" fn window_proc(
                     }
                 });
             }
+            if wparam.0 & 0xff == RIM_INPUT as usize {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            } else {
+                LRESULT(0)
+            }
+        }
+        WM_CAST_HID_READY => {
+            THREAD_CONTEXT.with(|slot| {
+                if let Some(context) = slot.borrow_mut().as_mut() {
+                    context.read_cast_reports();
+                }
+            });
             LRESULT(0)
         }
         WM_INPUT_DEVICE_CHANGE => {
@@ -807,7 +962,7 @@ unsafe extern "system" fn window_proc(
                     );
                     return LRESULT(0);
                 }
-                audit_binding();
+                audit_binding(hwnd);
             }
             LRESULT(0)
         }
@@ -912,6 +1067,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                     context.set_cast_generation(generation);
                     context.cast_collections.remove(&device_path);
                     context.cast_hid_descriptor = None;
+                    context.cast_reader = None;
                     context.cast_collection_removed(address, generation);
                 }
             }
@@ -947,7 +1103,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
 ///
 /// 只在状态**变化**时写日志：设备一直在位就静默返回，避免 10 秒一次的审计刷屏
 /// （LOGGING.md「状态未变化不重复刷」）。
-fn audit_binding() {
+fn audit_binding(hwnd: HWND) {
     THREAD_CONTEXT.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let context = match borrowed.as_mut() {
@@ -975,10 +1131,17 @@ fn audit_binding() {
                 paths.iter().map(|path| normalize_device_path(path)).collect();
             if !context.cast_collections.is_subset(&present) {
                 context.cast_hid_descriptor = None;
+                context.cast_reader = None;
                 context.cast_collection_removed(address, generation);
             }
             context.cast_collections = present;
+            if let [path] = paths.as_slice() {
+                context.read_cast_reports();
+                context.refresh_cast_reader(hwnd, path, address, generation);
+            }
             context.audit_cast_input(generation, paths.len());
+        } else {
+            context.cast_reader = None;
         }
         let still_bound = !context.selected_path.is_empty()
             && paths
@@ -1186,13 +1349,18 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                     let report_id = report[0];
                     context.cast_input.hid_reports += 1;
                     context.cast_input.last_report = Some((report_id, report.len()));
+                    if report_id == 1 && context.cast_report_source == Some(CastReportSource::DirectHid) {
+                        continue;
+                    }
                     match context.decode_cast_hid(header.hDevice, report) {
                         Ok(buttons) => {
                             context.clear_cast_decode_error();
-                            context.forward_cast_button(
+                            context.forward_cast_report(
                                 address,
                                 target_generation,
-                                ChromecastInput::Hid { report_id, buttons },
+                                CastReportSource::RawInput,
+                                report_id,
+                                buttons,
                             );
                         }
                         Err(error) => {
@@ -1433,6 +1601,10 @@ pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
         cast_report_rejection_logged: false,
         cast_input: CastRawInputCounters::default(),
         cast_last_audit: None,
+        cast_reader: None,
+        cast_reader_status: None,
+        cast_report_source: None,
+        cast_report_needs_release: false,
     };
     [press, release].map(|report| {
         let mut body = [0; 8 + CAST_DESCRIPTOR_REPORT_BYTES];
@@ -1450,10 +1622,86 @@ pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_descriptor_cast_report, voice_f5_wake_edge, RawInputRuntime};
+    use super::{
+        accepts_cast_report, is_descriptor_cast_report, voice_f5_wake_edge, CastReportSource,
+        RawInputRuntime,
+    };
     use crate::button_mapping::EngineMessage;
     use crate::raw_input::RawInputSnapshot;
     use std::sync::{mpsc, Arc, Mutex};
+
+    #[test]
+    fn one_transport_owns_chromecast_report_one_until_reset() {
+        for (primary, twin) in [
+            (CastReportSource::DirectHid, CastReportSource::RawInput),
+            (CastReportSource::RawInput, CastReportSource::DirectHid),
+        ] {
+            let mut owner = None;
+            let mut needs_release = false;
+            assert!(!accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                twin,
+                false
+            ));
+            assert!(accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                primary,
+                true
+            ));
+            assert!(accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                primary,
+                false
+            ));
+            assert!(!accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                twin,
+                true
+            ));
+            assert!(!accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                twin,
+                false
+            ));
+            needs_release = true;
+            assert!(!accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                twin,
+                false
+            ));
+            assert!(!accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                primary,
+                true
+            ));
+            assert!(!accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                primary,
+                false
+            ));
+            assert!(accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                primary,
+                true
+            ));
+            owner = None;
+            assert!(accepts_cast_report(
+                &mut owner,
+                &mut needs_release,
+                twin,
+                true
+            ));
+        }
+    }
 
     #[test]
     fn listener_restarts_keep_the_mapping_engine_channel() {

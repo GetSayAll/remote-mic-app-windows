@@ -189,6 +189,24 @@ lock leaves the old listener active. For an existing, configured preview,
 its saved startup preference. In this mode a lock conflict is logged without
 opening a dialog.
 
+### Shared HID input for the selected Chromecast collection
+
+On the running `947a0e6` preview, the user pressed OK after dictation. The
+log showed the voice stream reaching PCM, one matched Consumer Control
+collection, and zero accepted or rejected Raw Input packets. The saved action
+was `Enter`. The mapping engine had no press to act on.
+
+A Windows probe verified that the exact consumer collection can be opened
+read-only with shared access, and that a pending overlapped read can be
+cancelled and reaped. The preview can read report 1 through that collection
+and through Raw Input. The first decoded press chooses one transport for
+report 1 until the target generation changes. If its collection is lost, the
+engine cancels pending gestures and the same transport must report a release
+before it can dispatch again. Separate counts record window-delivered
+reports and `direct_reports`; the transport
+selection is logged with its target generation. Verify physical press and
+release and the focused application's response separately.
+
 ## One-shot local Whisper dictation (2026-11-10)
 
 In Reflections, open Local Whisper Transcription, select the verified Whisper
