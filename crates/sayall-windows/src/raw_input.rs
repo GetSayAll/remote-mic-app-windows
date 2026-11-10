@@ -342,6 +342,30 @@ pub(crate) fn chromecast_button_for_consumer_usage(usage: u16) -> Option<RemoteB
     })
 }
 
+/// [`chromecast_button_for_consumer_usage`] 的反查：语义键 → 消费页 usage。
+/// 一对多键（Input 有 0x0089/0x0189 两个编码）取首见编码，保证目标集下发
+/// 的确定性。报告层 Helper（CAST-13）用它把 Chromecast 映射掩码换算成
+/// castReport/castClear 的 usage 集。
+pub fn consumer_usage_for_chromecast_button(button: RemoteButton) -> Option<u16> {
+    Some(match button {
+        RemoteButton::Power => 0x019E,
+        RemoteButton::Input => 0x0089,
+        RemoteButton::Up => 0x0042,
+        RemoteButton::Down => 0x0043,
+        RemoteButton::Left => 0x0044,
+        RemoteButton::Right => 0x0045,
+        RemoteButton::Ok => 0x0041,
+        RemoteButton::Back => 0x0224,
+        RemoteButton::Home => 0x0223,
+        RemoteButton::VolumeUp => 0x00E9,
+        RemoteButton::VolumeDown => 0x00EA,
+        RemoteButton::VolumeMute => 0x00E2,
+        RemoteButton::Youtube => 0x0077,
+        RemoteButton::Netflix => 0x0078,
+        _ => return None,
+    })
+}
+
 /// Legacy two-byte Report 1 (vRemoter, MIT) and three-byte Report 2 (VibeMote).
 /// The Windows descriptor-based, three-byte Report 1 is decoded by HidP.
 pub fn decode_chromecast_report(

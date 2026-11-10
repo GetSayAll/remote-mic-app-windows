@@ -1734,12 +1734,13 @@ async fn enable_rc003_capture(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<rc003_task::TaskStatus, String> {
+    // CAST-13：Chromecast 现在走同一 helper + agent（消费页报告类），
+    // 不再拒绝。目标集由 set_cast_capture_targets 下发消费页 usage。
     if state.platform.connection_snapshot().remote_model == sayall_windows::RemoteModel::Chromecast
     {
         sayall_windows::gatt_note(
-            "enhanced_capture phase=rejected reason=chromecast_not_supported".to_owned(),
+            "enhanced_capture feature=chromecast action=enable phase=started".to_owned(),
         );
-        return Err("谷歌遥控器暂不支持全按键支持".to_owned());
     }
     // 尝试与结局都落诊断日志：「UAC 选了否，开关却变成开」这类争议
     // 只能靠这里的记录裁决（2026-09-24 真机争议：日志证明当时 UAC 是

@@ -802,7 +802,15 @@ pub(crate) fn apply_enhanced_capture_state(
     enabled: bool,
 ) {
     enhanced_capture_enabled.store(enabled, Ordering::Relaxed);
-    rc003_bridge.set_capture_targets(enabled, button_mapping.mappings().mapped_mask());
+    // CAST-13：按当前目标型号选目标集路径——Chromecast 走消费页 usage，
+    // 小米走键盘报告 usage。桥接层保证两套目标集不混流。
+    let (target, _) = crate::remote_target::current();
+    if matches!(target, crate::remote_target::Target::Chromecast(_)) {
+        rc003_bridge
+            .set_cast_capture_targets(enabled, button_mapping.chromecast_mappings().mapped_mask());
+    } else {
+        rc003_bridge.set_capture_targets(enabled, button_mapping.mappings().mapped_mask());
+    }
 }
 
 impl WindowsPlatform {

@@ -562,7 +562,10 @@ function handleCommand(line) {
     stat.targets_applied++;
     sendLine({
       type: 'targets_ack', t: Date.now(), generation: targetGeneration,
-      usages: reportUsages, cast: castAck
+      usages: reportUsages,
+      /* castReport 同时给扁平字段：助手的行级 JSON 提取不认识嵌套对象。 */
+      castReport: castReportUsages,
+      cast: castAck
     });
     logLine('targets:applied generation=' + targetGeneration + ' report=' + usagesHex(reportUsages)
       + ' clear=' + usagesHex(clearUsages));
