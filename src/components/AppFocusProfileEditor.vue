@@ -330,6 +330,8 @@ onUnmounted(() => {
       <span class="spacer"></span>
     </div>
 
+    <!-- 选中态对齐 Mac SettingsView：checkmark.circle.fill + accent 50% 边框、
+         12% 背景，未选中为空心 circle。 -->
     <div class="option-grid">
       <button
         v-for="option in primaryOptions"
@@ -341,7 +343,21 @@ onUnmounted(() => {
         :disabled="props.disabled"
         @click="selectStrategy(option.value)"
       >
-        <span class="radio" aria-hidden="true"></span>
+        <svg
+          v-if="strategy === option.value"
+          class="radio-icon"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+        >
+          <path
+            fill="currentColor"
+            fill-rule="evenodd"
+            d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-3.6 7.4 2.3 2.3 4.8-4.8.9.9-5.7 5.7-3.2-3.2.9-.9Z"
+          />
+        </svg>
+        <svg v-else class="radio-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.2" />
+        </svg>
         <span>{{ t(option.label) }}</span>
       </button>
     </div>
@@ -472,33 +488,26 @@ onUnmounted(() => {
   text-align: center;
   font-size: 12.5px;
 }
-.focus-option:hover:not(:disabled) {
+.focus-option:hover:not(:disabled):not(.selected) {
   border-color: var(--accent-border);
 }
 .focus-option.selected {
-  border-color: rgba(95, 98, 219, 0.5);
-  background: var(--accent-surface);
-  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
   font-weight: 600;
 }
-.radio {
+.focus-option.selected:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.radio-icon {
   width: 15px;
   height: 15px;
   flex: 0 0 15px;
-  display: grid;
-  place-items: center;
-  border: 1.4px solid #9aa0ad;
-  border-radius: 50%;
+  color: var(--text-secondary);
 }
-.focus-option.selected .radio {
-  border-color: var(--accent);
-}
-.focus-option.selected .radio::after {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
+.focus-option.selected .radio-icon {
+  color: var(--accent);
 }
 .hint {
   margin: 6px 0 0;
