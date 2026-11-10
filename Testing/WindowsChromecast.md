@@ -378,3 +378,32 @@ bond store and observe the fresh default, then decide between a listen-only
 subscription (register `ValueChanged` without writing the CCCD) and
 re-writing the CCCD after connect. Native button acceptance (CAST-09 matrix)
 remains blocked on this question.
+
+### Cache-mismatch closure (2026-11-10, evening)
+
+The full-day evidence chain, final state:
+
+- The remote streams key notifications on over-the-air handle `0x0029`
+  unconditionally (28 further notifications captured at 20:08 while no host
+  subscription mapped to that handle).
+- Windows subscribes our candidate at CCCD `0x0037` (cached table), receives
+  the `0x0029` notifications at the stack level (btvs sees them on the same
+  connection as the app's audio/control traffic) and drops them — no WinRT
+  `ValueChanged` is ever raised. The `Uncached` queries never hit the air
+  (zero ATT discovery in every captured reconnect), so the property table
+  cannot self-correct from inside the app.
+- Widening the subscription to every Notify/Indicate candidate of the key
+  service does not help: the cached table marks exactly one characteristic
+  (`D343BFC5` at `0x36/0x37`) as notify-capable and has no notify entry at
+  the live key handle.
+
+**Verdict for this machine:** a Windows GATT property-cache/table mismatch
+localized to the key-event service (ATVV and battery handles all match the
+live table). No public WinRT API forces re-discovery, and raw handle-level
+ATT is not reachable from an app. **User-side reset:** remove the device,
+restart Windows (a radio toggle or re-pair alone did not rebuild the table),
+then re-pair — a fresh pairing builds the cache from the live attribute
+table, where the subscribed candidate should be the real key handle. This
+reset and a post-reset capture remain the outstanding verification step;
+the pcap evidence lives at
+`artifacts/cast-vendor-key-evidence-2026-11-10.pcap`.
