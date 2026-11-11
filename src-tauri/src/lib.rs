@@ -507,7 +507,8 @@ unsafe extern "system" fn window_min_size_subclass(
     use windows::Win32::Foundation::LRESULT;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        MINMAXINFO, SWP_NOSIZE, WINDOWPOS, WM_GETMINMAXINFO, WM_NCDESTROY, WM_WINDOWPOSCHANGING,
+        MINMAXINFO, SWP_NOSIZE, WINDOWPOS, WM_ENDSESSION, WM_GETMINMAXINFO, WM_NCDESTROY,
+        WM_QUERYENDSESSION, WM_WINDOWPOSCHANGING,
     };
 
     if message == WM_NCDESTROY {
@@ -517,6 +518,28 @@ unsafe extern "system" fn window_min_size_subclass(
             WINDOW_MIN_SIZE_SUBCLASS_ID,
         );
         return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+
+    // 比 SM_SHUTTINGDOWN 更早的关机信号：helper 常驻对账在关机开始时可能
+    // 仍会醒来，先置标志让 run_schtasks() 拒绝拉起 schtasks.exe。
+    // 必须继续走 DefSubclassProc：不改变窗口对系统关机询问的应答。
+    if message == WM_QUERYENDSESSION {
+        crate::rc003_task::note_query_end_session();
+        sayall_windows::gatt_note(
+            "app_exit session_end phase=observed reason=query_end_session".to_owned(),
+        );
+    } else if message == WM_ENDSESSION {
+        if wparam.0 == 0 {
+            // 关机被其他应用取消：清除标志，恢复常驻对账。
+            crate::rc003_task::clear_query_end_session();
+            sayall_windows::gatt_note(
+                "app_exit session_end phase=cancelled reason=end_session_cancelled".to_owned(),
+            );
+        } else {
+            sayall_windows::gatt_note(
+                "app_exit session_end phase=confirmed reason=end_session".to_owned(),
+            );
+        }
     }
 
     if message == WM_GETMINMAXINFO && lparam.0 != 0 {
