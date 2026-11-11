@@ -16,6 +16,7 @@ import {
   type AppFocusProfile,
   type ButtonMappings,
   type ButtonTrigger,
+  type CustomAppPick,
   type MacroDefinition,
   type PresetAppInfo,
   type RemoteButton,
@@ -341,16 +342,12 @@ async function testScroll(command: ScrollCommand): Promise<void> {
   }
 }
 
-async function addApps(apps: Array<{ name: string; path: string }>): Promise<void> {
+async function selectApp(app: CustomAppPick): Promise<void> {
   addError.value = null;
-  if (!apps.length) {
-    addOpen.value = false;
-    return;
-  }
-  const applications = mergeApplications(mappings.value.applications ?? [], apps);
+  const applications = mergeApplications(mappings.value.applications ?? [], [app]);
   if (await persist({ ...mappings.value, applications })) {
     addOpen.value = false;
-    selectedTarget.value = apps[0].path;
+    selectedTarget.value = app.path;
   } else {
     addError.value = t("保存应用列表失败，请重试。");
   }
@@ -423,7 +420,7 @@ onUnmounted(() => {
       <p class="muted">
         {{ t("添加后可以为它单独设置输入框聚焦；只要该 APP 在前台就能用。") }}
       </p>
-      <button class="primary-button" type="button" @click="addOpen = true">{{ t("添加 APP") }}</button>
+      <button class="primary-button" type="button" @click="addError = null; addOpen = true">{{ t("添加 APP") }}</button>
     </article>
 
     <div v-else class="master-detail">
@@ -455,7 +452,7 @@ onUnmounted(() => {
             </span>
           </button>
         </div>
-        <button class="add-app" type="button" @click="addOpen = true">
+        <button class="add-app" type="button" @click="addError = null; addOpen = true">
           <span aria-hidden="true">＋</span>{{ t("添加 APP") }}
         </button>
       </section>
@@ -597,7 +594,7 @@ onUnmounted(() => {
       :saving="saving"
       :save-error="addError"
       @close="addOpen = false"
-      @add="addApps"
+      @select="selectApp"
     />
 
     <div v-if="confirmDelete && selectedRow" class="dialog-backdrop" @click.self="confirmDelete = false">

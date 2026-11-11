@@ -294,14 +294,14 @@ async function mountPage(
   return wrapper;
 }
 
-/** 通过「添加应用」加入 mock 的 Registered Example（自定义应用）。 */
+/** 通过「添加应用」选中 mock 的 Registered Example（自定义应用）。 */
 async function addScannedApp(page: VueWrapper): Promise<void> {
   await page
     .findAll("button")
     .find((button) => button.text() === "添加应用")!
     .trigger("click");
   await flushPromises();
-  await page.get('input[aria-label="全选当前结果"]').setValue(true);
+  await page.get('input[aria-label="Registered Example"]').setValue(true);
   await page.get(".registered-apps-dialog .primary-button").trigger("click");
   await flushPromises();
 }
@@ -490,7 +490,7 @@ function confirmDialog(page: VueWrapper) {
 }
 
 describe("buttons mapping page", () => {
-  it("adds scanned apps to the library without changing button bindings", async () => {
+  it("selecting a scanned app adds it to the library and binds the current button", async () => {
     const wrapper = await mountPage();
     await flushPromises();
     const powerCard = wrapper
@@ -502,7 +502,7 @@ describe("buttons mapping page", () => {
       .find((button) => button.text() === "添加应用")!
       .trigger("click");
     await flushPromises();
-    await wrapper.get('input[aria-label="全选当前结果"]').setValue(true);
+    await wrapper.get('input[aria-label="Registered Example"]').setValue(true);
     await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
     await flushPromises();
 
@@ -510,7 +510,10 @@ describe("buttons mapping page", () => {
     expect(saved.applications).toEqual([
       { name: "Registered Example", path: "shell:AppsFolder\\Example!App" },
     ]);
-    expect(saved.actions.power).toBeUndefined();
+    expect(saved.actions.power?.single).toEqual({
+      type: "open_app",
+      target: "shell:AppsFolder\\Example!App",
+    });
     expect(saved.actions.ok?.single).toEqual({
       type: "shortcut",
       chord: { keys: ["enter"] },
@@ -534,24 +537,20 @@ describe("buttons mapping page", () => {
       .find((button) => button.text() === "添加应用")!
       .trigger("click");
     await flushPromises();
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "选择程序或快捷方式")!
-      .trigger("click");
+    await wrapper.get(".picker-program-pick").trigger("click");
     await flushPromises();
     await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
     await vi.waitFor(() =>
-      expect(vi.mocked(saveButtonMappings).mock.calls.length).toBeGreaterThanOrEqual(2),
+      expect(vi.mocked(saveButtonMappings).mock.lastCall?.[0].actions.power?.single).toEqual({
+        type: "open_app",
+        target: "C:\\Apps\\Custom.exe",
+      }),
     );
 
-    const calls = vi.mocked(saveButtonMappings).mock.calls as Array<[ButtonMappings]>;
-    expect(calls[0]![0].applications).toContainEqual({
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0] as ButtonMappings;
+    expect(saved.applications).toContainEqual({
       name: "Custom",
       path: "C:\\Apps\\Custom.exe",
-    });
-    expect(calls[calls.length - 1]![0].actions.power?.single).toEqual({
-      type: "open_app",
-      target: "C:\\Apps\\Custom.exe",
     });
     wrapper.unmount();
   });
@@ -569,7 +568,7 @@ describe("buttons mapping page", () => {
       .find((button) => button.text() === "添加应用")!
       .trigger("click");
     await flushPromises();
-    await wrapper.get('input[aria-label="全选当前结果"]').setValue(true);
+    await wrapper.get('input[aria-label="Registered Example"]').setValue(true);
     await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
     await flushPromises();
 
