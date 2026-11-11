@@ -14,6 +14,7 @@ import {
   getOpenWindowAtLaunch,
   identityShortcutByButton,
   isAppSwitcherMacroChord,
+  isKnownButtonAction,
   isRecommendedVoiceEndpoint,
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
@@ -40,6 +41,7 @@ import {
   takeUpdateCompletedVersion,
   VB_CABLE_DOWNLOAD_URL,
   type AudioPhase,
+  type ButtonAction,
   type ConnectionPhase,
   type DiagnosticReport,
 } from "./bridge";
@@ -90,6 +92,15 @@ describe("mouse actions", () => {
 
   it("summarizes the app switcher session by its key chord", () => {
     expect(actionSummary({ type: "app_switcher" })).toBe("Alt + Tab");
+  });
+
+  it("labels actions written by a newer schema instead of treating them as unset", () => {
+    // 2026-11-11：旧构建读到新版本的未知动作时必须明确标注，
+    // 不能走 disabled/未设置的显示口径，也不能尝试读不存在的 chord。
+    const future = { type: "future_action", foo: 1 } as unknown as ButtonAction;
+    expect(isKnownButtonAction(future)).toBe(false);
+    expect(actionSummary(future)).toBe("不支持的动作（来自更新版本）");
+    expect(actionSummary({ type: "shortcut", chord: { keys: ["delete"] } })).toBe("Delete");
   });
 
   it("recognizes only the Alt + Tab macro chord as the switcher session", () => {

@@ -1916,6 +1916,12 @@ fn fire_gesture(
     }
     match action {
         ButtonAction::Disabled => {}
+        ButtonAction::Unsupported(raw) => {
+            crate::ble::gatt_note(format!(
+                "map_skip_inject reason=unsupported_action_type button={button:?} trigger={trigger:?} action_type={}",
+                raw.log_token()
+            ));
+        }
         ButtonAction::Scroll { direction, steps } => {
             crate::ble::gatt_note(format!(
                 "map_fire button={button:?} trigger={trigger:?} action=scroll direction={direction:?} steps={steps}"
@@ -2561,6 +2567,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         // 电源→Win+L：锁屏会让真实 UP 延迟到解锁后，引擎须在成功请求锁屏后
@@ -3723,6 +3731,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         runtime.set_mappings(mappings);
@@ -4008,6 +4018,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: Some(ButtonTrigger::Single),
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         let mut recognizer = GestureRecognizer::new();

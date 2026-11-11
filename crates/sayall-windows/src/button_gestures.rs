@@ -401,6 +401,8 @@ mod tests {
                 long: action(long),
                 hold_repeat,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         mappings
@@ -460,6 +462,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -486,6 +490,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -525,6 +531,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         let mut recognizer = GestureRecognizer::new();
@@ -1057,6 +1065,8 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                extra: BTreeMap::new(),
+                ..ButtonActions::default()
             },
         );
         let mut recognizer = GestureRecognizer::new();
