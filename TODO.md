@@ -20,9 +20,9 @@
 ### macOS 支持（ADR 0005：双平台单仓库，2026-11-11 起）
 
 - [x] MAC-01 · L0 纯逻辑层 · `RemoteButton`/键码表/`CastKeyEdgeTracker` 下沉 `sayall-core::cast_hid`（单一事实源，Windows 侧原路径重导出零改动）；新增 `crates/sayall-macos`（keymap：CGKeyCode 修饰键表 + 合成标记，移植自 vRemoter InputTrigger，MIT，见 ATTRIBUTION）。本机全绿：core 116 / macos 4 / windows 571 / app 216 / fmt 干净。
-- [ ] MAC-02 · L1 CoreBluetooth 后端 · Chromecast ATVV 语音会话 + 小米 RC001/RC003 传输（复用 `sayall-core` 协议）。**硬前置：一台 macOS 机器**（编译/链接/真机验收），CI 需 mac runner。
-- [ ] MAC-03 · L1 IOHIDManager 按键通道 · Chromecast HID report-1 → `CastKeyEdgeTracker` → 映射引擎（复用 core）。前置同 MAC-02。
-- [ ] MAC-04 · L2/L3 会话接线与应用壳 · CGEvent 合成（keymap 已就位）、CoreAudio 麦克风管道、Tauri 壳平台条件编译或独立菜单栏壳（届时另立 ADR）。
+- [x] MAC-02 · vRemoter 源码整体引入（2026-11-11 修订）· `mac/vremoter/`（社区版 f3e310f，含 WeType 支持；MIT，LICENSE 原文保留）。Chromecast 语音 + 按键在 Mac 端就此可用；原"L1 CoreBluetooth/IOHIDManager Rust 重写"作废（ADR 0005 修订条目）。
+- [ ] MAC-03 · Mac 构建与验收 · 在 macOS 上跑 `run-self-tests.sh` + `package-app.sh` 出包，真机过 Chromecast 语音/按键矩阵（同 CAST-09 口径）。**硬前置：一台 macOS 机器**。
+- [ ] MAC-04 · 品牌与收敛 · 应用名/图标/更新源换 SayAll 自家基础设施；键码语义与 `sayall-core::cast_hid` 对表；小米 RC001/RC003 接入（Swift 侧 BLEBridge 会话，协议复用 core）。
 
 ### 本地听写与转写
 

@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "swiftsdk",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/TelemetryDeck/SwiftSDK.git",
+      "state" : {
+        "revision" : "bc7467592166e8f93fbde0140d2757b0635e1712",
+        "version" : "2.9.10"
+      }
+    }
+  ],
+  "version" : 2
+}

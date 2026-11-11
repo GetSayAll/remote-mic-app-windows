@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>vRemoter</string>
+    <key>CFBundleExecutable</key>
+    <string>vRemote</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.simaqingfeng.vRemote</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>vRemoter</string>
+    <key>CFBundleIconFile</key>
+    <string>vRemoter.icns</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.1.1</string>
+    <key>CFBundleVersion</key>
+    <string>111</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>VRReleasesURL</key>
+    <string>https://updates.vincentstudio.org/vremoter/releases.json</string>
+    <key>VRCommerceConfigURL</key>
+    <string>https://updates.vincentstudio.org/vremoter/commerce.json</string>
+	<key>VRTelemetryDeckAppID</key>
+	<string>0B41E7AD-49DA-4A8F-B216-BCF13B3A2D25</string>
+	<key>VRTelemetryDeckNamespace</key>
+	<string>cn.live</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>连接蓝牙语音遥控器并接收语音音频。</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>连接蓝牙语音遥控器并接收语音音频。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>同时使用蓝牙遥控器和 MacBook 麦克风进行语音输入。</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>识别蓝牙遥控器语音键并阻止原生搜索动作干扰语音输入。</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

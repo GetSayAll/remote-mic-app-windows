@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-10T22:00:00+08:00",
+  "heroImageURL": "https://example.com/hero.png",
+  "stores": [
+    {
+      "id": "xiaohongshu",
+      "enabled": true,
+      "nameZh": "小红书",
+      "nameEn": "Xiaohongshu",
+      "url": "https://xhslink.com/m/3E0dFZwiR9R",
+      "qrImageURL": "https://example.com/xiaohongshu-qr.png"
+    },
+    {
+      "id": "douyin",
+      "enabled": true,
+      "nameZh": "抖音商城",
+      "nameEn": "Douyin Shop",
+      "url": "https://example.com/douyin-test",
+      "qrImageURL": "https://example.com/douyin-qr.png"
+    }
+  ]
+}

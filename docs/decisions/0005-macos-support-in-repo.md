@@ -20,18 +20,18 @@ SayAll 的遥控器生态目前分裂在两处：
 1. 本仓库成为双平台唯一主干。新增 `crates/sayall-macos` crate，与
    `sayall-windows` 平级；`sayall-core`（ATVV 协议、映射引擎、编解码）继续作为
    两平台共享的纯逻辑层。
-2. vRemoter 仅作 **MIT 参考实现**：移植其已验证的行为逻辑（HID report-1 单键翻转、
-   CGKeyCode 表、合成键标记），在 `ATTRIBUTION.md` 标注；不引入其源码文件，
-   不修改其仓库。
-3. 分层策略（自下而上，每层可独立验收）：
-   - **L0 纯逻辑**（本 ADR 随附）：HID 边沿跟踪、键码表——平台无关，在本机
-     `cargo test` 即可验证。
-   - **L1 Apple FFI**（CoreBluetooth / IOHIDManager / CGEvent / CoreAudio）：
-     **硬前置 = 一台 macOS 机器**（编译、链接、真机验收都离不开）。在此之前
-     不编写未编译过的 FFI 代码——不交付无法验证的支架。
-   - **L2 会话接线**：ATVV 语音会话（复用 `sayall-core` 协议状态机）、
-     Chromecast 按键（L0 跟踪器 + IOHIDManager）、小米 RC003 传输。
-   - **L3 应用壳**：Tauri 壳按平台条件编译，或独立 mac 菜单栏壳（届时另立 ADR）。
+2. **（2026-11-11 当日修订）vRemoter 源码整体引入**：产品复核后认定——
+   Mac 端已有量产验证的实现（vRemoter：ATVV 语音 + IOHIDManager 按键 +
+   CoreAudio 混音），MIT 允许整体引入，重写 Apple FFI（在 Windows 机器上
+   无法编译验证）没有收益。源码收入 `mac/vremoter/`（来源 = 本地社区版
+   `ccc333cn-edition`，revision `f3e310f`，含 WeType 支持等 4 项改进），
+   保持原样可构建；LICENSE 与 THIRD_PARTY_NOTICES 原文保留。
+   原 L1–L3 Rust 重写计划作废，改为"引入 + 按需收敛"（收敛点见
+   `mac/vremoter/README-SAYALL.md`：品牌/更新源、语义统一、小米接入）。
+   vRemoter 上游仓库本身仍不改动。
+3. （已被第 2 条取代）~~分层策略~~：L0 纯逻辑（保留——`sayall-core::cast_hid`
+   与 `sayall-macos` keymap 仍作为跨平台语义的单一事实源，供未来配置同步
+   与小米接入复用）；L1–L3 由 `mac/vremoter/` 整体引入替代。
 
 ## 证据
 

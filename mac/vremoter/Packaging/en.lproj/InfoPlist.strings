@@ -1,0 +1,4 @@
+"NSBluetoothAlwaysUsageDescription" = "Connect to a Bluetooth voice remote and receive microphone audio.";
+"NSBluetoothPeripheralUsageDescription" = "Connect to a Bluetooth voice remote and receive microphone audio.";
+"NSInputMonitoringUsageDescription" = "Recognize Bluetooth remote voice buttons and suppress native Search actions during voice input.";
+"NSMicrophoneUsageDescription" = "Use Bluetooth remote and MacBook microphones together for voice input.";
