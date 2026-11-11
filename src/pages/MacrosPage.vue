@@ -2007,15 +2007,14 @@ watch(
 }
 .search-clear {
   position: absolute;
-  top: 50%;
-  right: 1px;
-  width: 32px;
-  height: 32px;
-  transform: translateY(-50%);
+  top: 2px;
+  right: 2px;
+  bottom: 2px;
+  width: 30px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 7px;
+  border-radius: 5px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
