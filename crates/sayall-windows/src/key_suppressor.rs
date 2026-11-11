@@ -43,6 +43,19 @@ mod windows_impl {
 
     const ARM_GRACE_MS: u64 = 250;
     const BOUNDED_WAIT_MS: u64 = 60;
+    /// 按住锁存的最大 DOWN 沿间隔（2026-11-06 现场修复）。
+    ///
+    /// 现场：长按第 5.6 秒音频队列溢出 → `abort_voice_session` 解除会话武装 →
+    /// 250ms 宽限过后，遥控器仍在按住产生的 typematic 重复沿被逐条放行
+    /// （约每 320ms 一条），浏览器被刷新。被本钩子吞下的沿 Raw Input 看不到，
+    /// 所以 Raw Input 归因只能在**已经漏出一条**之后重新武装，无法阻止。
+    ///
+    /// 规则：本次按住的 DOWN 沿迄今全部被吞（HOLD_SWALLOWED_ALL）且距上一条
+    /// 被吞的 DOWN 沿不超过该间隔时，后续 DOWN 沿继续吞，直到 UP 沿结束本次
+    /// 按住。与会话/音频状态解耦：音频失败只结束语音，不再放出 F5。
+    /// 取 1500ms：覆盖 Windows 键盘重复延迟上限（1000ms，首个重复沿之前）
+    /// 并留余量；UP 沿丢失时，最多让该间隔内按下的一次实体 F5 被吞。
+    const HOLD_LATCH_MAX_GAP_MS: u64 = 1500;
     /// 遥控器语音键在键盘层的虚拟键码（F5）；宿主进程的按键过滤共用。
     pub(crate) const VK_F5: u32 = 0x74;
 
@@ -66,6 +79,8 @@ mod windows_impl {
     /// DOWN 沿全部被本钩子吞下，2=任一 DOWN 沿已泄漏进 OS。UP 沿只在 1 时
     /// 吞下（VVC 同款：DOWN 漏进 OS 则 UP 必放行）。
     static HOLD_PAIRING: AtomicU32 = AtomicU32::new(0);
+    /// 本次按住最近一条被吞 DOWN 沿的时刻（`now_ms`，0=无）；按住锁存判定用。
+    static LAST_SWALLOWED_DOWN_MS: AtomicU64 = AtomicU64::new(0);
     pub const HOLD_NONE: u32 = 0;
     pub const HOLD_SWALLOWED_ALL: u32 = 1;
     pub const HOLD_LEAKED: u32 = 2;
@@ -84,13 +99,29 @@ mod windows_impl {
         SESSION_ACTIVE.load(Ordering::Relaxed)
     }
 
+    /// 纯判定：按住锁存是否生效（单元测试覆盖）。只有"迄今全吞"的按住才能
+    /// 锁存；已泄漏或配对未知的按住不锁存（其 UP 沿必须放行，见防粘键配对）。
+    pub fn hold_latch_active(hold_pairing: u32, last_swallowed_down_ms: u64, now: u64) -> bool {
+        hold_pairing == HOLD_SWALLOWED_ALL
+            && last_swallowed_down_ms != 0
+            && now.saturating_sub(last_swallowed_down_ms) <= HOLD_LATCH_MAX_GAP_MS
+    }
+
+    fn hold_latched() -> bool {
+        hold_latch_active(
+            HOLD_PAIRING.load(Ordering::Relaxed),
+            LAST_SWALLOWED_DOWN_MS.load(Ordering::Relaxed),
+            now_ms(),
+        )
+    }
+
     fn swallow_ready() -> bool {
         decide(
             VK_F5,
             false,
             session_active(),
             LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
-            armed(),
+            armed() || hold_latched(),
             HOLD_NONE,
         )
     }
@@ -242,6 +273,11 @@ mod windows_impl {
                 Some(swallow)
             }
             HostSuppressorMessage::F5Down => {
+                // 诊断：本条 DOWN 沿是否仅靠按住锁存吞下（会话/建链/武装都已失效）。
+                let latch_only = hold_latched()
+                    && !session_active()
+                    && !LINK_GUARD_ACTIVE.load(Ordering::Relaxed)
+                    && !armed();
                 // DOWN 沿：先试武装状态，未武装则 60ms 有界等待。
                 let waited = !swallow_ready();
                 let swallowed = if !waited {
@@ -264,6 +300,7 @@ mod windows_impl {
                 F5_DOWN_SEEN.fetch_add(1, Ordering::Relaxed);
                 if swallowed {
                     F5_DOWN_SWALLOWED.fetch_add(1, Ordering::Relaxed);
+                    LAST_SWALLOWED_DOWN_MS.store(now_ms(), Ordering::Relaxed);
                 } else {
                     F5_DOWN_LEAKED.fetch_add(1, Ordering::Relaxed);
                 }
@@ -271,9 +308,10 @@ mod windows_impl {
                 let next = track_down(hold, swallowed);
                 HOLD_PAIRING.store(next, Ordering::Relaxed);
                 crate::ble::gatt_note(format!(
-                    "suppressor_ask dir=down swallow={} waited_late={} hold={next}",
+                    "suppressor_ask dir=down swallow={} waited_late={} hold={next} latch_only={}",
                     if swallowed { 1 } else { 0 },
-                    if waited && swallowed { 1 } else { 0 }
+                    if waited && swallowed { 1 } else { 0 },
+                    if latch_only && swallowed { 1 } else { 0 }
                 ));
                 Some(swallowed)
             }
@@ -302,6 +340,7 @@ mod windows_impl {
             LINK_GUARD_ACTIVE.store(false, Ordering::Relaxed);
             ARMED_UNTIL_MS.store(0, Ordering::Relaxed);
             HOLD_PAIRING.store(HOLD_NONE, Ordering::Relaxed);
+            LAST_SWALLOWED_DOWN_MS.store(0, Ordering::Relaxed);
             VoiceKeySuppressor
         }
     }
@@ -406,7 +445,8 @@ pub(crate) use windows_impl::{
 
 #[cfg(all(windows, test))]
 pub use windows_impl::{
-    decide, key_down_from_async_state, track_down, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
+    decide, hold_latch_active, key_down_from_async_state, track_down, HOLD_LEAKED, HOLD_NONE,
+    HOLD_SWALLOWED_ALL,
 };
 
 #[cfg(test)]
@@ -562,6 +602,39 @@ mod tests {
         assert!(!super::is_wetype_marker(0x5B, true));
         assert!(!super::is_wetype_marker(0xA2, true));
         assert!(!super::is_wetype_marker(0x74, true));
+    }
+
+    /// 2026-11-06 现场：音频队列溢出中止会话后，按住中的遥控器 F5 重复沿
+    /// 每 ~320ms 漏一条刷新浏览器。按住锁存让"迄今全吞"的按住吞到 UP 沿为止。
+    #[test]
+    fn swallowed_hold_stays_latched_until_gap_expires() {
+        // 全吞的按住、上一条被吞沿在间隔内 → 锁存。
+        assert!(super::hold_latch_active(
+            super::HOLD_SWALLOWED_ALL,
+            10_000,
+            10_040
+        ));
+        assert!(super::hold_latch_active(
+            super::HOLD_SWALLOWED_ALL,
+            10_000,
+            11_500
+        ));
+        // 超过间隔（UP 沿丢失后的实体 F5）→ 不锁存。
+        assert!(!super::hold_latch_active(
+            super::HOLD_SWALLOWED_ALL,
+            10_000,
+            11_501
+        ));
+        // 已泄漏的按住不锁存：其 UP 沿必须放行，继续吞 DOWN 无意义。
+        assert!(!super::hold_latch_active(
+            super::HOLD_LEAKED,
+            10_000,
+            10_040
+        ));
+        // 无按住/配对未知 → 不锁存（实体 F5 不受影响）。
+        assert!(!super::hold_latch_active(super::HOLD_NONE, 10_000, 10_040));
+        // 从未吞过任何沿 → 不锁存。
+        assert!(!super::hold_latch_active(super::HOLD_SWALLOWED_ALL, 0, 40));
     }
 
     #[test]
