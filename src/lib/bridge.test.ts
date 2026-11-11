@@ -75,6 +75,10 @@ describe("sharing and app icon sync", () => {
 describe("mouse actions", () => {
   it("summarizes clicks, movement, and wheel amounts", () => {
     expect(actionSummary({ type: "scroll", direction: "down", steps: 5 })).toBe("滚轮向下 5 格");
+    expect(actionSummary({ type: "page_up" })).toBe("向上翻页");
+    expect(actionSummary({ type: "page_down" })).toBe("向下翻页");
+    expect(actionSummary({ type: "scroll_to_top" })).toBe("滚到顶部");
+    expect(actionSummary({ type: "scroll_to_bottom" })).toBe("滚到底部");
     expect(actionSummary({ type: "mouse_move", direction: "left", distance: 75 })).toBe("鼠标向左 75 px");
     expect(actionSummary({ type: "mouse_click", kind: "double_left" })).toBe("左键双击");
   });

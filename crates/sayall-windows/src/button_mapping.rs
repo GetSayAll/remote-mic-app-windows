@@ -135,6 +135,15 @@ pub enum EngineMessage {
 pub trait MappingInjector: Send + Sync {
     fn tap(&self, chord: &KeyChord) -> Result<(), String>;
     fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String>;
+    /// APP 级翻页：优先 `ScrollPattern`，没有档案时由后端找当前前台窗口的
+    /// 最大可滚动区域；最后才退到不移动光标的滚轮消息。
+    fn scroll_region(
+        &self,
+        _target: Option<&crate::scroll_region::ScrollRegionTarget>,
+        _command: crate::scroll_region::ScrollCommand,
+    ) -> Result<crate::scroll_region::ScrollOutcome, String> {
+        Err("当前平台不支持翻页".to_owned())
+    }
     fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String>;
     fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String>;
     /// 打开/激活预设应用（生产实现调用 app_launcher）。
@@ -284,6 +293,23 @@ impl MappingInjector for SendInputInjector {
             .scroll(direction, steps)
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    fn scroll_region(
+        &self,
+        target: Option<&crate::scroll_region::ScrollRegionTarget>,
+        command: crate::scroll_region::ScrollCommand,
+    ) -> Result<crate::scroll_region::ScrollOutcome, String> {
+        #[cfg(windows)]
+        {
+            crate::scroll_region_windows::scroll_foreground(target.cloned(), command)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (target, command);
+            Err("当前平台不支持翻页".to_owned())
+        }
     }
 
     fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String> {
@@ -2040,6 +2066,19 @@ fn reset_after_terminal_action(
     }
 }
 
+/// 当前前台 APP 对应的滚动区域档案；只在 Windows 生产路径使用。
+#[cfg(windows)]
+fn scroll_target_for_foreground(
+    mappings: &ButtonMappings,
+) -> Option<crate::scroll_region::ScrollRegionTarget> {
+    let executable = crate::focus_windows::foreground_executable_path()?;
+    mappings
+        .scroll_regions
+        .iter()
+        .find(|(target, _)| crate::app_launcher::target_matches_executable(target, &executable))
+        .map(|(_, target)| target.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fire_gesture(
     button: RemoteButton,
@@ -2122,6 +2161,24 @@ fn fire_gesture(
         note_dispatch("trigger_unassigned");
         return false;
     }
+    let scroll_target: Option<crate::scroll_region::ScrollRegionTarget> = if matches!(
+        action,
+        ButtonAction::PageUp
+            | ButtonAction::PageDown
+            | ButtonAction::ScrollToTop
+            | ButtonAction::ScrollToBottom
+    ) {
+        #[cfg(windows)]
+        {
+            scroll_target_for_foreground(&mappings)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    } else {
+        None
+    };
     if overlay_actions.is_some() && action == ButtonAction::Disabled {
         note_dispatch("profile_disabled");
         // 方案显式设为「不执行操作」：消费本次手势，不回注原生键。
@@ -2200,6 +2257,38 @@ fn fire_gesture(
             ));
             if let Err(error) = injector.scroll(direction, steps) {
                 lock_state(state).last_error = Some(format!("滚轮事件发送失败：{error}"));
+            }
+        }
+        ButtonAction::PageUp
+        | ButtonAction::PageDown
+        | ButtonAction::ScrollToTop
+        | ButtonAction::ScrollToBottom => {
+            let command = match &action {
+                ButtonAction::PageUp => crate::scroll_region::ScrollCommand::PageUp,
+                ButtonAction::PageDown => crate::scroll_region::ScrollCommand::PageDown,
+                ButtonAction::ScrollToTop => crate::scroll_region::ScrollCommand::ToTop,
+                _ => crate::scroll_region::ScrollCommand::ToBottom,
+            };
+            crate::ble::gatt_note(format!(
+                "map_fire button={button:?} trigger={trigger:?} action={} target_recorded={}",
+                command.as_str(),
+                scroll_target.is_some()
+            ));
+            match injector.scroll_region(scroll_target.as_ref(), command) {
+                Ok(outcome) => crate::ble::gatt_note(format!(
+                    "map_scroll result=ok command={} method={} moved={} at_edge={}",
+                    command.as_str(),
+                    outcome.method.as_str(),
+                    outcome.moved,
+                    outcome.at_edge
+                )),
+                Err(error) => {
+                    crate::ble::gatt_note(format!(
+                        "map_scroll result=err command={} reason={error}",
+                        command.as_str()
+                    ));
+                    lock_state(state).last_error = Some(format!("翻页失败：{error}"));
+                }
             }
         }
         ButtonAction::MouseClick { kind } => {
@@ -3605,9 +3694,13 @@ mod tests {
             "启动应只按一次 Alt 并发送第一次 Tab：{:?}",
             commands()
         );
-        assert_ne!(
-            crate::key_gate::app_switcher_mask(),
-            0,
+        // 命令入队与门控遮蔽分属两个线程，满载时可能先后到达；等待遮蔽
+        // 落位，而不是在命令列表刚变化时立刻读原子量（CI/本机满载 flake）。
+        assert!(
+            wait_until(
+                || crate::key_gate::app_switcher_mask() != 0,
+                Duration::from_millis(500)
+            ),
             "会话期间控制键必须由门控直接遮蔽"
         );
 
@@ -4119,6 +4212,8 @@ mod tests {
 
     #[test]
     fn gate_edge_and_hid_report_merge_into_one_press() {
+        // 运行时退出会清进程级 app_switcher 遮蔽；与其他运行时测试串行，避免互相清掩码。
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -4181,6 +4276,7 @@ mod tests {
 
     #[test]
     fn listener_stop_releases_held_buttons_without_firing() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -4240,6 +4336,7 @@ mod tests {
 
     #[test]
     fn usage_counters_record_deduped_presses() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let usage = Arc::new(UsageCounters::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -4287,6 +4384,7 @@ mod tests {
 
     #[test]
     fn set_mappings_preserves_back_and_volume_buttons_and_sets_persistent_mask() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         // 返回/音量±现在属于可配置按键；左键映射也必须保留并进入普通逐键武装机制。
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
@@ -4782,6 +4880,7 @@ mod tests {
     /// 未认领时照常触发（对照）。
     #[test]
     fn phrase_claim_precedes_gesture_recognition() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4837,6 +4936,7 @@ mod tests {
     /// 从未开始的按压做判定，污染下一轮为「幽灵双击」。
     #[test]
     fn phrase_claimed_press_release_is_consumed_without_ghost_gestures() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4895,6 +4995,7 @@ mod tests {
     /// 长按计时在 550ms 后引爆「幽灵长按」。
     #[test]
     fn panel_claimed_release_without_a_recorded_press_clears_stale_state() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4942,6 +5043,7 @@ mod tests {
     /// 关闭面板并清认领状态（评审 B2 的公开侧调用点，2026-10-15）。
     #[test]
     fn device_removed_and_listener_stopped_reset_the_phrase_host() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4988,6 +5090,7 @@ mod tests {
     /// 补发一次幽灵单击）。
     #[test]
     fn phrase_claimed_press_survives_a_source_loss_without_ghost_gestures() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector

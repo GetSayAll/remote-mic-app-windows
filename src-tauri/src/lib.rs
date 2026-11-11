@@ -99,6 +99,7 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// `width` / `height` / `minWidth` / `minHeight` 保持一致。
 const MAIN_WINDOW_MIN_WIDTH: f64 = 1066.67;
 const MAIN_WINDOW_MIN_HEIGHT: f64 = 800.0;
+const MAIN_WINDOW_DEFAULT_HEIGHT: f64 = 800.0;
 
 /// 内容区最小尺寸换算到物理像素。`WM_GETMINMAXINFO` / `WM_WINDOWPOSCHANGING`
 /// 使用窗口外框尺寸，调用方再补上非客户区边框。
@@ -3582,6 +3583,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut common_phrases_count = 0_usize;
     let mut app_switcher_count = 0_usize;
     let mut scroll_count = 0_usize;
+    let mut page_scroll_count = 0_usize;
     let mut mouse_count = 0_usize;
     let mut macro_count = 0_usize;
     let mut disabled_count = 0_usize;
@@ -3599,6 +3601,10 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
                 ButtonAction::OpenCommonPhrases => common_phrases_count += 1,
                 ButtonAction::AppSwitcher => app_switcher_count += 1,
                 ButtonAction::Scroll { .. } => scroll_count += 1,
+                ButtonAction::PageUp
+                | ButtonAction::PageDown
+                | ButtonAction::ScrollToTop
+                | ButtonAction::ScrollToBottom => page_scroll_count += 1,
                 ButtonAction::MouseClick { .. } | ButtonAction::MouseMove { .. } => {
                     mouse_count += 1
                 }
@@ -3608,7 +3614,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} app_switcher_count={app_switcher_count} scroll_count={scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count}",
+        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} app_switcher_count={app_switcher_count} scroll_count={scroll_count} page_scroll_count={page_scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count}",
         mappings.enabled,
         mappings.actions.len()
     )
@@ -3697,6 +3703,13 @@ async fn test_button_mapping(
                 "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
                     .to_owned(),
             ),
+            ButtonAction::PageUp
+            | ButtonAction::PageDown
+            | ButtonAction::ScrollToTop
+            | ButtonAction::ScrollToBottom => Err(
+                "翻页测试请在 APP 适配页点击“测试向上翻页/测试向下翻页”；试一下无法确定目标 APP"
+                    .to_owned(),
+            ),
         }
     })
     .await
@@ -3708,6 +3721,30 @@ fn list_preset_apps(
     state: tauri::State<'_, AppState>,
 ) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
     state.platform.preset_apps()
+}
+
+/// 从可执行文件或快捷方式提取真实应用图标（PNG data URL）。失败返回 None，由前端显示通用图标。
+#[tauri::command]
+fn get_application_icon(path: String) -> Option<String> {
+    let shell = path.to_ascii_lowercase().starts_with("shell:appsfolder");
+    let png = if shell {
+        sayall_windows::transcript_capture_windows::icon_png_for_shell_item(&path).or_else(|| {
+            sayall_windows::registered_apps::resolve_registered_executable_path(&path).and_then(
+                |executable| {
+                    sayall_windows::transcript_capture_windows::icon_png_for_executable(&executable)
+                },
+            )
+        })
+    } else {
+        // 程序选择可以是 `.lnk`：`PrivateExtractIconsW` 对快捷方式常拿不到图标，
+        // 再向 Shell 要一次（与开始菜单/资源管理器同源），失败才回退首字母。
+        sayall_windows::transcript_capture_windows::icon_png_for_executable(&path)
+            .or_else(|| sayall_windows::transcript_capture_windows::icon_png_for_shell_item(&path))
+    }?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png)
+    ))
 }
 
 /// 「学习输入框」第一步：先打开/激活目标应用，不改变它的输入焦点。
@@ -3769,6 +3806,37 @@ async fn test_app_focus(target: String, state: tauri::State<'_, AppState>) -> Re
         .await
         .map_err(|error| format!("测试打开与聚焦任务失败：{error}"))?
         .map_err(|error| error.to_string())
+}
+
+/// 「学习滚动区域」：阻塞至多 3 秒等待用户点击目标窗口的可滚动内容区。
+#[tauri::command]
+async fn learn_scroll_region(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::scroll_region::ScrollRegionTarget, String> {
+    let platform = Arc::clone(&state.platform);
+    let result = tauri::async_runtime::spawn_blocking(move || platform.learn_scroll_region())
+        .await
+        .map_err(|error| format!("学习滚动区域任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
+}
+
+/// 「测试滚动」：打开/激活目标应用后执行一次翻页并读回结果。
+#[tauri::command]
+async fn test_scroll_region(
+    app: tauri::AppHandle,
+    target: String,
+    command: sayall_windows::scroll_region::ScrollCommand,
+    state: tauri::State<'_, AppState>,
+) -> Result<sayall_windows::scroll_region::ScrollOutcome, String> {
+    let platform = Arc::clone(&state.platform);
+    let result =
+        tauri::async_runtime::spawn_blocking(move || platform.test_scroll_region(target, command))
+            .await
+            .map_err(|error| format!("测试滚动任务失败：{error}"))?;
+    refocus_main_window_soon(app);
+    result.map_err(|error| error.to_string())
 }
 
 /// 原生文件选择器：选择自定义应用（.exe/.lnk）。用户取消返回 null。
@@ -5776,6 +5844,20 @@ pub fn run() {
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=started result=passed".to_owned(),
             );
+            // tauri.conf 的窗口尺寸在部分高 DPI 会话里按创建时 DPI 解释，可能落到
+            // 540×404 逻辑像素。这里显式按逻辑像素设一次默认尺寸与最小尺寸，
+            // 保证 1066×800 的设计窗口在各缩放比例下一致。
+            if let Some(window) = main_window(app.handle()) {
+                let _ = window.set_min_size(Some(tauri::LogicalSize::new(
+                    MAIN_WINDOW_MIN_WIDTH,
+                    MAIN_WINDOW_MIN_HEIGHT,
+                )));
+                let _ = window.set_size(tauri::LogicalSize::new(
+                    MAIN_WINDOW_MIN_WIDTH,
+                    MAIN_WINDOW_DEFAULT_HEIGHT,
+                ));
+                let _ = window.center();
+            }
             // 常用语浮层窗口（可选私有组件）：窗口先建好并隐藏；组件未注入时能力不可用。
             let common_phrases_available = common_phrase_panel::install(app.handle());
             sayall_windows::gatt_note(format!(
@@ -6644,8 +6726,11 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        learn_scroll_region,
+        test_scroll_region,
         activate_app_for_learning,
         list_preset_apps,
+        get_application_icon,
         pick_custom_app,
         scan_registered_apps,
         get_button_mapping_snapshot,
@@ -6794,8 +6879,11 @@ pub fn run() {
         common_phrase_panel::select_common_phrase,
         common_phrase_panel::common_phrase_dispatch,
         test_app_focus,
+        learn_scroll_region,
+        test_scroll_region,
         activate_app_for_learning,
         list_preset_apps,
+        get_application_icon,
         pick_custom_app,
         scan_registered_apps,
         get_button_mapping_snapshot,
@@ -6878,6 +6966,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 手动回归（2026-11-10 用户现场）：程序选择返回的 `.lnk` 也必须能拿到 Shell 图标。
+    /// 运行：
+    ///   $env:SAYALL_TEST_SHORTCUT_PATH='C:\...\shortcut.lnk'
+    ///   cargo test -p sayall-windows-app application_icon_from_shortcut -- --ignored
+    #[test]
+    #[ignore]
+    fn application_icon_from_shortcut_returns_data_url() {
+        let path = std::env::var("SAYALL_TEST_SHORTCUT_PATH")
+            .expect("set SAYALL_TEST_SHORTCUT_PATH to a real .lnk");
+        let icon = get_application_icon(path).expect("shortcut icon should be extracted");
+        assert!(icon.starts_with("data:image/png;base64,"));
+        assert!(icon.len() > 1000);
+    }
 
     /// 安装器钩子源码。契约测试要在**构建期**读它：这些断言存在的理由就是
     /// "有人改了一侧、忘了另一侧"（2026-09-16 的僵死 Bug 正是文档写了规则、

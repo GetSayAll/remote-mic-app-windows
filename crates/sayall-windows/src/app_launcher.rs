@@ -17,6 +17,8 @@ pub struct PresetAppInfo {
     pub id: String,
     pub name: String,
     pub installed: bool,
+    /// 探测到的真实可执行文件路径；Store 应用或未安装时为 None。
+    pub path: Option<String>,
 }
 
 /// 预设应用定义。
@@ -141,7 +143,7 @@ pub const PRESET_APPS: &[PresetApp] = &[
         name: "网易云音乐",
         exe_names: &["cloudmusic.exe"],
         install_paths: &[],
-        shortcut_names: &[],
+        shortcut_names: &["网易云音乐", "CloudMusic"],
         relaunch_when_hidden: true,
     },
     // 2026-10-02 扩充：这些应用常装在自定义目录（如 D:\Apps\vokie），
@@ -250,6 +252,36 @@ pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
 ///
 /// 打开应用后真实前台窗口可能要几百毫秒才就绪；键位方案需要先用这个
 /// 名字预备目标应用的覆盖层，避免下一次按键仍打到旧方案。
+/// 前台可执行文件是否属于该 APP 适配 target（预设 id / 自定义路径 / 注册应用）。
+///
+/// 只比较路径或文件名，不读取窗口标题；用于把「当前前台 APP」映射到它的
+/// 滚动区域档案。`.lnk` 按记录时的解析规则处理。
+#[cfg(windows)]
+pub(crate) fn target_matches_executable(target: &str, executable: &str) -> bool {
+    let executable = executable.trim();
+    if executable.is_empty() {
+        return false;
+    }
+    if let Some(app) = preset_app(target) {
+        let foreground_name = std::path::Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(executable);
+        return app
+            .exe_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(foreground_name));
+    }
+    let resolved = if crate::registered_apps::is_registered_target(target) {
+        crate::registered_apps::resolve_registered_executable_path(target)
+    } else if target.to_ascii_lowercase().ends_with(".lnk") {
+        resolve_lnk(target).map(|shortcut| shortcut.exe_path)
+    } else {
+        Some(target.to_owned())
+    };
+    resolved.is_some_and(|path| path.eq_ignore_ascii_case(executable))
+}
+
 pub fn target_executable_name(target: &str) -> Option<String> {
     if let Some(app) = preset_app(target) {
         return app.exe_names.first().map(|name| (*name).to_owned());
@@ -392,6 +424,86 @@ fn resolve_preset_launch_target(app: &PresetApp) -> Option<PresetLaunchTarget> {
     preset_launch_target(app, &start_menu_shortcuts())
 }
 
+/// 读取 App Paths 注册表项里的默认值（真实 exe 路径）。
+#[cfg(windows)]
+fn app_paths_executable(exe: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_READ, REG_SZ,
+    };
+
+    const APP_PATHS: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
+    const APP_PATHS_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths";
+    for root in [
+        windows::Win32::System::Registry::HKEY_CURRENT_USER,
+        windows::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+    ] {
+        for base in [APP_PATHS, APP_PATHS_WOW] {
+            let subkey: String = format!(r"{base}\{exe}");
+            let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+            let mut key = HKEY::default();
+            if unsafe { RegOpenKeyExW(root, PCWSTR(wide.as_ptr()), None, KEY_READ, &mut key) }.0
+                != 0
+            {
+                continue;
+            }
+            let mut buffer = [0u16; 1024];
+            let mut size = std::mem::size_of_val(&buffer) as u32;
+            let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
+            let result = unsafe {
+                RegQueryValueExW(
+                    key,
+                    PCWSTR::null(),
+                    None,
+                    Some(&mut kind),
+                    Some(buffer.as_mut_ptr().cast()),
+                    Some(&mut size),
+                )
+            };
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+            if result.0 == 0 && kind == REG_SZ && size >= 2 {
+                let value =
+                    String::from_utf16_lossy(&buffer[..(size as usize / 2).saturating_sub(1)])
+                        .trim()
+                        .trim_matches('"')
+                        .to_owned();
+                if std::path::Path::new(&value).is_file() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 解析预设应用的真实可执行文件路径，供 APP 适配页显示与图标提取。
+#[cfg(windows)]
+fn resolved_preset_executable_path(
+    app: &PresetApp,
+    shortcuts: &[(String, std::path::PathBuf)],
+) -> Option<String> {
+    if app.id == "sayall" {
+        return std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+    }
+    for exe in app.exe_names {
+        let system = system32_path(exe);
+        if system.is_file() {
+            return Some(system.to_string_lossy().into_owned());
+        }
+        if let Some(path) = app_paths_executable(exe) {
+            return Some(path);
+        }
+    }
+    if let Some(target) = preset_launch_target(app, shortcuts) {
+        return Some(target.exe_path);
+    }
+    preset_aumid(app.id).and_then(crate::registered_apps::resolve_registered_executable_path)
+}
+
 /// 探测预设应用安装状态（System32 直存 / App Paths 注册表 / `install_paths`
 /// 候选路径 / 开始菜单快捷方式，任一命中）。
 /// 无线麦自身恒为已安装（映射运行时它必然在运行）。
@@ -403,14 +515,17 @@ pub fn probe_preset_apps() -> Vec<PresetAppInfo> {
     let apps: Vec<PresetAppInfo> = DEFAULT_PRESET_IDS
         .iter()
         .filter_map(|id| preset_app(id))
-        .map(|app| PresetAppInfo {
-            id: app.id.to_owned(),
-            name: app.name.to_owned(),
-            installed: app.id == "sayall"
-                || app.exe_names.iter().any(|exe| exe_resolvable(exe))
-                || preset_launch_target(app, &shortcuts).is_some()
-                || preset_aumid(app.id)
-                    .is_some_and(crate::registered_apps::registered_target_is_installed),
+        .map(|app| {
+            let path = resolved_preset_executable_path(app, &shortcuts);
+            PresetAppInfo {
+                id: app.id.to_owned(),
+                name: app.name.to_owned(),
+                installed: app.id == "sayall"
+                    || path.is_some()
+                    || preset_aumid(app.id)
+                        .is_some_and(crate::registered_apps::registered_target_is_installed),
+                path,
+            }
         })
         .collect();
     crate::ble::gatt_note(format!(
@@ -1093,7 +1208,7 @@ pub fn activate_or_launch(_id: &str) -> Result<(), String> {
     Err("打开应用仅在 Windows 上可用".to_owned())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn exe_resolvable(exe: &str) -> bool {
     if system32_path(exe).exists() {
         return true;
@@ -1109,7 +1224,7 @@ fn system32_path(exe: &str) -> std::path::PathBuf {
     root.join("System32").join(exe)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn app_paths_key_exists(exe: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
@@ -3620,6 +3735,24 @@ pub(crate) mod tests {
             assert!(!app.name.is_empty());
             assert!(!app.exe_names.is_empty());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_matches_foreground_executable_by_preset_name_or_path() {
+        assert!(target_matches_executable(
+            "notepad",
+            "C:\\Windows\\System32\\notepad.exe"
+        ));
+        assert!(target_matches_executable(
+            "C:\\Apps\\Cursor.exe",
+            "c:\\apps\\cursor.exe"
+        ));
+        assert!(!target_matches_executable(
+            "C:\\Apps\\Cursor.exe",
+            "C:\\Apps\\Other.exe"
+        ));
+        assert!(!target_matches_executable("notepad", ""));
     }
 
     #[test]

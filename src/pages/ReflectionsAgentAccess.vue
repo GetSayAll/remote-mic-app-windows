@@ -582,10 +582,10 @@ function formatCreatedAt(millis: number): string {
   cursor: pointer;
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--error-text);
+  color: var(--delete-text);
 }
 .agent-revoke:hover {
-  color: #b3261e;
+  color: var(--delete-text-hover);
   text-decoration: underline;
 }
 .agent-access-error {

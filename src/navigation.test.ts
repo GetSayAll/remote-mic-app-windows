@@ -18,6 +18,7 @@ describe("Windows navigation", () => {
     const items = navigationItems.filter((item) => publicIds.has(item.id));
     expect(items.map((item) => item.id)).toEqual([
       "buttons",
+      "apps",
       "macros",
       "recommendations",
       "connection",
@@ -25,17 +26,20 @@ describe("Windows navigation", () => {
       "settings",
       "profile",
     ]);
-    expect(items[2].label).toBe("推荐");
-    expect(items[2].icon).toBe("sparkles");
-    expect(items[3].label).toBe("连接");
+    // 2026-11-09：APP 适配紧跟在按键之后（对齐 Mac SettingsSection.applications）。
+    expect(items[1].label).toBe("APP 适配");
+    expect(items[1].icon).toBe("apps");
+    expect(items[3].label).toBe("推荐");
+    expect(items[3].icon).toBe("sparkles");
+    expect(items[4].label).toBe("连接");
     // 2026-10-25 用户指定：回眸紧挨设置上方。
-    expect(items[4].label).toBe("回眸");
-    expect(items[4].icon).toBe("textbubble");
+    expect(items[5].label).toBe("回眸");
+    expect(items[5].icon).toBe("textbubble");
     // 2026-10-02 用户指定：原「关于」页改名「设置」，图标换成 Mac 同款齿轮。
-    expect(items[5].label).toBe("设置");
-    expect(items[5].icon).toBe("gear");
-    expect(items[6].label).toBe("个人中心");
-    expect(items[6].icon).toBe("person");
+    expect(items[6].label).toBe("设置");
+    expect(items[6].icon).toBe("gear");
+    expect(items[7].label).toBe("个人中心");
+    expect(items[7].icon).toBe("person");
     expect(items.every((item) => item.label.length > 0)).toBe(true);
   });
 

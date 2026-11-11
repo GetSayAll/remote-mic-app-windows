@@ -602,6 +602,14 @@ pub enum ButtonAction {
     /// 触发后保持 Alt 并打开系统切换器；方向键 / OK / 返回由
     /// [`crate::app_switcher::AppSwitcherSession`] 在按下沿即时认领。
     AppSwitcher,
+    /// 向上翻一页：优先滚当前 APP 学习过的滚动区域，没有档案时用 UIA 兜底。
+    PageUp,
+    /// 向下翻一页。
+    PageDown,
+    /// 滚到当前 APP 滚动区域的顶部（一次性跳转）。
+    ScrollToTop,
+    /// 滚到当前 APP 滚动区域的底部（一次性跳转）。
+    ScrollToBottom,
 }
 
 impl ButtonAction {
@@ -626,10 +634,13 @@ impl ButtonAction {
             | Self::MouseClick { .. }
             // 组合动作与常用语面板都不可连发。
             | Self::RunMacro { .. }
-            | Self::OpenCommonPhrases => false,
+            | Self::OpenCommonPhrases
+            | Self::ScrollToTop
+            | Self::ScrollToBottom => false,
             // 应用切换器会话内每次触发只前进一项；按住连发即连续 Tab，
             // 与系统 Alt+Tab 的按住循环语义一致（对齐 Mac `appSwitcher`）。
             Self::AppSwitcher => true,
+            Self::PageUp | Self::PageDown => true,
             Self::Scroll { .. } | Self::MouseMove { .. } => true,
             Self::Shortcut { chord } => {
                 matches!(chord.keys.as_slice(), [key] if !key.is_modifier())
@@ -872,7 +883,9 @@ impl From<ButtonActionsWire> for ButtonActions {
 ///     输入框、点击位置和显式快捷键保留。
 /// 4 = 新增「切换应用」（`app_switcher`，Alt+Tab 会话）。旧版本读到该动作类型会
 ///     整体拒载，靠版本护栏备份原文件，不静默丢配置（同 2 的约定）。
-pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 4;
+/// 5 = 新增 APP 级滚动区域档案（`scrollRegions`）与翻页/到两端动作。旧版本读到
+///     新动作类型会整体拒载，靠版本护栏备份原文件。
+pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -891,6 +904,11 @@ pub struct ButtonMappings {
     /// 去重/删库都不应该影响已记录的档案。
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub focus_profiles: BTreeMap<String, crate::focus::AppFocusProfile>,
+    /// 滚动区域档案：键与 `focus_profiles` 相同（预设 id 或应用路径）。
+    ///
+    /// 只保存 UIA 结构特征，不保存控件名称、窗口标题或内容文本。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub scroll_regions: BTreeMap<String, crate::scroll_region::ScrollRegionTarget>,
 }
 
 fn default_enabled() -> bool {
@@ -1008,6 +1026,7 @@ impl Default for ButtonMappings {
             actions: BTreeMap::new(),
             applications: Vec::new(),
             focus_profiles: BTreeMap::new(),
+            scroll_regions: BTreeMap::new(),
         }
     }
 }
@@ -1029,6 +1048,8 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             applications: Vec<crate::app_launcher::CustomAppPick>,
             #[serde(default)]
             focus_profiles: BTreeMap<String, crate::focus::AppFocusProfile>,
+            #[serde(default)]
+            scroll_regions: BTreeMap<String, crate::scroll_region::ScrollRegionTarget>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let actions = wire
@@ -1043,6 +1064,7 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             actions,
             applications: wire.applications,
             focus_profiles: wire.focus_profiles,
+            scroll_regions: wire.scroll_regions,
         })
     }
 }
@@ -1141,6 +1163,16 @@ impl ButtonMappings {
         }
         #[cfg(not(windows))]
         let _ = dropped;
+        let dropped_scroll =
+            crate::scroll_region::normalize_scroll_regions(&mut this.scroll_regions);
+        #[cfg(windows)]
+        if dropped_scroll > 0 {
+            crate::ble::gatt_note(format!(
+                "scroll_regions_dropped count={dropped_scroll} reason=invalid_or_over_limit"
+            ));
+        }
+        #[cfg(not(windows))]
+        let _ = dropped_scroll;
         for actions in this.actions.values_mut() {
             for action in [
                 &mut actions.single,
@@ -1512,6 +1544,10 @@ mod tests {
                 direction: ScrollDirection::Down,
                 steps: 5,
             },
+            ButtonAction::PageUp,
+            ButtonAction::PageDown,
+            ButtonAction::ScrollToTop,
+            ButtonAction::ScrollToBottom,
         ] {
             let json = serde_json::to_string(&action).unwrap();
             assert_eq!(serde_json::from_str::<ButtonAction>(&json).unwrap(), action);
@@ -2227,6 +2263,7 @@ mod tests {
             actions: mappings.actions.clone(),
             applications: Vec::new(),
             focus_profiles: BTreeMap::new(),
+            scroll_regions: BTreeMap::new(),
         };
         assert_eq!(disabled.mapped_mask(), 0, "总开关关闭时不吞任何键");
     }
@@ -2443,12 +2480,16 @@ mod tests {
         .allows_repeat());
         assert!(!ButtonAction::FocusInput.allows_repeat());
         assert!(!ButtonAction::Disabled.allows_repeat());
+        assert!(ButtonAction::PageUp.allows_repeat());
+        assert!(ButtonAction::PageDown.allows_repeat());
+        assert!(!ButtonAction::ScrollToTop.allows_repeat());
+        assert!(!ButtonAction::ScrollToBottom.allows_repeat());
         // 应用切换器会话内每次触发只前进一项；按住连发等价于连续 Tab。
         assert!(ButtonAction::AppSwitcher.allows_repeat());
     }
 
     #[test]
-    fn app_switcher_action_round_trips_with_schema_four() {
+    fn app_switcher_action_round_trips_with_current_schema() {
         let mut mappings = ButtonMappings::default();
         mappings.actions.insert(
             RemoteButton::Tv,
@@ -2472,7 +2513,40 @@ mod tests {
             normalized.action_for(RemoteButton::Tv, ButtonTrigger::Single),
             ButtonAction::AppSwitcher
         );
-        assert_eq!(BUTTON_MAPPINGS_SCHEMA_VERSION, 4);
+        assert_eq!(BUTTON_MAPPINGS_SCHEMA_VERSION, 5);
+    }
+
+    #[test]
+    fn scroll_regions_round_trip_and_invalid_entries_are_dropped() {
+        let mut mappings = ButtonMappings::default();
+        mappings.scroll_regions.insert(
+            "notepad".to_owned(),
+            crate::scroll_region::ScrollRegionTarget {
+                control_type: "Pane".to_owned(),
+                automation_id: "ScrollViewer".to_owned(),
+                class_name: "ScrollViewer".to_owned(),
+                normalized_rect: None,
+            },
+        );
+        mappings.scroll_regions.insert(
+            "chrome".to_owned(),
+            crate::scroll_region::ScrollRegionTarget {
+                control_type: String::new(),
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_string(&mappings).unwrap();
+        assert!(json.contains("\"scrollRegions\""), "{json}");
+        let decoded: ButtonMappings = serde_json::from_str(&json).unwrap();
+        // 反序列化只保形；normalized() 才丢弃无效档案（与 focusProfiles 同口径）。
+        assert_eq!(decoded.scroll_regions.len(), 2);
+        assert_eq!(
+            decoded.scroll_regions.get("notepad").unwrap().automation_id,
+            "ScrollViewer"
+        );
+        let normalized = decoded.normalized().unwrap();
+        assert_eq!(normalized.schema_version, 5);
+        assert_eq!(normalized.scroll_regions.len(), 1);
     }
 
     #[test]

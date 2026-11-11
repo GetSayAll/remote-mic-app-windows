@@ -281,7 +281,11 @@ export type ButtonAction =
   | { type: "focus_input" }
   | { type: "run_macro"; macroId: string; macroVersion: string }
   | { type: "open_common_phrases" }
-  | { type: "app_switcher" };
+  | { type: "app_switcher" }
+  | { type: "page_up" }
+  | { type: "page_down" }
+  | { type: "scroll_to_top" }
+  | { type: "scroll_to_bottom" };
 
 // ===== 组合动作（Rust `sayall_core::macros` 的 camelCase 镜像）=====
 
@@ -388,6 +392,8 @@ export interface PresetAppInfo {
   id: string;
   name: string;
   installed: boolean;
+  /** 探测到的真实可执行文件路径；Store 应用或未安装时为 null/缺省。 */
+  path?: string | null;
 }
 
 /** 打开应用后的聚焦方式（对齐 Rust `FocusStrategy`）。 */
@@ -464,6 +470,32 @@ export interface ButtonMappings {
   applications?: CustomAppPick[];
   /** 聚焦档案：键 = `open_app` 的 target（预设 id 或自定义应用路径）。 */
   focusProfiles?: Record<string, AppFocusProfile>;
+  /** 滚动区域档案：键与 `focusProfiles` 相同；只含 UIA 结构特征。 */
+  scrollRegions?: Record<string, ScrollRegionTarget>;
+}
+
+/** APP 级滚动区域记录（Rust `ScrollRegionTarget` 的 camelCase 镜像）。 */
+export interface ScrollRegionTarget {
+  controlType: string;
+  automationId?: string;
+  className?: string;
+  normalizedRect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+}
+
+export type ScrollCommand = "page_up" | "page_down" | "to_top" | "to_bottom";
+
+/** 一次翻页测试的可观察结果。 */
+export interface ScrollOutcome {
+  method: "scroll_pattern" | "wheel";
+  beforePercent?: number;
+  afterPercent?: number;
+  moved: boolean;
+  atEdge: boolean;
 }
 
 export interface FiredGesture {
@@ -1622,6 +1654,12 @@ export async function testButtonMapping(
   return invoke<SendInputSnapshot>("test_button_mapping", { button, trigger, remoteModel });
 }
 
+/** 读取可执行文件的真实图标（PNG data URL）；浏览器预览返回 null。 */
+export async function getApplicationIcon(path: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>("get_application_icon", { path });
+}
+
 export async function listPresetApps(): Promise<PresetAppInfo[]> {
   if (!isTauriRuntime()) {
     // 浏览器预览：展示完整预设表（仅渲染验证）。
@@ -1684,6 +1722,30 @@ export async function testAppFocus(target: string): Promise<void> {
     throw new Error("当前是浏览器预览，无法测试打开与聚焦");
   }
   return invoke<void>("test_app_focus", { target });
+}
+
+/**
+ * 「学习滚动区域」：激活目标应用后，最多 3 秒内捕获用户点击的滚动容器。
+ *
+ * 调用方应先通过 [`activateAppForLearning`] 打开目标应用；后端只保存 UIA
+ * 结构特征与归一化区域，不读取内容、不移动焦点或鼠标。
+ */
+export async function learnScrollRegion(): Promise<ScrollRegionTarget> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法学习滚动区域");
+  }
+  return invoke<ScrollRegionTarget>("learn_scroll_region");
+}
+
+/** 「测试滚动」：打开目标应用后按命令执行一次翻页并读回可观察结果。 */
+export async function testScrollRegion(
+  target: string,
+  command: ScrollCommand,
+): Promise<ScrollOutcome> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法测试滚动");
+  }
+  return invoke<ScrollOutcome>("test_scroll_region", { target, command });
 }
 
 export async function getButtonMappingSnapshot(): Promise<ButtonMappingSnapshot> {
@@ -2443,6 +2505,10 @@ export function actionSummary(action: ButtonAction | undefined): string {
     const steps = action.steps ?? 1;
     return steps === 1 ? label : t("{label} {steps} 格", { label, steps });
   }
+  if (action.type === "page_up") return t("向上翻页");
+  if (action.type === "page_down") return t("向下翻页");
+  if (action.type === "scroll_to_top") return t("滚到顶部");
+  if (action.type === "scroll_to_bottom") return t("滚到底部");
   if (action.type === "mouse_click") return mouseClickLabels[action.kind];
   if (action.type === "mouse_move") return `${mouseMoveLabels[action.direction]} ${action.distance} px`;
   if (action.type === "open_app") {

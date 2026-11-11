@@ -1152,10 +1152,10 @@ onUnmounted(() => {
   color: var(--accent-dark);
 }
 .danger-link {
-  color: var(--danger-text, var(--error-text));
+  color: var(--delete-text);
 }
 .danger-link:hover {
-  color: var(--danger-hover, var(--error-text));
+  color: var(--delete-text-hover);
 }
 .chevron {
   width: 14px;
@@ -1493,8 +1493,11 @@ onUnmounted(() => {
   color: var(--text-primary);
   background: var(--surface-subtle);
 }
+.icon-button.danger {
+  color: var(--delete-text);
+}
 .icon-button.danger:hover {
-  color: var(--danger-text, var(--error-text));
+  color: var(--delete-text-hover);
   background: var(--error-surface);
 }
 .icon-button svg {
@@ -1579,15 +1582,17 @@ onUnmounted(() => {
 .danger-button {
   min-height: 30px;
   padding: 5px 12px;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 8px;
-  color: #fff;
-  background: var(--danger, #b3261e);
+  color: var(--delete-text);
+  background: var(--delete-surface);
   cursor: pointer;
   font-size: 13.5px;
+  font-weight: 600;
 }
 .danger-button:hover {
-  background: var(--danger-hover, #8c1d18);
+  color: var(--delete-text-hover);
+  background: color-mix(in srgb, var(--delete-text) 16%, transparent);
 }
 @media (max-width: 1000px) {
   .app-switcher-grid {
