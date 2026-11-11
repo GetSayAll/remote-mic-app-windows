@@ -516,8 +516,45 @@ fn icon_to_png(icon: HICON) -> Option<Vec<u8>> {
     if unsafe { GetIconInfo(icon, &mut info) }.is_err() {
         return None;
     }
-    let color = info.hbmColor;
-    let mask = info.hbmMask;
+    bitmap_to_png(info.hbmColor, Some(info.hbmMask))
+}
+
+/// 从 Shell 应用项（例如 `shell:AppsFolder\...`）提取图标。
+///
+/// Store 应用的快捷方式目标不一定能解析成 exe，此时直接向 Shell 要 64×64 图标。
+pub fn icon_png_for_shell_item(target: &str) -> Option<Vec<u8>> {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY,
+    };
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> windows::core::Result<Vec<u8>> {
+        let wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+        let factory: IShellItemImageFactory =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }?;
+        let bitmap = unsafe {
+            factory.GetImage(
+                SIZE {
+                    cx: APPLICATION_ICON_PIXELS,
+                    cy: APPLICATION_ICON_PIXELS,
+                },
+                SIIGBF_ICONONLY,
+            )
+        }?;
+        bitmap_to_png(bitmap, None)
+            .ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))
+    })();
+    if initialized {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+    result.ok()
+}
+
+fn bitmap_to_png(color: HBITMAP, mask: Option<HBITMAP>) -> Option<Vec<u8>> {
     let encoded = (|| {
         let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
         let copied = unsafe {
@@ -573,7 +610,7 @@ fn icon_to_png(icon: HICON) -> Option<Vec<u8>> {
         let mask_alpha = if any_alpha {
             None
         } else {
-            mask_alpha_bits(dc, mask, width, height)
+            mask.and_then(|mask| mask_alpha_bits(dc, mask, width, height))
         };
         unsafe {
             let _ = DeleteDC(dc);
@@ -610,8 +647,10 @@ fn icon_to_png(icon: HICON) -> Option<Vec<u8>> {
         if !color.is_invalid() {
             let _ = DeleteObject(color.into());
         }
-        if !mask.is_invalid() {
-            let _ = DeleteObject(mask.into());
+        if let Some(mask) = mask {
+            if !mask.is_invalid() {
+                let _ = DeleteObject(mask.into());
+            }
         }
     }
     encoded
