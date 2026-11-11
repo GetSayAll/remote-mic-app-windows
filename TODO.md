@@ -15,6 +15,15 @@
   - [~] CAST-12 · P0 普通键报文捕获 · **已由 2026-11-10 HCI 抓包结案（结论推翻 Helper 前提）**：该遥控器对 Windows 主机**从不发送 HID 输入报告**（Raw Input/共享直读全零是必然），普通按键走 Google 键事件服务 `{D343BFC0-…}` 的 `D343BFC5` 特征通知（8 字节：首字节键码、0=释放；键码与 legacy report-1 位索引同表）。已实现订阅+解码+接入映射引擎（commit fe84680）。**遗留**：写 CCCD 后该固件停发键通知（写前无人订阅时反而持续发送）——需重配对复测 + 空中轨迹定位"写 CCCD 停发"的固件行为，候选方案为免写 CCCD 的只听订阅。原"Google 专用 Helper"路线作废：无 HID 报文可捕获。证据见 [Testing/WindowsChromecast.md](Testing/WindowsChromecast.md)。
   - [ ] CAST-13 · P0 Google 报告层 Helper · 复用 RC003 增强捕获框架为 Chromecast 接入按键（ADR 0004）。开源先例 vibe-mote 已验证同款遥控器、同款注入路径（`NtDeviceIoControlFile` IOCTL 0x80018483 输出缓冲区，3 字节 `[0x02,u16 usage]` 报告 + 映射键 usage 原地清零）。分层：① agent 新增 0x02 报告类（观察+清零）与逻辑测试；② helper edge 消息带 `device=cast` 维度并按设备隔离目标/租约；③ 主程序 `rc003_task.rs` 泛化 + `ChromecastInput` 新来源接 `chromecast_button_for_consumer_usage` + `capture_support()` 放开；④ ATTRIBUTION 登记 vibe-mote；⑤ 有 HID 流真机 13 键矩阵 + fail-open + 哨兵键验收。**覆盖边界**：测试机这类空中无 HID 流主机不在覆盖内（计数恒零须可诊断）。
 
+  - [x] CAST-13①-④ · Google 报告层 Helper 四层已并入（agent 报告类 / helper 中继 / 主程序接线 / ATTRIBUTION，ADR 0004；commits 37b84c0、27fa5ba）；⑤ 真机验收仍待有 HID 流的主机。
+
+### macOS 支持（ADR 0005：双平台单仓库，2026-11-11 起）
+
+- [x] MAC-01 · L0 纯逻辑层 · `RemoteButton`/键码表/`CastKeyEdgeTracker` 下沉 `sayall-core::cast_hid`（单一事实源，Windows 侧原路径重导出零改动）；新增 `crates/sayall-macos`（keymap：CGKeyCode 修饰键表 + 合成标记，移植自 vRemoter InputTrigger，MIT，见 ATTRIBUTION）。本机全绿：core 116 / macos 4 / windows 571 / app 216 / fmt 干净。
+- [ ] MAC-02 · L1 CoreBluetooth 后端 · Chromecast ATVV 语音会话 + 小米 RC001/RC003 传输（复用 `sayall-core` 协议）。**硬前置：一台 macOS 机器**（编译/链接/真机验收），CI 需 mac runner。
+- [ ] MAC-03 · L1 IOHIDManager 按键通道 · Chromecast HID report-1 → `CastKeyEdgeTracker` → 映射引擎（复用 core）。前置同 MAC-02。
+- [ ] MAC-04 · L2/L3 会话接线与应用壳 · CGEvent 合成（keymap 已就位）、CoreAudio 麦克风管道、Tauri 壳平台条件编译或独立菜单栏壳（届时另立 ADR）。
+
 ### 本地听写与转写
 
 - [x] ASR-01 · 本地 Whisper 文件转写预览 · 固定可验证的引擎和模型，将本地 WAV 转成可编辑草稿，提供取消和超时。真实引擎已跑合成中文，取消与错误恢复有单元或界面回归。识别质量和实时听写仍分别验收。

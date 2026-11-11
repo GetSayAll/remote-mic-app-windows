@@ -1,6 +1,7 @@
 pub mod adpcm;
 pub mod agent_access;
 pub mod atvv;
+pub mod cast_hid;
 pub mod frame;
 pub mod macros;
 pub mod mcp_config;

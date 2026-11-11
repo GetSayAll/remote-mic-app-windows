@@ -1,0 +1,12 @@
+[package]
+name = "sayall-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SayAll macOS 后端（ADR 0005 L0 层：跨平台纯逻辑；Apple FFI 层待 macOS 工具链）"
+
+[dependencies]
+sayall-core = { path = "../sayall-core" }
+
+[dev-dependencies]

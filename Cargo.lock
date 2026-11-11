@@ -3165,6 +3165,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sayall-macos"
+version = "0.0.0"
+dependencies = [
+ "sayall-core",
+]
+
+[[package]]
 name = "sayall-mcp"
 version = "0.0.0"
 dependencies = [
