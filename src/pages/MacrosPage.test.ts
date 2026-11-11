@@ -830,6 +830,44 @@ describe("组合动作页 · 编辑向导", () => {
     expect(body.find(".custom-app-group").text()).toContain("添加应用");
   });
 
+  it("聚焦步骤只要求选择目标 App，未配置聚焦方式也能继续", async () => {
+    const target = "C:\\Apps\\Plain.exe";
+    getButtonMappingsSpy.mockResolvedValue({
+      enabled: true,
+      actions: {},
+      applications: [{ name: "Plain", path: target }],
+      focusProfiles: {},
+    });
+    getCombinedActionsSpy.mockResolvedValue({
+      formatVersion: 1,
+      definitions: [
+        {
+          ...baseDefinition,
+          steps: [{ stepId: "step.01", action: "focus_input", parameters: { target } }],
+        },
+      ],
+    });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!
+      .trigger("click");
+    await flushPromises();
+
+    const body = wrapper.find(".step-card-body");
+    expect(body.find(".focus-profile-summary").text()).toContain("只打开 APP");
+    expect(wrapper.text()).not.toContain("还没设置完");
+    const next = findButton(wrapper, "下一步");
+    expect(next.attributes("disabled")).toBeUndefined();
+    await next.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("测试与保存");
+  });
+
   it("聚焦步骤显示自定义 App 已记录的输入框方式", async () => {
     const target = "C:\\Apps\\Custom.exe";
     getButtonMappingsSpy.mockResolvedValue({

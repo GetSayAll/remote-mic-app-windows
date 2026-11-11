@@ -58,7 +58,6 @@ import {
   type AppFocusProfile,
   type ButtonMappings,
   type CustomAppPick,
-  type FocusStrategy,
   type MacroAction,
   type MacroChord,
   type MacroDefinition,
@@ -922,19 +921,9 @@ function stepConfigurationIssue(step: MacroStep): string | null {
       return parameters.chord ? null : t("还没有选择或录入按键");
     case "system_action":
       return parameters.chord ? null : t("还没有选择系统动作");
-    case "focus_input": {
-      if (!parameters.target?.trim()) return t("还没有选择目标 App");
-      // 组合动作不再单独学习：复用按键页档案；手动添加的预设直接使用预设能力。
-      if (!effectiveFocusForTarget(parameters.target)) {
-        return t("这个 App 还没有聚焦方式，请选择一个");
-      }
-      if (selectedFocusStrategy(parameters.target) === "open_only") {
-        return t("这个 App 的聚焦方式是「只打开 APP」，请选择其他聚焦方式");
-      }
-      return focusReady(parameters.target)
-        ? null
-        : t("这个 App 的聚焦方式还没配置完成（缺少快捷键或输入框记录）");
-    }
+    case "focus_input":
+      // 选择目标 App 即视为这一步可用；没有聚焦档案时执行只打开/激活该 App。
+      return parameters.target?.trim() ? null : t("还没有选择目标 App");
     case "focus_frontmost":
       return null;
     case "open_url":
@@ -1051,28 +1040,6 @@ async function refreshFocusProfiles(): Promise<void> {
   } catch {
     // 读取失败：状态显示为"未知"，不阻断页面其余功能。
   }
-}
-
-/** 该目标是否有可执行的聚焦动作（只打开 / 缺快捷键或记录都不可执行）。 */
-function focusReady(target: string | undefined): boolean {
-  const profile = effectiveFocusForTarget(target);
-  if (!profile) return false;
-  switch (profile.strategy) {
-    case "auto_composer":
-      return true;
-    case "app_shortcut":
-      return (profile.shortcut?.keys?.length ?? 0) > 0;
-    case "recorded_element":
-      return Boolean(profile.recorded);
-    case "recorded_point":
-      return Boolean(profile.point);
-    default:
-      return false;
-  }
-}
-
-function selectedFocusStrategy(target: string | undefined): FocusStrategy {
-  return effectiveFocusForTarget(target)?.strategy ?? "open_only";
 }
 
 /** 「打开 APP」只列预设；当前旧目标若不在探测列表中也保留。 */

@@ -89,12 +89,6 @@ export default {
   "还没有选择或录入按键": "No key recorded",
   "还没有选择系统动作": "No system action selected",
   "还没有选择目标 App": "No target app selected",
-  "这个 App 还没有聚焦方式，请选择一个":
-    "This app has no focus method yet; choose one",
-  "这个 App 的聚焦方式是「只打开 APP」，请选择其他聚焦方式":
-    'This app\'s focus method is "Open app only"; choose another focus method',
-  "这个 App 的聚焦方式还没配置完成（缺少快捷键或输入框记录）":
-    "This app's focus method is not complete yet (missing a shortcut or learned input field)",
   "网址需要以 http:// 或 https:// 开头":
     "The URL must start with http:// or https://",
   "还没有选择要执行的组合动作": "No routine to run is selected",
