@@ -191,9 +191,25 @@ const ACTION_ORDER: MacroAction[] = [
   "run_macro",
 ];
 
+const STATUS_VISIBLE_MS = 8_000;
+let statusTimer: number | null = null;
+
+function clearStatusTimer(): void {
+  if (statusTimer !== null) {
+    window.clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+}
+
 function setStatus(message: string, kind: "info" | "success" | "error" = "info"): void {
+  clearStatusTimer();
   statusMessage.value = message;
   statusKind.value = kind;
+  if (!message) return;
+  statusTimer = window.setTimeout(() => {
+    statusMessage.value = "";
+    statusTimer = null;
+  }, STATUS_VISIBLE_MS);
 }
 
 async function reloadLibrary(): Promise<void> {
@@ -686,6 +702,7 @@ async function stopCapture(): Promise<void> {
 }
 
 onUnmounted(() => {
+  clearStatusTimer();
   // 页面切走时后端仍在录入态会全局吞键，必须在卸载时成对停止。
   void stopCapture();
 });
@@ -1251,13 +1268,24 @@ watch(
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
       <aside class="library-pane">
-        <input
-          v-model="search"
-          class="search-input"
-          type="search"
-          :placeholder="t('搜索组合动作')"
-          :aria-label="t('搜索组合动作')"
-        />
+        <div class="search-field">
+          <input
+            v-model="search"
+            class="search-input"
+            type="search"
+            :placeholder="t('搜索组合动作')"
+            :aria-label="t('搜索组合动作')"
+          />
+          <button
+            v-if="search"
+            class="search-clear"
+            type="button"
+            :aria-label="t('清除搜索')"
+            @click="search = ''"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
         <div class="macro-list" role="listbox" :aria-label="t('组合动作列表')">
           <button
             v-for="definition in filteredDefinitions"
@@ -1965,6 +1993,40 @@ watch(
   border-radius: 99px;
   padding: 3px 8px;
 }
+.search-field {
+  position: relative;
+}
+.search-field .search-input {
+  box-sizing: border-box;
+  min-height: 32px;
+  padding-right: 38px;
+}
+.search-input::-webkit-search-cancel-button {
+  display: none;
+  -webkit-appearance: none;
+}
+.search-clear {
+  position: absolute;
+  top: 50%;
+  right: 1px;
+  width: 32px;
+  height: 32px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+.search-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
 .search-input,
 .text-input {
   width: 100%;
@@ -1975,6 +2037,7 @@ watch(
   background: var(--card);
   color: var(--text-primary);
 }
+
 .macro-list {
   flex: 1;
   min-height: 0;

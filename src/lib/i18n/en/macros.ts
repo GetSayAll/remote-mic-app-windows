@@ -6,6 +6,7 @@ export default {
     "After saving, open the Buttons page and select this routine for a button action.",
   "我的组合动作": "My Routines",
   "搜索组合动作": "Search routines",
+  "清除搜索": "Clear search",
   "组合动作列表": "Routine list",
   "{count} 个步骤": "{count} steps",
   "还没有组合动作。创建一个，把多个操作合并成一次执行。":

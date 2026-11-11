@@ -178,6 +178,36 @@ describe("组合动作页 · 库浏览", () => {
     wrapper.unmount();
   });
 
+  it("搜索清除按钮有独立的大点击区，点击后恢复完整列表", async () => {
+    const wrapper = await mountPage();
+    await wrapper.find(".search-input").setValue("786");
+    const clear = wrapper.find(".search-clear");
+    expect(clear.exists()).toBe(true);
+    expect(clear.attributes("aria-label")).toBe("清除搜索");
+    expect((clear.element as HTMLButtonElement).type).toBe("button");
+    await clear.trigger("click");
+    expect((wrapper.find(".search-input").element as HTMLInputElement).value).toBe("");
+    expect(wrapper.find(".search-clear").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("状态提示显示 8 秒后自动关闭", async () => {
+    const wrapper = await mountPage();
+    vi.useFakeTimers();
+    await findButton(wrapper, "导出").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".macros-inline-status").text()).toContain("组合动作已导出");
+
+    vi.advanceTimersByTime(7_999);
+    await flushPromises();
+    expect(wrapper.find(".macros-inline-status").exists()).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    await flushPromises();
+    expect(wrapper.find(".macros-inline-status").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("切页重建时首帧直接渲染上次的库（不闪 0）", async () => {
     const first = await mountPage();
     expect(first.findAll(".macro-item")).toHaveLength(1);
