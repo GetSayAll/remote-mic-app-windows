@@ -1071,16 +1071,9 @@ impl MacroStepper for WindowsMacroStepper {
 
     fn focus_input(&mut self, target: &str, _timeout_ms: u64) -> StepOutcome {
         let profile = (self.focus_profiles)(target);
-        let strategy = profile
-            .as_ref()
-            .map(|profile| profile.strategy)
-            .unwrap_or(crate::focus::FocusStrategy::OpenOnly);
-        if strategy == crate::focus::FocusStrategy::OpenOnly {
-            // 「只打开 APP」没有聚焦动作，按缺少聚焦配置处理。
-            return StepOutcome::MissingDependency;
-        }
         // 与按键页「打开应用 + 聚焦方式」走同一条生产实现：
         // 预设默认（Chrome/网易云快捷键、其余自动选择）和自定义档案都在这里生效。
+        // None / OpenOnly 只打开或激活目标 App，不再视为缺少依赖。
         // 注入/聚焦是否真的落在目标控件只能由目标 App 确认，故终态为 Unknown。
         match self.injector.launch_app_and_focus(target, profile.as_ref()) {
             Ok(()) => StepOutcome::Unknown,

@@ -48,6 +48,18 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       lastError: null,
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    listPresetApps: vi.fn(async () => [
+      { id: "sayall", name: "无线麦 SayAll", installed: true },
+      { id: "wechat", name: "微信", installed: true },
+      { id: "netease_music", name: "网易云音乐", installed: true },
+      { id: "chrome", name: "Chrome 浏览器", installed: true },
+      { id: "chatgpt", name: "ChatGPT", installed: true },
+      { id: "workbuddy", name: "WorkBuddy", installed: true },
+      { id: "dimagent", name: "DimAgent", installed: true },
+      { id: "vokie", name: "Vokie", installed: true },
+      { id: "notepad", name: "记事本", installed: true },
+      { id: "qq", name: "QQ", installed: true },
+    ]),
     activateAppForLearning: vi.fn(async () => undefined),
     learnFocusTarget: vi.fn(async () => ({
       controlType: "Edit",
@@ -199,6 +211,7 @@ import {
   importButtonMappingConfiguration,
   learnFocusPoint,
   learnFocusTarget,
+  listPresetApps,
   pickCustomApp,
   saveLockMappingSelection,
   scanPairedRemotes,
@@ -296,6 +309,13 @@ async function mountPage(
 
 /** 通过「添加应用」选中 mock 的 Registered Example（自定义应用）。 */
 async function addScannedApp(page: VueWrapper): Promise<void> {
+  if (!page.find(".custom-app-group").exists()) {
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "打开自定义 APP")!
+      .trigger("click");
+    await flushPromises();
+  }
   await page
     .findAll("button")
     .find((button) => button.text() === "添加应用")!
@@ -497,14 +517,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "添加应用")!
-      .trigger("click");
-    await flushPromises();
-    await wrapper.get('input[aria-label="Registered Example"]').setValue(true);
-    await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
-    await flushPromises();
+    await addScannedApp(wrapper);
 
     const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
     expect(saved.applications).toEqual([
@@ -532,6 +545,13 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    if (!wrapper.find(".custom-app-group").exists()) {
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "打开自定义 APP")!
+        .trigger("click");
+      await flushPromises();
+    }
     await wrapper
       .findAll("button")
       .find((button) => button.text() === "添加应用")!
@@ -562,42 +582,27 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
-    // 先加一个自定义应用（复用扫描流程），保证「其他应用名称」非空。
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "添加应用")!
-      .trigger("click");
-    await flushPromises();
-    await wrapper.get('input[aria-label="Registered Example"]').setValue(true);
-    await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
-    await flushPromises();
+    // 先加一个自定义应用（复用扫描流程），保证「目标 APP」非空。
+    await addScannedApp(wrapper);
 
     const section = wrapper
       .findAll(".action-section")
-      .find((item) => item.find(".action-section-title").text() === "打开应用")!;
+      .find((item) => item.find(".action-section-title").text() === "打开 APP")!;
     const chips = section.findAll("button.chip").map((button) => button.text());
     const customIndex = chips.findIndex((text) => text.includes("Registered Example"));
-    const addIndices = chips
-      .map((text, index) => (text === "添加应用" ? index : -1))
-      .filter((index) => index >= 0);
-    expect(customIndex, `自定义应用芯片缺失：${chips.join(" / ")}`).toBeGreaterThanOrEqual(0);
-    expect(addIndices, "添加应用按钮应只有一个").toHaveLength(1);
-    expect(chips).not.toContain("扫描本机应用");
-    expect(chips).not.toContain("＋ 添加应用");
-    // 唯一入口必须排在所有应用名称（预设 + 自定义）之后。
-    expect(addIndices[0], `添加应用排在应用名称之前：${chips.join(" / ")}`).toBeGreaterThan(
-      customIndex,
+    expect(chips).toContain("打开自定义 APP");
+    expect(chips.indexOf("打开自定义 APP")).toBeGreaterThan(
+      chips.indexOf("打开无线麦 SayAll"),
     );
-    // 预设与已添加应用在同一个换行网格里：名字连续排布，二者之间不强制换行。
-    const presetChip = section
-      .findAll("button.chip")
-      .find((button) => button.text() === "打开无线麦 SayAll")!;
-    const customChip = section
-      .findAll("button.chip")
-      .find((button) => button.text().includes("Registered Example"))!;
-    expect(customChip.element.parentElement, "预设与已添加应用应在同一容器内").toBe(
-      presetChip.element.parentElement,
-    );
+    const group = section.find(".custom-app-group");
+    expect(group.exists()).toBe(true);
+    expect(group.find(".target-app-title").text()).toBe("目标 APP");
+    const groupChips = group.findAll("button.chip").map((button) => button.text());
+    expect(customIndex).toBeGreaterThanOrEqual(0);
+    expect(groupChips).toContain("打开 Registered Example");
+    expect(groupChips.at(-1)).toBe("添加应用");
+    // 预设芯片不进入自定义目标组。
+    expect(group.find("button").text()).not.toContain("打开无线麦 SayAll");
     wrapper.unmount();
   });
 
@@ -612,21 +617,21 @@ describe("buttons mapping page", () => {
 
     const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
     expect(titles.slice(0, 3)).toEqual(["基础按键", "系统与媒体", "自定义动作"]);
-    expect(titles.indexOf("自定义动作")).toBeLessThan(titles.indexOf("打开应用"));
-    expect(titles.indexOf("打开应用")).toBeLessThan(titles.indexOf("组合动作"));
+    expect(titles.indexOf("自定义动作")).toBeLessThan(titles.indexOf("打开 APP"));
+    expect(titles.indexOf("打开 APP")).toBeLessThan(titles.indexOf("组合动作"));
     expect(titles).not.toContain("设备操作");
     expect(titles.slice(-2)).toEqual(["鼠标动作", "连续执行"]);
     expect(titles).not.toContain("鼠标滚轮");
     expect(titles).not.toContain("鼠标点击");
     expect(titles).not.toContain("鼠标移动");
 
-    // 主分组顺序：自定义动作 → 打开应用 → 组合动作。
+    // 主分组顺序：自定义动作 → 打开 APP → 组合动作。
     const customSection = wrapper
       .findAll(".mapping-editor .action-section")
       .find((item) => item.find(".action-section-title").text() === "自定义动作")!;
     const appSection = wrapper
       .findAll(".mapping-editor .action-section")
-      .find((item) => item.find(".action-section-title").text() === "打开应用")!;
+      .find((item) => item.find(".action-section-title").text() === "打开 APP")!;
     expect(customSection.element.nextElementSibling).toBe(appSection.element);
 
     // 「连续执行」独立成组，放在鼠标动作下面。
@@ -697,7 +702,7 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const appSection = wrapper
       .findAll(".mapping-editor .action-section")
-      .find((item) => item.find(".action-section-title").text() === "打开应用")!;
+      .find((item) => item.find(".action-section-title").text() === "打开 APP")!;
     const labels = appSection.findAll("button.chip").map((button) => button.text());
     expect(labels.slice(0, 10)).toEqual([
       "打开无线麦 SayAll",
@@ -1491,16 +1496,28 @@ describe("buttons mapping page", () => {
     });
   });
 
-  it("打开应用后只显示只读聚焦摘要，并把可写配置交给 APP 适配页（2026-11-09）", async () => {
+  it("预设不显示聚焦摘要，自定义 APP 显示聚焦与翻页状态并可去配置", async () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
     const editor = wrapper.find(".mapping-editor");
 
-    // 预设应用：摘要显示实际会执行的默认策略。
+    // 预设应用：内置聚焦与翻页，不在按键页显示可编辑配置或摘要。
     await editor.findAll(".chip").find((item) => item.text() === "打开记事本")!.trigger("click");
     await flushPromises();
-    expect(editor.find(".focus-profile-summary").text()).toContain("自动选择输入框");
+    expect(editor.find(".focus-profile-summary").exists()).toBe(false);
+
+    // 自定义 APP：展开目标 APP，添加后显示聚焦与翻页状态。
+    expect(editor.find(".custom-app-group").exists()).toBe(false);
+    await editor
+      .findAll("button")
+      .find((button) => button.text() === "打开自定义 APP")!
+      .trigger("click");
+    await flushPromises();
+    expect(editor.find(".custom-app-group .target-app-title").text()).toBe("目标 APP");
+    await addScannedApp(wrapper);
+    expect(editor.find(".focus-profile-summary").text()).toContain("聚焦：");
+    expect(editor.find(".focus-profile-summary").text()).toContain("翻页：需学习");
     // 可写控件不得再出现在按键页。
     expect(editor.find(".focus-strategy-option").exists()).toBe(false);
     expect(editor.find(".focus-shortcut-value").exists()).toBe(false);
@@ -1508,8 +1525,36 @@ describe("buttons mapping page", () => {
     // 「去配置」带目标跳到 APP 适配页。
     await editor.find(".focus-profile-summary .link-button").trigger("click");
     expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
-      { page: "apps", params: { appTarget: "notepad" } },
+      { page: "apps", params: { appTarget: "shell:AppsFolder\\Example!App" } },
     ]);
+  });
+
+  it("手动添加的预设显示预置可用，不提供可编辑配置", async () => {
+    const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    vi.mocked(listPresetApps).mockResolvedValueOnce([
+      { id: "chrome", name: "Chrome 浏览器", installed: true, path: target },
+    ]);
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      applications: [{ name: "Chrome", path: target }],
+      focusProfiles: {},
+    });
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("使用 APP 快捷键聚焦");
+    expect(summary.text()).toContain("翻页：预置可用");
+    expect(summary.find(".preset-pill").text()).toBe("预置可用");
+    expect(summary.find(".link-button").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("keeps the last focus failure visible beside the read-only summary", async () => {
@@ -2129,7 +2174,14 @@ describe("buttons mapping page", () => {
   });
 
   /** 编辑器内按标签找 chip 并返回其禁用态。 */
-  function chipState(wrapper: VueWrapper, label: string): boolean {
+  async function chipState(wrapper: VueWrapper, label: string): Promise<boolean> {
+    if (label === "添加应用" && !wrapper.find(".custom-app-group").exists()) {
+      await wrapper
+        .findAll(".mapping-editor button")
+        .find((button) => button.text() === "打开自定义 APP")!
+        .trigger("click");
+      await flushPromises();
+    }
     const chip = wrapper
       .findAll(".mapping-editor .chip")
       .find((element) => element.text().includes(label));
@@ -2151,12 +2203,12 @@ describe("buttons mapping page", () => {
   it("全开放：确定·单击所有操作可配（注入链路已真机验证）+ 单响应提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "确定", 0);
-    expect(chipState(wrapper, "Enter")).toBe(false);
-    expect(chipState(wrapper, "Home")).toBe(false);
-    expect(chipState(wrapper, "空格")).toBe(false);
-    expect(chipState(wrapper, "Ctrl + V")).toBe(false);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
-    expect(chipState(wrapper, "添加应用")).toBe(false);
+    expect(await chipState(wrapper, "Enter")).toBe(false);
+    expect(await chipState(wrapper, "Home")).toBe(false);
+    expect(await chipState(wrapper, "空格")).toBe(false);
+    expect(await chipState(wrapper, "Ctrl + V")).toBe(false);
+    expect(await chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(await chipState(wrapper, "添加应用")).toBe(false);
     // 武装族按键显示冷首按副作用提示（信息性，不门控）。
     expect(wrapper.find(".mapping-editor").text()).toContain("它原本的按键效果");
   });
@@ -2223,25 +2275,25 @@ describe("buttons mapping page", () => {
   it("全开放：确定·双击与 TV 所有操作可配 + 各自的单响应提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "确定", 1);
-    expect(chipState(wrapper, "Enter")).toBe(false);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
-    expect(chipState(wrapper, "添加应用")).toBe(false);
+    expect(await chipState(wrapper, "Enter")).toBe(false);
+    expect(await chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(await chipState(wrapper, "添加应用")).toBe(false);
     expect(wrapper.find(".mapping-editor").text()).toContain("它原本的按键效果");
 
     await openCell(wrapper, "TV", 0);
-    expect(chipState(wrapper, "Enter")).toBe(false);
-    expect(chipState(wrapper, "静音")).toBe(false);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
-    expect(chipState(wrapper, "添加应用")).toBe(false);
+    expect(await chipState(wrapper, "Enter")).toBe(false);
+    expect(await chipState(wrapper, "静音")).toBe(false);
+    expect(await chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(await chipState(wrapper, "添加应用")).toBe(false);
     expect(wrapper.find(".mapping-editor").text()).toContain("这个键只执行你配置的动作");
   });
 
   it("左键与其余方向键同样开放自定义并显示结构性泄漏提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "左", 0);
-    expect(chipState(wrapper, "←")).toBe(false);
-    expect(chipState(wrapper, "Backspace")).toBe(false);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(await chipState(wrapper, "←")).toBe(false);
+    expect(await chipState(wrapper, "Backspace")).toBe(false);
+    expect(await chipState(wrapper, "录入自定义快捷键")).toBe(false);
     expect(wrapper.find(".mapping-editor").text()).toContain("它原本的按键效果");
 
     // 与型号无关：RC001 上左键同样开放。
@@ -2256,10 +2308,10 @@ describe("buttons mapping page", () => {
   it("电源（直接归因族）全开放且无单响应提示", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "电源", 2);
-    expect(chipState(wrapper, "Esc")).toBe(false);
-    expect(chipState(wrapper, "Win + Shift + S")).toBe(false);
-    expect(chipState(wrapper, "录入自定义快捷键")).toBe(false);
-    expect(chipState(wrapper, "添加应用")).toBe(false);
+    expect(await chipState(wrapper, "Esc")).toBe(false);
+    expect(await chipState(wrapper, "Win + Shift + S")).toBe(false);
+    expect(await chipState(wrapper, "录入自定义快捷键")).toBe(false);
+    expect(await chipState(wrapper, "添加应用")).toBe(false);
     expect(wrapper.find(".mapping-editor").text()).not.toContain("原生按键动作");
   });
 

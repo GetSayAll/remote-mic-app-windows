@@ -311,7 +311,7 @@ impl PlatformRuntime for WindowsPlatform {
     }
 
     fn preset_apps(&self) -> Vec<sayall_windows::app_launcher::PresetAppInfo> {
-        sayall_windows::app_launcher::probe_preset_apps()
+        sayall_windows::app_launcher::cached_preset_apps().to_vec()
     }
 
     fn launch_app(&self, target: &str) -> Result<(), PlatformError> {

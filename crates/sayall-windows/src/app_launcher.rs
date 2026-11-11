@@ -248,6 +248,41 @@ pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
     PRESET_APPS.iter().find(|app| app.id == id)
 }
 
+/// 手动添加到应用库的预设：target 既可以是预设 id，也可以是**探测到的**预设路径。
+///
+/// 只按探测结果精确匹配，避免把 `C:\Tools\notepad.exe` 这类同名自定义程序误认成预设。
+fn preset_app_for_target_in(target: &str, presets: &[PresetAppInfo]) -> Option<&'static PresetApp> {
+    preset_app(target).or_else(|| {
+        presets
+            .iter()
+            .find(|info| {
+                info.path
+                    .as_deref()
+                    .is_some_and(|path| path.eq_ignore_ascii_case(target.trim()))
+            })
+            .and_then(|info| preset_app(&info.id))
+    })
+}
+
+/// 当前进程的预设探测快照：UI 首次列预设时填充，运行时路径匹配复用。
+///
+/// 安装/卸载预设后需重启应用才能刷新；避免每次打开应用都扫描开始菜单。
+pub fn cached_preset_apps() -> &'static [PresetAppInfo] {
+    static CACHE: std::sync::OnceLock<Vec<PresetAppInfo>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(probe_preset_apps)
+}
+
+/// 手动添加到应用库的预设：target 既可以是预设 id，也可以是可执行文件路径。
+///
+/// 用户手动添加 Chrome 后，`open_app` 的 target 是路径；聚焦仍应直接使用
+/// Chrome 的预设快捷键，而不是退化成「只打开」。
+pub(crate) fn preset_app_for_target(target: &str) -> Option<&'static PresetApp> {
+    if let Some(app) = preset_app(target) {
+        return Some(app);
+    }
+    preset_app_for_target_in(target, cached_preset_apps())
+}
+
 /// 按键动作 target 对应的前台可执行文件名。
 ///
 /// 打开应用后真实前台窗口可能要几百毫秒才就绪；键位方案需要先用这个
@@ -3943,6 +3978,29 @@ pub(crate) mod tests {
             "目标 exe 与 exe_names 不匹配必须拒绝"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preset_path_matching_is_exact_and_does_not_use_exe_names() {
+        let presets = vec![PresetAppInfo {
+            id: "chrome".to_owned(),
+            name: "Chrome 浏览器".to_owned(),
+            installed: true,
+            path: Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_owned()),
+        }];
+        assert_eq!(
+            preset_app_for_target_in(
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                &presets,
+            )
+            .map(|app| app.id),
+            Some("chrome")
+        );
+        assert!(preset_app_for_target_in(r"C:\Tools\notepad.exe", &presets).is_none());
+        assert_eq!(
+            preset_app_for_target_in("chrome", &presets).map(|app| app.id),
+            Some("chrome")
+        );
     }
 
     /// 探测结果一致性：probe 判定已安装的预设（自身除外）必须能给出

@@ -38,45 +38,40 @@ function mappings(overrides: Partial<ButtonMappings> = {}): ButtonMappings {
 }
 
 describe("app adaptation rows", () => {
-  it("lists added apps first, then only presets with an explicit profile", () => {
+  it("lists only manually added apps and marks a library entry that matches a preset", () => {
     const rows = buildAppRows(
       [
         { name: "Cursor", path: "C:\\Apps\\Cursor.exe" },
+        { name: "Chrome", path: "C:\\Program Files\\Chrome\\chrome.exe" },
         { name: "微信", path: "shell:AppsFolder\\Tencent.WeChat" },
       ],
-      {
-        netease_music: { strategy: "open_only" },
-        chrome: { strategy: "auto_composer" },
-      },
+      {},
       PRESETS,
     );
 
     expect(rows.map((row) => row.target)).toEqual([
       "C:\\Apps\\Cursor.exe",
+      "C:\\Program Files\\Chrome\\chrome.exe",
       "shell:AppsFolder\\Tencent.WeChat",
-      "netease_music",
-      "chrome",
     ]);
-    // 没有显式档案的预设不进入列表。
-    expect(rows.some((row) => row.target === "wechat")).toBe(false);
-    expect(rows[2]).toMatchObject({
+    expect(rows[0]).toMatchObject({ preset: false });
+    expect(rows[1]).toMatchObject({
       preset: true,
-      name: "网易云音乐",
-      path: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
+      presetId: "chrome",
+      name: "Chrome",
+      path: "C:\\Program Files\\Chrome\\chrome.exe",
     });
+    expect(rows[2]).toMatchObject({ preset: false });
   });
 
-  it("can expose one preset that the caller navigated to", () => {
-    const rows = buildAppRows([], {}, PRESETS, ["chrome"]);
-    expect(rows).toEqual([
-      {
-        target: "chrome",
-        name: "Chrome 浏览器",
-        path: "C:\\Program Files\\Chrome\\chrome.exe",
-        preset: true,
-        installed: true,
-      },
-    ]);
+  it("does not expose presets that were not manually added, including navigated presets", () => {
+    const rows = buildAppRows(
+      [{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }],
+      {},
+      PRESETS,
+      ["chrome"],
+    );
+    expect(rows.map((row) => row.target)).toEqual(["C:\\Apps\\Cursor.exe"]);
   });
 
   it("deduplicates added apps by case-insensitive path and keeps first name", () => {
@@ -117,22 +112,34 @@ describe("app adaptation rows", () => {
 });
 
 describe("focus labels", () => {
-  it("uses the preset default when no explicit profile exists", () => {
+  it("uses the preset id when a manually added app matches a preset", () => {
     const profile = effectiveAppProfile(
-      { target: "chrome", preset: true },
+      {
+        target: "C:\\Program Files\\Chrome\\chrome.exe",
+        preset: true,
+        presetId: "chrome",
+      },
       {},
     );
     expect(profile?.strategy).toBe("app_shortcut");
     expect(compactFocusLabel(profile)).toBe("快捷键");
   });
 
-  it("keeps an explicit preset profile ahead of the built-in default", () => {
+  it("preset rows ignore stale explicit profiles", () => {
     const profile = effectiveAppProfile(
-      { target: "netease_music", preset: true },
-      { netease_music: { strategy: "open_only" } },
+      {
+        target: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
+        preset: true,
+        presetId: "netease_music",
+      },
+      {
+        "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe": {
+          strategy: "open_only",
+        },
+      },
     );
-    expect(profile?.strategy).toBe("open_only");
-    expect(compactFocusLabel(profile)).toBe("只打开");
+    expect(profile?.strategy).toBe("app_shortcut");
+    expect(compactFocusLabel(profile)).toBe("快捷键");
   });
 
   it("reads a stored profile whose path case differs from the app row", () => {
@@ -271,7 +278,9 @@ describe("selection", () => {
   );
 
   it("keeps an existing selection", () => {
-    expect(nextSelectedTarget(rows, "chrome")).toBe("chrome");
+    expect(nextSelectedTarget(rows, "C:\\Apps\\Cursor.exe")).toBe(
+      "C:\\Apps\\Cursor.exe",
+    );
   });
 
   it("falls back to the first row when the selection disappeared", () => {

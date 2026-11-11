@@ -46,21 +46,28 @@ use crate::UsageCounters;
 
 /// 「打开应用」实际使用的聚焦档案。
 ///
-/// 预设应用（「打开应用」分组的默认列表）在用户没有显式选择时使用产品默认聚焦
-/// 方式（Chrome / 网易云用快捷键，其余自动选择输入框）；用户显式保存的档案优先。
+/// 预设应用（含用户手动添加的预设路径）直接使用产品默认聚焦方式
+/// （Chrome / 网易云用快捷键，其余自动选择输入框）。
 /// 自定义应用仍按用户保存的档案执行，没有档案时只打开。
 fn open_app_effective_profile(
     mappings: &ButtonMappings,
     target: &str,
 ) -> Option<crate::focus::AppFocusProfile> {
-    // 用户显式选过的档案优先；没有档案时预设应用使用产品默认聚焦方式。
-    if let Some(profile) = mappings.focus_profiles.get(target) {
-        return Some(profile.clone());
+    focus_profile_for_target(&mappings.focus_profiles, target)
+}
+
+/// 目标对应的实际聚焦档案：预设优先（含手动添加的预设路径），其余读取用户档案。
+///
+/// 组合动作的聚焦步骤与按键页的「打开应用 + 聚焦」必须使用同一判定，
+/// 否则手动添加的预设路径会在组合动作里退化成「只打开」。
+pub(crate) fn focus_profile_for_target(
+    profiles: &std::collections::BTreeMap<String, crate::focus::AppFocusProfile>,
+    target: &str,
+) -> Option<crate::focus::AppFocusProfile> {
+    if let Some(app) = crate::app_launcher::preset_app_for_target(target) {
+        return Some(preset_focus_profile(app.id));
     }
-    if crate::app_launcher::preset_app(target).is_some() {
-        return Some(preset_focus_profile(target));
-    }
-    None
+    profiles.get(target).cloned()
 }
 
 /// 预设应用的默认聚焦入口。
@@ -3181,10 +3188,13 @@ mod tests {
             "语音开始应 Esc 取消并释放 Alt：{:?}",
             commands()
         );
-        assert_eq!(
-            crate::key_gate::app_switcher_mask(),
-            0,
-            "语音开始取消后遮蔽必须清零"
+        assert!(
+            wait_until(
+                || crate::key_gate::app_switcher_mask() == 0,
+                Duration::from_millis(500)
+            ),
+            "语音开始取消后遮蔽必须清零：{}",
+            crate::key_gate::app_switcher_mask()
         );
 
         drop(runtime);
@@ -3506,7 +3516,46 @@ mod tests {
     }
 
     #[test]
-    fn open_app_effective_profile_prefers_explicit_preset_override() {
+    fn focus_profile_for_target_prefers_presets_and_keeps_custom_profiles() {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "chrome".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::OpenOnly,
+                shortcut: None,
+                recorded: None,
+                point: None,
+            },
+        );
+        // 旧显式档案不能覆盖预设能力，否则组合动作会与 UI 摘要不一致。
+        assert_eq!(
+            focus_profile_for_target(&profiles, "chrome")
+                .expect("Chrome 预设档案")
+                .strategy,
+            crate::focus::FocusStrategy::AppShortcut
+        );
+
+        let custom = r"C:\Tools\Editor.exe";
+        profiles.insert(
+            custom.to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::OpenOnly,
+                shortcut: None,
+                recorded: None,
+                point: None,
+            },
+        );
+        assert_eq!(
+            focus_profile_for_target(&profiles, custom)
+                .expect("自定义档案")
+                .strategy,
+            crate::focus::FocusStrategy::OpenOnly
+        );
+        assert!(focus_profile_for_target(&profiles, r"C:\Tools\Missing.exe").is_none());
+    }
+
+    #[test]
+    fn open_app_effective_profile_keeps_explicit_profile_for_custom_paths() {
         let mut mappings = ButtonMappings::default();
         assert_eq!(
             open_app_effective_profile(&mappings, "notepad")
@@ -3514,16 +3563,19 @@ mod tests {
                 .strategy,
             crate::focus::FocusStrategy::AutoComposer
         );
+
+        // 同名但不在预设探测路径里的自定义程序不能被误认成预设。
+        let custom_path = r"C:\Tools\notepad.exe";
         mappings.focus_profiles.insert(
-            "chrome".to_owned(),
+            custom_path.to_owned(),
             crate::focus::AppFocusProfile {
                 strategy: crate::focus::FocusStrategy::RecordedElement,
                 ..Default::default()
             },
         );
         assert_eq!(
-            open_app_effective_profile(&mappings, "chrome")
-                .expect("显式档案优先")
+            open_app_effective_profile(&mappings, custom_path)
+                .expect("自定义路径保留显式档案")
                 .strategy,
             crate::focus::FocusStrategy::RecordedElement
         );

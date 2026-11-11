@@ -13,7 +13,7 @@ import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { SHORTCUT_PRESET_GROUPS, shortcutPresetHint } from "../lib/shortcut-presets";
 import { effectiveFocusProfile, presetFocusDefault } from "../lib/focus-defaults";
-import { focusStrategyLabel } from "../lib/app-adaptation";
+import { focusStrategyLabel, scrollRegionForTarget } from "../lib/app-adaptation";
 import {
   clearMacroEditorSession,
   readMacroEditorSession,
@@ -58,7 +58,6 @@ import {
   type AppFocusProfile,
   type ButtonMappings,
   type CustomAppPick,
-  type FocusStrategy,
   type MacroAction,
   type MacroChord,
   type MacroDefinition,
@@ -71,6 +70,7 @@ import {
   type PresetAppInfo,
   type RemoteButton,
   type RuntimeSnapshot,
+  type ScrollRegionTarget,
   type ShortcutCaptureEdge,
 } from "../lib/bridge";
 
@@ -191,9 +191,25 @@ const ACTION_ORDER: MacroAction[] = [
   "run_macro",
 ];
 
+const STATUS_VISIBLE_MS = 8_000;
+let statusTimer: number | null = null;
+
+function clearStatusTimer(): void {
+  if (statusTimer !== null) {
+    window.clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+}
+
 function setStatus(message: string, kind: "info" | "success" | "error" = "info"): void {
+  clearStatusTimer();
   statusMessage.value = message;
   statusKind.value = kind;
+  if (!message) return;
+  statusTimer = window.setTimeout(() => {
+    statusMessage.value = "";
+    statusTimer = null;
+  }, STATUS_VISIBLE_MS);
 }
 
 async function reloadLibrary(): Promise<void> {
@@ -686,6 +702,7 @@ async function stopCapture(): Promise<void> {
 }
 
 onUnmounted(() => {
+  clearStatusTimer();
   // 页面切走时后端仍在录入态会全局吞键，必须在卸载时成对停止。
   void stopCapture();
 });
@@ -904,19 +921,9 @@ function stepConfigurationIssue(step: MacroStep): string | null {
       return parameters.chord ? null : t("还没有选择或录入按键");
     case "system_action":
       return parameters.chord ? null : t("还没有选择系统动作");
-    case "focus_input": {
-      if (!parameters.target?.trim()) return t("还没有选择目标 App");
-      // 组合动作不再单独学习：必须复用按键页共用的聚焦档案。
-      if (!focusProfiles.value[parameters.target]) {
-        return t("这个 App 还没有聚焦方式，请选择一个");
-      }
-      if (selectedFocusStrategy(parameters.target) === "open_only") {
-        return t("这个 App 的聚焦方式是「只打开 APP」，请选择其他聚焦方式");
-      }
-      return focusReady(parameters.target)
-        ? null
-        : t("这个 App 的聚焦方式还没配置完成（缺少快捷键或输入框记录）");
-    }
+    case "focus_input":
+      // 选择目标 App 即视为这一步可用；没有聚焦档案时执行只打开/激活该 App。
+      return parameters.target?.trim() ? null : t("还没有选择目标 App");
     case "focus_frontmost":
       return null;
     case "open_url":
@@ -939,8 +946,11 @@ const firstUnconfiguredStep = computed(() => {
 
 /** 完整聚焦档案（含快捷键），供「单键或快捷键」列出已保存的 App 聚焦快捷键。 */
 const focusProfiles = ref<Record<string, AppFocusProfile>>({});
+/** 当前聚焦步骤的翻页档案，仅用于与按键页一致的摘要状态。 */
+const focusScrollRegions = ref<Record<string, ScrollRegionTarget>>({});
 /** 按键页动作里用到、但不在应用库里的旧自定义目标（与按键页的自定义应用兜底一致）。 */
 const actionApps = ref<Array<{ id: string; name: string }>>([]);
+const focusCustomAppsOpen = ref<boolean | null>(null);
 
 /** 当前聚焦步骤的目标（和按键页一样，聚焦档案按 target 键控）。 */
 const focusTarget = computed(() => {
@@ -952,12 +962,44 @@ function isPresetTarget(target: string): boolean {
   return presetApps.value.some((app) => app.id === target);
 }
 
-/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
-const focusProfile = computed<AppFocusProfile | null>(() => {
-  const target = focusTarget.value;
+/** 目标匹配到的预设 id：内置预设 id 或用户手动添加的预设路径。 */
+function presetIdForTarget(target: string | null | undefined): string | null {
   if (!target) return null;
-  return effectiveFocusProfile(target, focusProfiles.value, isPresetTarget);
-});
+  const key = target.trim().toLocaleLowerCase();
+  return (
+    presetApps.value.find(
+      (app) =>
+        app.id.toLocaleLowerCase() === key ||
+        Boolean(app.path && app.path.toLocaleLowerCase() === key),
+    )?.id ?? null
+  );
+}
+
+const focusTargetPresetId = computed(() => presetIdForTarget(focusTarget.value));
+const focusTargetIsBuiltInPreset = computed(() =>
+  Boolean(focusTarget.value && isPresetTarget(focusTarget.value)),
+);
+const focusTargetIsLibraryPreset = computed(
+  () => Boolean(focusTargetPresetId.value && !focusTargetIsBuiltInPreset.value),
+);
+const focusCustomAppsExpanded = computed(
+  () =>
+    focusCustomAppsOpen.value ??
+    Boolean(focusTarget.value && !focusTargetIsBuiltInPreset.value),
+);
+
+/** 手动添加的预设直接使用预设能力，其余目标读取用户档案。 */
+function effectiveFocusForTarget(target: string | null | undefined): AppFocusProfile | null {
+  if (!target) return null;
+  const presetId = presetIdForTarget(target);
+  if (presetId) return presetFocusDefault(presetId, true);
+  return focusProfiles.value[target] ?? null;
+}
+
+/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
+const focusProfile = computed<AppFocusProfile | null>(() =>
+  effectiveFocusForTarget(focusTarget.value),
+);
 
 const focusSummary = computed(() =>
   focusProfile.value
@@ -981,6 +1023,7 @@ function applyFocusMappings(mappings: ButtonMappings): void {
     if (fallback) profiles[app.id] = fallback;
   }
   focusProfiles.value = profiles;
+  focusScrollRegions.value = { ...(mappings.scrollRegions ?? {}) };
 
   const targets = new Set<string>();
   for (const actions of Object.values(mappings.actions ?? {})) {
@@ -999,41 +1042,45 @@ async function refreshFocusProfiles(): Promise<void> {
   }
 }
 
-/** 该目标是否有可执行的聚焦动作（只打开 / 缺快捷键或记录都不可执行）。 */
-function focusReady(target: string | undefined): boolean {
-  const profile = target ? focusProfiles.value[target] : undefined;
-  if (!profile) return false;
-  switch (profile.strategy) {
-    case "auto_composer":
-      return true;
-    case "app_shortcut":
-      return (profile.shortcut?.keys?.length ?? 0) > 0;
-    case "recorded_element":
-      return Boolean(profile.recorded);
-    case "recorded_point":
-      return Boolean(profile.point);
-    default:
-      return false;
+/** 「打开 APP」只列预设；当前旧目标若不在探测列表中也保留。 */
+const focusPresetChoices = computed<Array<{ id: string; name: string }>>(() => {
+  const choices = new Map<string, { id: string; name: string }>();
+  for (const app of presetApps.value) {
+    if (app.installed) choices.set(app.id, { id: app.id, name: app.name });
   }
-}
-
-function selectedFocusStrategy(target: string | undefined): FocusStrategy {
-  return target ? (focusProfiles.value[target]?.strategy ?? "open_only") : "open_only";
-}
-
-/** 当前步骤可选的目标：与按键页同一份应用列表（预设 + 自定义），并保留旧目标。 */
-const focusTargetChoices = computed<Array<{ id: string; name: string }>>(() => {
-  const choices = new Map(appChoices.value.map((app) => [app.id, app]));
-  for (const app of actionApps.value) {
-    if (!choices.has(app.id)) choices.set(app.id, app);
-  }
-  const current = draft.value?.steps.find(
-    (step) => step.stepId === selectedStepId.value,
-  )?.parameters.target;
-  if (current && !choices.has(current)) {
+  const current = focusTarget.value;
+  if (current && isPresetTarget(current) && !choices.has(current)) {
     choices.set(current, { id: current, name: appDisplayName(current) });
   }
   return [...choices.values()];
+});
+
+/** 「目标 APP」放用户自己添加的 APP（含手动添加的预设路径）。 */
+const focusCustomTargets = computed<Array<{ id: string; name: string }>>(() => {
+  const choices = new Map<string, { id: string; name: string }>();
+  for (const app of customApps.value) choices.set(app.id, app);
+  for (const app of actionApps.value) {
+    if (!isPresetTarget(app.id) && !choices.has(app.id)) choices.set(app.id, app);
+  }
+  const current = focusTarget.value;
+  if (current && !focusTargetIsBuiltInPreset.value && !choices.has(current)) {
+    choices.set(current, { id: current, name: appDisplayName(current) });
+  }
+  return [...choices.values()];
+});
+
+const focusScrollStatus = computed(() => {
+  const target = focusTarget.value;
+  if (!target || focusTargetIsBuiltInPreset.value) return null;
+  if (focusTargetIsLibraryPreset.value) return t("预置可用");
+  return scrollRegionForTarget(focusScrollRegions.value, target)
+    ? t("已学习")
+    : t("需学习");
+});
+
+watch([selectedStepId, focusTarget], () => {
+  // 换步骤/换目标后按目标类型重新决定目标 APP 组是否展开。
+  focusCustomAppsOpen.value = null;
 });
 
 // ===== 测试与保存 =====
@@ -1232,7 +1279,10 @@ watch(
 <template>
   <div class="macros-page">
     <div class="page-header">
-      <h1>{{ tPage("组合动作") }}</h1>
+      <div class="macros-heading-row">
+        <h1>{{ tPage("组合动作") }}</h1>
+        <span v-if="definitions.length > 0" class="count-badge">{{ definitions.length }}</span>
+      </div>
       <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>
 
@@ -1248,17 +1298,24 @@ watch(
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
       <aside class="library-pane">
-        <div class="library-title-row">
-          <span class="library-title">{{ t("我的组合动作") }}</span>
-          <span class="count-badge">{{ definitions.length }}</span>
+        <div class="search-field">
+          <input
+            v-model="search"
+            class="search-input"
+            type="search"
+            :placeholder="t('搜索组合动作')"
+            :aria-label="t('搜索组合动作')"
+          />
+          <button
+            v-if="search"
+            class="search-clear"
+            type="button"
+            :aria-label="t('清除搜索')"
+            @click="search = ''"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
         </div>
-        <input
-          v-model="search"
-          class="search-input"
-          type="search"
-          :placeholder="t('搜索组合动作')"
-          :aria-label="t('搜索组合动作')"
-        />
         <div class="macro-list" role="listbox" :aria-label="t('组合动作列表')">
           <button
             v-for="definition in filteredDefinitions"
@@ -1729,35 +1786,71 @@ watch(
                   class="step-card-body"
                 >
                   <div class="field">
-                    <h4 class="action-section-title">{{ t("打开应用") }}</h4>
+                    <h4 class="action-section-title">{{ t("打开 APP") }}</h4>
                     <div class="preset-grid app-library">
                       <button
-                        v-for="app in focusTargetChoices"
+                        v-for="app in focusPresetChoices"
                         :key="app.id"
                         class="chip"
-                        :class="{
-                          selected: focusTarget === app.id,
-                          'custom-app': !isPresetTarget(app.id),
-                        }"
+                        :class="{ selected: focusTarget === app.id }"
                         type="button"
                         :title="app.name"
-                        @click="renameStepTarget(app.id)"
+                        @click="focusCustomAppsOpen = false; renameStepTarget(app.id)"
                       >
                         {{ tr(openAppLabel(app.name)) }}
                       </button>
                       <button
-                        class="chip add-app"
+                        class="chip open-custom-app"
+                        :class="{ selected: Boolean(focusTarget && !focusTargetIsBuiltInPreset) }"
                         type="button"
-                        :title="t('扫描本机应用，或选择任意程序或快捷方式')"
-                        @click="appPickerError = null; appPickerOpen = true"
+                        :aria-expanded="focusCustomAppsExpanded"
+                        aria-controls="macro-custom-app-group"
+                        @click="focusCustomAppsOpen = !focusCustomAppsExpanded"
                       >
-                        {{ t("添加应用") }}
+                        {{ t("打开自定义 APP") }}
                       </button>
                     </div>
+                    <div
+                      v-if="focusCustomAppsExpanded"
+                      id="macro-custom-app-group"
+                      class="custom-app-group"
+                    >
+                      <p class="action-section-title target-app-title">{{ t("目标 APP") }}</p>
+                      <div class="preset-grid app-library">
+                        <button
+                          v-for="app in focusCustomTargets"
+                          :key="app.id"
+                          class="chip custom-app"
+                          :class="{ selected: focusTarget === app.id }"
+                          type="button"
+                          :title="app.name"
+                          @click="focusCustomAppsOpen = true; renameStepTarget(app.id)"
+                        >
+                          {{ tr(openAppLabel(app.name)) }}
+                        </button>
+                        <button
+                          class="chip add-app"
+                          type="button"
+                          :title="t('扫描本机应用，或选择任意程序或快捷方式')"
+                          @click="appPickerError = null; appPickerOpen = true"
+                        >
+                          {{ t("添加应用") }}
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <div v-if="focusTarget" class="focus-profile-summary">
-                    <span class="muted">{{ t("聚焦：{summary}", { summary: focusSummary }) }}</span>
-                    <button class="link-button" type="button" @click="configureFocusProfile">
+                  <div
+                    v-if="focusTarget && !focusTargetIsBuiltInPreset"
+                    class="focus-profile-summary"
+                  >
+                    <span class="muted">
+                      {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
+                      {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
+                    </span>
+                    <span v-if="focusTargetIsLibraryPreset" class="preset-pill">
+                      {{ t("预置可用") }}
+                    </span>
+                    <button v-else class="link-button" type="button" @click="configureFocusProfile">
                       {{ t("去配置") }}
                     </button>
                   </div>
@@ -1951,23 +2044,53 @@ watch(
   gap: 10px;
   min-height: 0;
 }
-.library-title-row {
+.macros-heading-row {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
 }
-.library-title {
-  font-size: 16px;
-  font-weight: 600;
-}
 .count-badge {
-  margin-left: auto;
+  margin-bottom: 3px;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
   color: var(--text-secondary);
   background: var(--pending-surface);
   border-radius: 99px;
-  padding: 1px 8px;
+  padding: 3px 8px;
+}
+.search-field {
+  position: relative;
+}
+.search-field .search-input {
+  box-sizing: border-box;
+  min-height: 32px;
+  padding-right: 38px;
+}
+.search-input::-webkit-search-cancel-button {
+  display: none;
+  -webkit-appearance: none;
+}
+.search-clear {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  bottom: 2px;
+  width: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+.search-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
 }
 .search-input,
 .text-input {
@@ -1979,6 +2102,7 @@ watch(
   background: var(--card);
   color: var(--text-primary);
 }
+
 .macro-list {
   flex: 1;
   min-height: 0;
@@ -2539,6 +2663,23 @@ watch(
   cursor: pointer;
 }
 .app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.open-custom-app { border-style: dashed; }
+.custom-app-group {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.target-app-title { margin: 0 0 6px; font-size: 12.5px; color: var(--muted); }
+.preset-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-surface);
+  color: var(--success-text);
+  font-size: 11px;
+  font-weight: 600;
+}
 .review-summary {
   display: flex;
   align-items: center;
