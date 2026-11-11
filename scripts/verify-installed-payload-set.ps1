@@ -20,6 +20,7 @@
 $payloadNames = @(
     "sayall-helper.exe",
     "frida-gadget.dll",
+    "sayall-mcp.exe",
     "sayall-helper-arm64.exe",
     "frida-gadget-arm64.dll"
 )
