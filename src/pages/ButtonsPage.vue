@@ -33,6 +33,7 @@ import {
 import {
   actionSummary,
   buttonLabel,
+  isKnownButtonAction,
   buttonLabels,
   buttonTriggerLabel,
   chordLabel,
@@ -652,6 +653,9 @@ watch([presetApps, () => mappings.value.applications], () => {
  */
 async function selectApp(app: CustomAppPick): Promise<void> {
   if (busy.value) return;
+  // 只在确实要替换当前编辑格时要求二次确认；单纯添加应用到库不应被拦。
+  if (editingTarget.value && blockUnsupportedReplacement()) return;
+  unsupportedReplaceArmed.value = false;
   busy.value = true;
   appPickerError.value = null;
   try {
@@ -721,9 +725,29 @@ async function openExample(): Promise<void> {
   }
 }
 
+/**
+ * 未知动作来自更新版本，不能被一次误点直接覆盖。第一次选择只解除保护，
+ * 第二次选择才真正替换；用户仍可显式改掉它。
+ */
+const unsupportedReplaceArmed = ref(false);
+
+function blockUnsupportedReplacement(): boolean {
+  const current = selectedAction.value;
+  if (!current || isKnownButtonAction(current) || unsupportedReplaceArmed.value) {
+    return false;
+  }
+  unsupportedReplaceArmed.value = true;
+  statusMessage.value = t(
+    "这个动作来自更新版本，当前版本只保留、不执行。再次选择任意动作将替换它；如需保留原动作，请升级无线麦。",
+  );
+  return true;
+}
+
 function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
   if (!target) return;
+  if (blockUnsupportedReplacement()) return;
+  unsupportedReplaceArmed.value = false;
   const next: ButtonMappings = {
     ...mappings.value,
     actions: { ...mappings.value.actions },
@@ -742,6 +766,12 @@ function applyAction(action: ButtonAction): void {
 }
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
+watch(editingTarget, () => {
+  unsupportedReplaceArmed.value = false;
+});
+watch(selectedAction, () => {
+  unsupportedReplaceArmed.value = false;
+});
 const MOUSE_AMOUNT_DEFAULT = 20;
 const scrollSteps = computed(() => selectedAction.value?.type === "scroll" ? selectedAction.value.steps ?? MOUSE_AMOUNT_DEFAULT : MOUSE_AMOUNT_DEFAULT);
 const moveDistance = computed(() => selectedAction.value?.type === "mouse_move" ? selectedAction.value.distance : MOUSE_AMOUNT_DEFAULT);
@@ -901,6 +931,8 @@ const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
 
 /** 动作是否可连续执行（与 Rust `ButtonAction::allows_repeat` 同源口径）。 */
 function actionAllowsRepeat(action: ButtonAction): boolean {
+  // 来自更新版本的动作当前版本不执行，自然也不能连续执行。
+  if (!isKnownButtonAction(action)) return false;
   // 切换应用会话内每次触发只前进一项；按住连发等价于系统 Alt+Tab 连续 Tab。
   if (action.type === "app_switcher") return true;
   if (action.type === "page_up" || action.type === "page_down") return true;
@@ -923,15 +955,24 @@ function holdRepeatBlockedReason(
   slot: "single" | "long",
 ): string | null {
   if (slot === "long") {
+    if (!isKnownButtonAction(actions.long)) {
+      return t("这个动作来自更新版本，当前版本只保留、不执行，不能设为连续执行");
+    }
     if (actions.long.type === "disabled") return t("先给这个按键配置长按动作");
     if (!actionAllowsRepeat(actions.long)) {
       return t("“长按”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；把它改成单个按键后可选");
     }
     return null;
   }
+  if (!isKnownButtonAction(actions.single)) {
+    return t("这个动作来自更新版本，当前版本只保留、不执行，不能设为连续执行");
+  }
   if (actions.single.type === "disabled") return t("先给这个按键配置单击动作");
   if (!actionAllowsRepeat(actions.single)) {
     return t("“单击”的动作只执行一次（组合快捷键、打开应用等），不能连续执行；改成单个按键后可选");
+  }
+  if (!isKnownButtonAction(actions.long)) {
+    return t("这个按键的长按动作来自更新版本，当前版本无法判断能否连续执行；请先升级无线麦");
   }
   if (actions.long.type !== "disabled") {
     // 指路前先确认「重复长按动作」真的可选：长按动作只执行一次时它同样是
@@ -1031,6 +1072,21 @@ function reconcileHoldRepeat(
   const hold = actions.holdRepeat;
   if (!hold) return { actions, notice: null };
   const slot = hold === "long" ? "long" : "single";
+  // holdRepeat 指向的动作来自更新版本：当前版本不知道它能否连续执行，
+  // 不能替用户清掉。若指向 single 而 long 未知，只豁免“长按冲突”，
+  // single 自身为空/不可重复时仍按正常规则收口。
+  if (!isKnownButtonAction(actions.single) && slot === "single") {
+    return { actions, notice: null };
+  }
+  if (!isKnownButtonAction(actions.long) && slot === "long") {
+    return { actions, notice: null };
+  }
+  if (slot === "single" && !isKnownButtonAction(actions.long)) {
+    if (actions.single.type !== "disabled" && actionAllowsRepeat(actions.single)) {
+      return { actions, notice: null };
+    }
+    // 落到下面由 holdRepeatBlockedReason 给出原因并清掉无效值。
+  }
   if (holdRepeatBlockedReason(actions, slot) === null) return { actions, notice: null };
   const next = { ...actions };
   delete next.holdRepeat;
@@ -2375,6 +2431,12 @@ onUnmounted(() => {
       </div>
       <div class="action-sections">
         <p v-if="capabilityNote" class="muted editor-note capability-note">{{ capabilityNote }}</p>
+        <p
+          v-if="selectedAction && !isKnownButtonAction(selectedAction)"
+          class="muted editor-note unsupported-action-note"
+        >
+          {{ t("这个动作来自更新版本：当前版本保留它但不执行。选择下面的任意动作后，再选一次才会替换它；如需使用原动作，请升级无线麦。") }}
+        </p>
         <section v-for="group in SHORTCUT_PRESET_GROUPS" :key="group.label" class="action-section">
           <h4 class="action-section-title">{{ group.label }}</h4>
           <div class="preset-grid">
@@ -2801,7 +2863,7 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
-    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @select="selectApp" />
+    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false; unsupportedReplaceArmed = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
 </template>

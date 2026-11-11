@@ -2477,8 +2477,37 @@ export function openAppLabel(name: string): string {
     : t("打开{name}", { name: trimmed });
 }
 
+// 用 Record 而不是 Set<string>：新增 ButtonAction 类型时 TypeScript 会在这里
+// 报缺少键，避免运行时把它误判成“来自更新版本”（2026-11-11 评审）。
+const KNOWN_ACTION_TYPES: Record<ButtonAction["type"], true> = {
+  disabled: true,
+  shortcut: true,
+  scroll: true,
+  mouse_click: true,
+  mouse_move: true,
+  open_app: true,
+  focus_input: true,
+  run_macro: true,
+  open_common_phrases: true,
+  app_switcher: true,
+  page_up: true,
+  page_down: true,
+  scroll_to_top: true,
+  scroll_to_bottom: true,
+};
+
+/**
+ * 运行时类型守卫：更高版本写入的未知动作在 TS 类型上不存在，但会原样
+ * 出现在配置里（2026-11-11 前向兼容）。不能按 `disabled` 处理，也不要求
+ * 用户理解内部类型名。
+ */
+export function isKnownButtonAction(action: ButtonAction): boolean {
+  return Object.prototype.hasOwnProperty.call(KNOWN_ACTION_TYPES, action.type);
+}
+
 export function actionSummary(action: ButtonAction | undefined): string {
   if (!action || action.type === "disabled") return t("未设置");
+  if (!isKnownButtonAction(action)) return t("不支持的动作（来自更新版本）");
   if (action.type === "focus_input") return t("聚焦输入框");
   // 与预设芯片、按键格保持一致：只显示实际组合键；动作名「切换应用」
   // 只保留在悬停提示和文档里。

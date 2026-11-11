@@ -5,10 +5,10 @@ use sayall_core::{
     PORTABLE_MAX_BYTES,
 };
 use sayall_windows::send_input::{
-    ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
+    ButtonMappings, ButtonTrigger, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
 };
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -414,22 +414,29 @@ impl SettingsStore {
             }
             Err(error) => return Err(format!("读取按键映射失败：{error}")),
         };
-        // 文件由更高版本写入：本版本拒绝加载（normalized 报错），但先把原始
-        // 内容留一份旁证，避免用户在本版本里保存时覆盖掉更高版本的数据
-        // （2026-10-05 评审发现 3）。
+        // 文件由更高版本写入：现在可以前向兼容读取（未知动作/字段原样保留），
+        // 但仍先留一份按结构版本命名的旁证，避免未来出现无法解析的扩展时
+        // 用户在本版本保存后丢掉更高版本的数据（2026-10-05 评审发现 3；
+        // 2026-11-11 用户反馈后改为可读不拒载）。
         if let Some(version) = button_mappings_schema_version(&contents) {
             if version > u64::from(BUTTON_MAPPINGS_SCHEMA_VERSION) {
-                let backup = path.with_extension(format!("json.v{version}.bak"));
-                if !backup.exists() {
-                    let _ = fs::copy(&path, &backup);
+                match ensure_versioned_button_mappings_backup(&path, version) {
+                    Ok(backup) => sayall_windows::gatt_note(format!(
+                        "button_mappings schema_version={version} supported_max={BUTTON_MAPPINGS_SCHEMA_VERSION} action=backup result=passed backup_file={}",
+                        backup
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("unknown")
+                    )),
+                    Err(error) => {
+                        // 不阻断加载：保存路径会再次尝试备份，失败则拒绝覆盖。
+                        // 不记录 error 正文（可能包含用户目录路径）。
+                        let _ = error;
+                        sayall_windows::gatt_note(format!(
+                            "button_mappings schema_version={version} supported_max={BUTTON_MAPPINGS_SCHEMA_VERSION} action=backup result=failed reason=backup_failed"
+                        ));
+                    }
                 }
-                sayall_windows::gatt_note(format!(
-                    "button_mappings schema_version={version} supported_max={BUTTON_MAPPINGS_SCHEMA_VERSION} action=backup backup_file={}",
-                    backup
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("unknown")
-                ));
             }
         }
         serde_json::from_str::<ButtonMappings>(&contents)
@@ -442,18 +449,108 @@ impl SettingsStore {
             .map_err(|error| format!("按键映射无效：{error}"))
     }
 
+    /// 普通保存：若磁盘上的现有文件确实无法读取（损坏、非 UTF-8 或当前
+    /// 字段校验失败），拒绝覆盖并保留时间戳备份。更高结构版本不再属于
+    /// 此列——它走前向兼容读取，保存时保留未知内容与版本号
+    /// （2026-11-11 用户反馈）。
     pub fn save_button_mappings(&self, mappings: ButtonMappings) -> Result<ButtonMappings, String> {
+        self.save_button_mappings_inner(mappings, false)
+    }
+
+    /// 显式「恢复默认 / 导入配置」保存：允许替换读不出的现有文件，
+    /// 但覆盖前同样必须留下时间戳备份。
+    pub fn replace_button_mappings(
+        &self,
+        mappings: ButtonMappings,
+    ) -> Result<ButtonMappings, String> {
+        self.save_button_mappings_inner(mappings, true)
+    }
+
+    fn save_button_mappings_inner(
+        &self,
+        mappings: ButtonMappings,
+        allow_replace_unreadable: bool,
+    ) -> Result<ButtonMappings, String> {
         let _guard = lock(&self.access);
-        let mappings = mappings
+        let mut mappings = mappings
             .normalized()
             .map_err(|error| format!("按键映射无效：{error}"))?;
         let path = self.button_mappings_path();
+        let mut existing_version = None;
+        let mut existing_mappings = None;
+        // 更高结构版本必须在写入前确认版本旁证存在。加载时的备份一次
+        // 可能因权限/磁盘失败而没写成；不能依赖那一次结果（2026-11-11 评审）。
+        if let Ok(contents) = fs::read(&path) {
+            if let Ok(text) = std::str::from_utf8(&contents) {
+                if let Ok(parsed) = serde_json::from_str::<ButtonMappings>(text) {
+                    existing_mappings = Some(parsed);
+                }
+                if let Some(version) = button_mappings_schema_version(text) {
+                    existing_version = Some(version);
+                    if version > u64::from(BUTTON_MAPPINGS_SCHEMA_VERSION) {
+                        match ensure_versioned_button_mappings_backup(&path, version) {
+                            Ok(backup) => sayall_windows::gatt_note(format!(
+                                "button_mappings schema_version={version} supported_max={BUTTON_MAPPINGS_SCHEMA_VERSION} action=backup result=passed backup_file={} phase=before_save",
+                                backup
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("unknown")
+                            )),
+                            Err(_) => {
+                                sayall_windows::gatt_note(format!(
+                                    "button_mappings schema_version={version} supported_max={BUTTON_MAPPINGS_SCHEMA_VERSION} action=backup result=failed reason=backup_failed phase=before_save"
+                                ));
+                                return Err(
+                                    "无法保留更高版本按键映射的备份，已停止保存以免覆盖。请检查磁盘空间或权限后重试。"
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 普通保存绝不把磁盘上的更高结构版本降级；显式「恢复默认/导入」
+        // 仍按用户选择写入（例如 reset 写当前版本）。
+        if !allow_replace_unreadable {
+            if let Some(version) = existing_version {
+                if version > u64::from(mappings.schema_version) {
+                    mappings.schema_version = version.min(u64::from(u32::MAX)) as u32;
+                }
+            }
+            // 普通保存不信任调用方完整携带未知字段：把磁盘上已有的
+            // 前向兼容数据合并回来，避免 IPC/未来调用方漏字段时丢配置。
+            if let Some(existing) = existing_mappings.as_ref() {
+                merge_forward_compatible_extras(&mut mappings, existing);
+            }
+        }
+        if let ExistingButtonMappings::Unreadable { reason } =
+            inspect_existing_button_mappings(&path)?
+        {
+            let backup = backup_unreadable_button_mappings(&path)?;
+            let backup_name = backup
+                .as_deref()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or("none");
+            sayall_windows::gatt_note(format!(
+                "shortcut_settings feature=button_mapping action=preserve_unreadable phase=completed result=backed_up error_domain=settings error_code=unreadable_existing_file reason={reason} backup_file={backup_name} replace_allowed={allow_replace_unreadable}"
+            ));
+            if !allow_replace_unreadable {
+                return Err(match backup {
+                    Some(_) => unreadable_button_mappings_message(backup_name),
+                    None => {
+                        "读取现有按键映射失败，已停止保存以免覆盖。请重试或升级无线麦。".to_owned()
+                    }
+                });
+            }
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
         }
         let contents = serde_json::to_vec_pretty(&mappings)
             .map_err(|error| format!("序列化按键映射失败：{error}"))?;
-        fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))?;
+        write_button_mappings_atomically(&path, &contents)?;
         Ok(mappings)
     }
 
@@ -497,8 +594,9 @@ impl SettingsStore {
             ));
         }
         // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
-        // 旧导出（无显式开关）走与本地加载相同的迁移。
-        self.save_button_mappings(
+        // 旧导出（无显式开关）走与本地加载相同的迁移。导入是用户显式覆盖，
+        // 允许替换读不出的现有文件，但覆盖前同样留时间戳备份。
+        self.replace_button_mappings(
             configuration
                 .button_mappings
                 .migrate_legacy_hold_repeat()
@@ -821,6 +919,205 @@ fn parse_settings(contents: &str) -> Result<AppSettings, String> {
 
 fn serialize_settings(settings: &AppSettings) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化应用设置失败：{error}"))
+}
+
+/// 磁盘上现有按键映射文件对当前版本是否可读。
+enum ExistingButtonMappings {
+    Missing,
+    Readable,
+    Unreadable { reason: &'static str },
+}
+
+/// 把磁盘上已有的前向兼容数据合并进本次保存的映射。
+///
+/// 只补调用方缺失的未知字段；动作已被用户替换时不复制旧动作的 extras，
+/// 避免旧字段粘到新动作上。
+fn merge_forward_compatible_extras(target: &mut ButtonMappings, existing: &ButtonMappings) {
+    for (key, value) in &existing.extra {
+        target
+            .extra
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    for (button, existing_actions) in &existing.actions {
+        let Some(target_actions) = target.actions.get_mut(button) else {
+            // 按键已从配置中删除：不要复活它。
+            continue;
+        };
+        for (key, value) in &existing_actions.extra {
+            target_actions
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        for (trigger, existing_action) in [
+            (ButtonTrigger::Single, &existing_actions.single),
+            (ButtonTrigger::Double, &existing_actions.double),
+            (ButtonTrigger::Long, &existing_actions.long),
+        ] {
+            if target_actions.trigger(trigger) != existing_action {
+                continue;
+            }
+            let Some(extras) = existing_actions.action_extras.get(&trigger) else {
+                continue;
+            };
+            let target_extras = target_actions.action_extras.entry(trigger).or_default();
+            for (key, value) in extras {
+                target_extras
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+}
+
+/// 确保 `button-mappings.json.vN.bak` 与当前文件内容一致。
+///
+/// 用原子写入而不是 `fs::copy` + `exists()`：后者在复制中途崩溃或权限失败时
+/// 会留下不完整备份，且之后永远不会修复（2026-11-11 评审）。
+fn ensure_versioned_button_mappings_backup(path: &Path, version: u64) -> Result<PathBuf, String> {
+    let contents = fs::read(path).map_err(|error| format!("读取按键映射失败：{error}"))?;
+    let backup = path.with_extension(format!("json.v{version}.bak"));
+    if fs::read(&backup)
+        .map(|existing| existing == contents)
+        .unwrap_or(false)
+    {
+        return Ok(backup);
+    }
+    write_bytes_atomically(&backup, &contents, "保留更高版本按键映射备份失败")?;
+    Ok(backup)
+}
+
+/// 保存前检查现有文件：确实读不出（损坏、非 UTF-8、校验失败）时返回
+/// `Unreadable`，调用方据此拒绝普通覆盖。更高结构版本现在可以前向兼容
+/// 读取，不再属于不可读；空文件视为缺失（没有内容可丢）。
+fn inspect_existing_button_mappings(path: &Path) -> Result<ExistingButtonMappings, String> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(ExistingButtonMappings::Missing)
+        }
+        Err(error) => return Err(format!("读取现有按键映射失败，已停止保存以免覆盖：{error}")),
+    };
+    if contents.iter().all(u8::is_ascii_whitespace) {
+        return Ok(ExistingButtonMappings::Missing);
+    }
+    let Ok(text) = std::str::from_utf8(&contents) else {
+        return Ok(ExistingButtonMappings::Unreadable {
+            reason: "invalid_utf8",
+        });
+    };
+    // 更高结构版本现在可以前向兼容读取（未知动作/字段原样保留），
+    // 不再算“读不出”；只有 JSON 损坏或当前字段校验失败才阻止覆盖。
+    let mappings = match serde_json::from_str::<ButtonMappings>(text) {
+        Ok(mappings) => mappings,
+        Err(_) => {
+            return Ok(ExistingButtonMappings::Unreadable {
+                reason: "parse_failed",
+            })
+        }
+    };
+    match mappings
+        .migrate_legacy_hold_repeat()
+        .migrate_preset_focus_profiles()
+        .normalized()
+    {
+        Ok(_) => Ok(ExistingButtonMappings::Readable),
+        Err(_) => Ok(ExistingButtonMappings::Unreadable {
+            reason: "validation_failed",
+        }),
+    }
+}
+
+/// 覆盖读不出的现有文件前，必须留下一份时间戳旁证。相同内容只保留一份
+/// （避免用户在保存失败后反复操作时无限堆积备份）。源文件在检查后消失
+/// 时返回 `None`（没有内容可备份），其余失败一律阻止覆盖。
+fn backup_unreadable_button_mappings(path: &Path) -> Result<Option<PathBuf>, String> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("保留按键映射备份失败，已停止保存以免覆盖：{error}")),
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("button-mappings.json");
+    let prefix = format!("{name}.unreadable-");
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.filter_map(|entry| entry.ok()) {
+                let candidate = entry.path();
+                let matching = candidate
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with(&prefix));
+                if matching
+                    && fs::read(&candidate)
+                        .map(|existing| existing == contents)
+                        .unwrap_or(false)
+                {
+                    return Ok(Some(candidate));
+                }
+            }
+        }
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    for attempt in 0..1000 {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let backup = path.with_file_name(format!("{name}.unreadable-{millis}{suffix}.bak"));
+        if backup.exists() {
+            continue;
+        }
+        write_bytes_atomically(
+            &backup,
+            &contents,
+            "保留按键映射备份失败，已停止保存以免覆盖",
+        )?;
+        return Ok(Some(backup));
+    }
+    Err("保留按键映射备份失败：备份文件名冲突".to_owned())
+}
+
+fn unreadable_button_mappings_message(backup_name: &str) -> String {
+    format!(
+        "按键配置文件无法读取，当前版本不会覆盖它。已保留备份（{backup_name}）；请恢复默认或导入配置后再保存。"
+    )
+}
+
+/// 映射文件用临时文件 + 原子替换写入：升级/退出在写入中途终止进程时，
+/// 旧文件仍完整，不会留下被截断的 JSON。
+fn write_button_mappings_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_bytes_atomically(path, contents, "保存按键映射失败")
+}
+
+fn write_bytes_atomically(path: &Path, contents: &[u8], operation: &str) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("button-mappings.json");
+    let temporary = path.with_file_name(format!("{name}.tmp"));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("{operation}：{error}"));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("{operation}：{error}"));
+    }
+    Ok(())
 }
 
 /// 按键映射文件里的结构版本号（缺省或非法均为 None）。
@@ -1451,6 +1748,7 @@ mod tests {
                 },
                 hold_repeat: None,
                 ok_context_click: false,
+                ..ButtonActions::default()
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();
@@ -1499,6 +1797,7 @@ mod tests {
                 long: ButtonAction::Disabled,
                 hold_repeat: None,
                 ok_context_click: false,
+                ..ButtonActions::default()
             },
         );
 
@@ -1911,28 +2210,305 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// 更高结构版本不再拒载：已知动作可用，未知动作与顶层字段在
+    /// load → save 后仍原样保留，版本号不降级（2026-11-11 用户反馈）。
     #[test]
-    fn load_backs_up_button_mappings_from_a_newer_schema() {
-        let base = std::env::temp_dir().join("sayall-button-mappings-newer-schema");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+    fn load_and_save_preserve_newer_button_mappings() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::ButtonAction;
+
+        let base = mapping_test_dir("newer-schema-forward");
         let store = SettingsStore::new(base.join("app-settings.json"));
         let path = store.button_mappings_path();
-        let newer = r#"{"schemaVersion":9,"enabled":true,"actions":{"up":{"single":{"type":"shortcut","chord":{"keys":["delete"]}},"double":{"type":"disabled"},"long":{"type":"disabled"}}}}"#;
+        let newer = r#"{"schemaVersion":9,"enabled":true,"actions":{"up":{"single":{"type":"future_action","foo":1},"double":{"type":"disabled"},"long":{"type":"disabled"}},"down":{"single":{"type":"shortcut","chord":{"keys":["delete"]},"futureActionField":{"nested":true}},"double":{"type":"disabled"},"long":{"type":"disabled"}}},"futureTopLevel":{"nested":true}}"#;
         std::fs::write(&path, newer).unwrap();
 
-        assert!(
-            store.load_button_mappings().is_err(),
-            "更高版本必须拒绝加载（不降级）"
+        let loaded = store
+            .load_button_mappings()
+            .expect("更高版本必须前向兼容读取");
+        assert_eq!(loaded.schema_version, 9);
+        assert!(matches!(
+            loaded.actions(RemoteButton::Up).single,
+            ButtonAction::Unsupported(_)
+        ));
+        assert_eq!(
+            loaded.actions(RemoteButton::Down).single,
+            ButtonAction::Shortcut {
+                chord: KeyChord {
+                    keys: vec![KeyCode::Delete]
+                }
+            }
         );
-        // 原始内容必须先留旁证：本版本随后保存也不至于覆盖更高版本的数据。
+        // 原始内容仍留一份版本旁证。
         let backup = path.with_extension("json.v9.bak");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), newer);
 
-        // 重复加载幂等：旁证不被重写，原文件保持不动。
-        assert!(store.load_button_mappings().is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+        // 正常保存（相当于界面把读到的映射写回）不得丢掉未知动作/字段。
+        store.save_button_mappings(loaded).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["schemaVersion"].as_u64(), Some(9));
+        assert_eq!(
+            saved["actions"]["up"]["single"]["type"].as_str(),
+            Some("future_action")
+        );
+        assert_eq!(saved["actions"]["up"]["single"]["foo"].as_u64(), Some(1));
+        assert_eq!(saved["futureTopLevel"]["nested"].as_bool(), Some(true));
+        assert_eq!(
+            saved["actions"]["down"]["single"]["type"].as_str(),
+            Some("shortcut")
+        );
+        assert_eq!(
+            saved["actions"]["down"]["single"]["futureActionField"]["nested"].as_bool(),
+            Some(true)
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn mapping_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sayall-test-button-mappings-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn unreadable_backup(path: &Path) -> Option<PathBuf> {
+        let name = path.file_name()?.to_str()?;
+        std::fs::read_dir(path.parent()?)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with(&format!("{name}.unreadable-")))
+            })
+    }
+
+    /// 普通保存时调用方漏带未知字段（例如未来 IPC 客户端）也不能丢磁盘上
+    /// 已有的前向兼容数据；动作被替换时则不能把旧 extras 粘到新动作上。
+    #[test]
+    fn save_merges_existing_forward_compatible_extras() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::ButtonAction;
+
+        let base = mapping_test_dir("save-merge-extras");
+        let store = SettingsStore::new(base.join("app-settings.json"));
+        let path = store.button_mappings_path();
+        let original = r#"{"schemaVersion":9,"enabled":true,"actions":{"up":{"single":{"type":"future_action","nested":{"keep":true}},"double":{"type":"disabled"},"long":{"type":"disabled"}},"down":{"single":{"type":"shortcut","chord":{"keys":["delete"]},"futureActionField":1},"double":{"type":"disabled"},"long":{"type":"disabled"}},"left":{"single":{"type":"shortcut","chord":{"keys":["escape"]},"oldLeftField":true},"double":{"type":"disabled"},"long":{"type":"disabled"}}},"futureTopLevel":"keep"}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut incoming = store.load_button_mappings().unwrap();
+        incoming.extra.clear();
+        for actions in incoming.actions.values_mut() {
+            actions.extra.clear();
+            actions.action_extras.clear();
+        }
+        // 模拟用户把 left 的单击动作改掉：旧动作 extras 不能跟过来。
+        incoming
+            .actions
+            .get_mut(&RemoteButton::Left)
+            .unwrap()
+            .single = ButtonAction::Shortcut {
+            chord: KeyChord {
+                keys: vec![KeyCode::Enter],
+            },
+        };
+        store.save_button_mappings(incoming).unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["schemaVersion"].as_u64(), Some(9));
+        assert_eq!(saved["futureTopLevel"].as_str(), Some("keep"));
+        assert_eq!(
+            saved["actions"]["up"]["single"]["nested"]["keep"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            saved["actions"]["down"]["single"]["futureActionField"].as_u64(),
+            Some(1)
+        );
+        assert!(saved["actions"]["left"]["single"]
+            .get("oldLeftField")
+            .is_none());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 更高版本文件的版本备份不能只依赖加载时那一次复制：保存前必须再确认
+    /// 一次（加载时可能因权限/磁盘暂时失败），否则默认值保存会丢掉原文件。
+    #[test]
+    fn save_ensures_version_backup_even_without_load() {
+        let base = mapping_test_dir("save-version-backup");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let path = store.button_mappings_path();
+        let newer = r#"{"schemaVersion":9,"enabled":true,"actions":{"up":{"single":{"type":"future_action"},"double":{"type":"disabled"},"long":{"type":"disabled"}}}}"#;
+        std::fs::write(&path, newer).unwrap();
+        let backup = path.with_extension("json.v9.bak");
+        let _ = std::fs::remove_file(&backup);
+
+        store
+            .save_button_mappings(ButtonMappings::default())
+            .expect("保存前必须能补出版本备份");
+
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), newer);
+        let saved: ButtonMappings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.schema_version, 9, "普通保存不得把版本降级");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 损坏或校验失败的映射文件同样不能被默认值静默覆盖；先留时间戳备份，
+    /// 再拒绝普通保存。显式「恢复默认 / 导入配置」走 force 路径。
+    #[test]
+    fn save_refuses_to_overwrite_corrupt_button_mappings_and_backs_it_up() {
+        let base = mapping_test_dir("save-corrupt");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let path = store.button_mappings_path();
+        let corrupt = "{ this is not json";
+        std::fs::write(&path, corrupt).unwrap();
+
+        assert!(store.load_button_mappings().is_err());
+        assert!(store
+            .save_button_mappings(ButtonMappings::default())
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+        let backup = unreadable_backup(&path).expect("损坏文件必须先留时间戳备份");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), corrupt);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 非 UTF-8 文件同样不能覆盖；先留备份，再拒绝普通保存。
+    #[test]
+    fn save_refuses_to_overwrite_non_utf8_button_mappings() {
+        let base = mapping_test_dir("save-non-utf8");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let path = store.button_mappings_path();
+        let corrupt = [0xff_u8, 0xfe, 0x00, 0x7b];
+        std::fs::write(&path, corrupt).unwrap();
+
+        assert!(store
+            .save_button_mappings(ButtonMappings::default())
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        let backup = unreadable_backup(&path).expect("非 UTF-8 文件必须先留备份");
+        assert_eq!(std::fs::read(backup).unwrap(), corrupt);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 同一个读不出的文件反复保存失败时只保留一份内容相同的备份，避免用户在
+    /// 按键页反复操作导致备份无限堆积。
+    #[test]
+    fn repeated_failed_saves_reuse_the_same_unreadable_backup() {
+        let base = mapping_test_dir("save-corrupt-twice");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let path = store.button_mappings_path();
+        std::fs::write(&path, "{ still not json").unwrap();
+
+        assert!(store
+            .save_button_mappings(ButtonMappings::default())
+            .is_err());
+        assert!(store
+            .save_button_mappings(ButtonMappings::default())
+            .is_err());
+        let backups = std::fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("button-mappings.json.unreadable-"))
+            })
+            .count();
+        assert_eq!(backups, 1, "内容相同的读不出文件只应留一份备份");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 被截断成空文件时没有内容可丢：按缺失处理，允许正常保存恢复。
+    #[test]
+    fn empty_button_mappings_file_is_treated_as_missing_for_writes() {
+        let base = mapping_test_dir("save-empty");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let path = store.button_mappings_path();
+        std::fs::write(&path, "").unwrap();
+
+        let saved = store
+            .save_button_mappings(ButtonMappings::default())
+            .expect("空文件应允许保存恢复");
+        assert_eq!(saved.schema_version, BUTTON_MAPPINGS_SCHEMA_VERSION);
+        let on_disk: ButtonMappings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.schema_version, BUTTON_MAPPINGS_SCHEMA_VERSION);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 显式重置/导入是用户主动覆盖：允许替换读不出的文件，但同样先留备份。
+    #[test]
+    fn explicit_replace_can_overwrite_unreadable_button_mappings_after_backup() {
+        let base = mapping_test_dir("replace-newer");
+        let store = SettingsStore::new(base.join("settings.json"));
+        let path = store.button_mappings_path();
+        let corrupt = "{ still not json";
+        std::fs::write(&path, corrupt).unwrap();
+        assert!(store.load_button_mappings().is_err());
+
+        store
+            .replace_button_mappings(ButtonMappings::default())
+            .expect("显式重置必须能恢复可用状态");
+        let saved: ButtonMappings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.schema_version, BUTTON_MAPPINGS_SCHEMA_VERSION);
+        let backup = unreadable_backup(&path).expect("覆盖前必须留时间戳备份");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), corrupt);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn export_preserves_unknown_actions_and_known_action_extras() {
+        let base = std::env::temp_dir().join("sayall-button-mappings-export-forward");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let store = SettingsStore::new(base.join("app-settings.json"));
+        let mappings: ButtonMappings = serde_json::from_str(
+            r#"{"schemaVersion":9,"enabled":true,"actions":{"up":{"single":{"type":"future_action","nested":{"keep":true}},"double":{"type":"disabled"},"long":{"type":"disabled"}},"down":{"single":{"type":"shortcut","chord":{"keys":["delete"]},"futureActionField":1},"double":{"type":"disabled"},"long":{"type":"disabled"}}},"futureTopLevel":"keep"}"#,
+        )
+        .unwrap();
+
+        let target = base.join("export.json");
+        store.export_button_mappings(&target, mappings).unwrap();
+        let exported: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let buttons = &exported["buttonMappings"];
+        assert_eq!(buttons["schemaVersion"].as_u64(), Some(9));
+        assert_eq!(
+            buttons["actions"]["up"]["single"]["type"].as_str(),
+            Some("future_action")
+        );
+        assert_eq!(
+            buttons["actions"]["up"]["single"]["nested"]["keep"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            buttons["actions"]["down"]["single"]["futureActionField"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(buttons["futureTopLevel"].as_str(), Some("keep"));
 
         let _ = std::fs::remove_dir_all(base);
     }

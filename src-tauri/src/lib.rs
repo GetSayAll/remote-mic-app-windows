@@ -3022,7 +3022,9 @@ async fn reset_button_mappings(
     let platform = Arc::clone(&state.platform);
     let result =
         match tauri::async_runtime::spawn_blocking(move || -> Result<ButtonMappings, String> {
-            let saved = settings.save_button_mappings(ButtonMappings::default())?;
+            // 恢复默认是用户显式覆盖：允许替换读不出的现有文件，
+            // 但存储层会先留时间戳备份（2026-11-11 升级丢配置反馈）。
+            let saved = settings.replace_button_mappings(ButtonMappings::default())?;
             platform.set_button_mappings(saved.clone());
             Ok(saved)
         })
@@ -3474,6 +3476,7 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
     let mut mouse_count = 0_usize;
     let mut macro_count = 0_usize;
     let mut disabled_count = 0_usize;
+    let mut unsupported_count = 0_usize;
     for actions in mappings.actions.values() {
         for action in [&actions.single, &actions.double, &actions.long] {
             match action {
@@ -3492,12 +3495,14 @@ fn button_mapping_log_summary(mappings: &ButtonMappings) -> String {
                 }
                 ButtonAction::RunMacro { .. } => macro_count += 1,
                 ButtonAction::Disabled => disabled_count += 1,
+                ButtonAction::Unsupported(_) => unsupported_count += 1,
             }
         }
     }
     format!(
-        "enabled={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} app_switcher_count={app_switcher_count} scroll_count={scroll_count} page_scroll_count={page_scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count}",
+        "enabled={} schema_version={} button_count={} shortcut_count={shortcut_count} open_app_count={open_app_count} focus_input_count={focus_input_count} common_phrases_count={common_phrases_count} app_switcher_count={app_switcher_count} scroll_count={scroll_count} page_scroll_count={page_scroll_count} mouse_count={mouse_count} macro_count={macro_count} disabled_cell_count={disabled_count} unsupported_count={unsupported_count}",
         mappings.enabled,
+        mappings.schema_version,
         mappings.actions.len()
     )
 }
@@ -3567,6 +3572,9 @@ async fn test_button_mapping(
             "「切换应用」需要真实按下绑定的遥控器按键：打开切换器后用方向键选择、按“确定”确认、返回取消"
                 .to_owned(),
         ),
+        ButtonAction::Unsupported(_) => {
+            Err("这个动作来自更新版本，当前版本不支持；请升级无线麦后重试".to_owned())
+        }
         ButtonAction::PageUp
         | ButtonAction::PageDown
         | ButtonAction::ScrollToTop

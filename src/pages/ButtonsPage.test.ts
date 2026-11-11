@@ -1221,6 +1221,146 @@ describe("buttons mapping page", () => {
     });
   });
 
+  it("前向兼容：未知动作不会让「按住时连续执行」被自动清掉", async () => {
+    // 新版本写入的未知动作当前版本不执行，但也不能在用户改同一按键的
+    // 其它格子时把 holdRepeat 一并清掉——那会在保存时丢数据。
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      schemaVersion: 9,
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "future_action", foo: 1 },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+          holdRepeat: "single",
+        },
+      },
+    } as unknown as ButtonMappings);
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    // 编辑双击格，只改双击；单击的未知动作与 holdRepeat 必须原样保留。
+    await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    const backspaceChip = wrapper
+      .find(".mapping-editor")
+      .findAll(".chip")
+      .find((item) => item.text() === "Backspace");
+    await backspaceChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { single?: { type?: string }; holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.single?.type).toBe("future_action");
+    expect(saved.actions.up!.holdRepeat).toBe("single");
+  });
+
+  it("前向兼容：未知动作需要二次选择才会被替换", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      schemaVersion: 9,
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "future_action", foo: 1 },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    } as unknown as ButtonMappings);
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const backspaceChip = () =>
+      wrapper
+        .find(".mapping-editor")
+        .findAll(".chip")
+        .find((item) => item.text() === "Backspace");
+    await backspaceChip()!.trigger("click");
+    expect(saveButtonMappings).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("再次选择任意动作将替换它");
+
+    await backspaceChip()!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as ButtonMappings;
+    expect(saved.actions.up!.single).toEqual({
+      type: "shortcut",
+      chord: { keys: ["backspace"] },
+    });
+  });
+
+  it("前向兼容：未知长按动作不会让单击的 holdRepeat 被自动清掉", async () => {
+    // 更高版本可能新增长按动作。当前版本无法判断它是否与
+    // holdRepeat=single 冲突，必须保留用户已有的选择。
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      schemaVersion: 9,
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["delete"] } },
+          double: { type: "disabled" },
+          long: { type: "future_long_action" },
+          holdRepeat: "single",
+        },
+      },
+    } as unknown as ButtonMappings);
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    const backspaceChip = wrapper
+      .find(".mapping-editor")
+      .findAll(".chip")
+      .find((item) => item.text() === "Backspace");
+    await backspaceChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { long?: { type?: string }; holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.long?.type).toBe("future_long_action");
+    expect(saved.actions.up!.holdRepeat).toBe("single");
+  });
+
+  it("前向兼容：未知长按不能掩盖无效的单击 holdRepeat", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      schemaVersion: 9,
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "disabled" },
+          double: { type: "disabled" },
+          long: { type: "future_long_action" },
+          holdRepeat: "single",
+        },
+      },
+    } as unknown as ButtonMappings);
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    const backspaceChip = wrapper
+      .find(".mapping-editor")
+      .findAll(".chip")
+      .find((item) => item.text() === "Backspace");
+    await backspaceChip!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { holdRepeat?: string }>;
+    };
+    expect(saved.actions.up!.holdRepeat).toBeUndefined();
+  });
+
   it("「按住时连续执行」：所有按键单/长按页显示，组合键置灰，双击页不显示", async () => {
     vi.mocked(getButtonMappings).mockResolvedValueOnce({
       enabled: true,
