@@ -99,6 +99,24 @@ DLL 初始化时由系统弹出「应用程序无法正常启动(0xc0000142)」�
 只读覆盖后的任务文件，两条都稳定通过。覆盖是线程局部的，不修改
 `SystemRoot` 或任何进程级环境变量，并行测试不会互相污染。
 
+## 2026-11-11 追加：`WM_QUERYENDSESSION` 早置位（issue #345）
+
+#345 的日志显示，关机时 helper 先退出，常驻对账在 `SM_SHUTTINGDOWN` 置位前
+就可能醒来并调用 `schtasks /run`。为消掉这最后一个抢跑窗口：
+
+- 主窗口已有 `window_min_size_subclass` 同时处理 `WM_QUERYENDSESSION` /
+  `WM_ENDSESSION`；不新增窗口子类，也不停止对账线程。
+- `WM_QUERYENDSESSION` 置位 `QUERY_END_SESSION`；`WM_ENDSESSION(wParam=FALSE)`
+  （关机被取消）清除它。
+- `system_is_shutting_down()` 先看该标志，再兜底 `SM_SHUTTINGDOWN`；
+  `run_schtasks()` / `schtasks()` / `task_install_elevated()` 的现有拦截立即生效。
+- 新增 `query_end_session_flag_blocks_until_cancelled` 覆盖置位与取消清除。
+
+验证：`cargo test -p sayall-windows-app` passed（210 passed / 2 ignored），
+`cargo test --workspace` passed（sayall-windows 541 / 16 ignored），
+`cargo fmt --all -- --check`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
+真实关机、重启和“取消关机”仍为 `deferred`：需要在安装包上分别执行一次。
+
 ## 隐私检查
 
 本文不包含个人路径、蓝牙地址、HID 路径、语音内容或凭据；进程名与相对代码

@@ -14,6 +14,8 @@
 //! `SCHEDULED_TASK_NAME`。两侧各有一份常量，靠 `--selftest` 与本文件的
 //! 测试分别钉住字面值；改任何一边都要同步另一边。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// 与助手侧 `SCHEDULED_TASK_NAME` 必须逐字符一致。
 pub const SCHEDULED_TASK_NAME: &str = "SayAll RC003 Helper";
 
@@ -575,12 +577,35 @@ pub fn status(enabled: bool) -> TaskStatus {
     }
 }
 
+/// `WM_QUERYENDSESSION` 观测到的关机/注销意图。
+///
+/// 为什么不能只依赖 `SM_SHUTTINGDOWN`：helper 可能在系统置位该指标之前就被
+/// 结束，常驻对账先醒来就会抢跑一次 `schtasks /run`。窗口过程在
+/// `WM_QUERYENDSESSION` 时置位本标志，`run_schtasks` 就能更早拒绝子进程。
+/// 关机被取消时由 `WM_ENDSESSION(wParam=FALSE)` 清除，否则对账会一直被误拦。
+static QUERY_END_SESSION: AtomicBool = AtomicBool::new(false);
+
+/// 窗口过程收到 `WM_QUERYENDSESSION` 时调用。
+pub(crate) fn note_query_end_session() {
+    QUERY_END_SESSION.store(true, Ordering::Release);
+}
+
+/// 窗口过程收到 `WM_ENDSESSION(wParam=FALSE)`（关机被取消）时调用。
+pub(crate) fn clear_query_end_session() {
+    QUERY_END_SESSION.store(false, Ordering::Release);
+}
+
 /// 当前会话是否正在关机 / 重启。
 ///
-/// 关机阶段系统会拒绝新进程初始化，`schtasks.exe` 起不来时由系统弹出
-/// 「应用程序无法正常启动(0xc0000142)」错误框；每个框都会拖住关机。任何
-/// 后台线程（如常驻对账）都必须先问这里，不能再尝试拉起子进程。
+/// 先看窗口过程观测到的 `WM_QUERYENDSESSION`，再兜底系统指标
+/// `SM_SHUTTINGDOWN`。关机阶段系统会拒绝新进程初始化，`schtasks.exe`
+/// 起不来时由系统弹出「应用程序无法正常启动(0xc0000142)」错误框；每个框
+/// 都会拖住关机。任何后台线程（如常驻对账）都必须先问这里，不能再尝试
+/// 拉起子进程。
 fn system_is_shutting_down() -> bool {
+    if QUERY_END_SESSION.load(Ordering::Acquire) {
+        return true;
+    }
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
     // SAFETY: GetSystemMetrics 只读取当前会话的系统指标，无副作用。
     unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
@@ -872,5 +897,17 @@ mod tests {
     fn status_reports_not_installed_when_task_file_is_missing() {
         let _guard = TaskFileGuard::new("missing");
         assert!(!status(false).installed);
+    }
+
+    #[test]
+    fn query_end_session_flag_blocks_until_cancelled() {
+        // 窗口过程在 WM_QUERYENDSESSION 置位后，run_schtasks 必须立即拒绝；
+        // 关机被取消（WM_ENDSESSION false）后要恢复，否则对账会一直被误拦。
+        clear_query_end_session();
+        assert!(!system_is_shutting_down());
+        note_query_end_session();
+        assert!(system_is_shutting_down());
+        clear_query_end_session();
+        assert!(!system_is_shutting_down());
     }
 }
