@@ -58,10 +58,8 @@ export function mergeApplications(
 /**
  * 列表来源：
  * 1. 用户添加的 APP（`applications`，按添加顺序）。
- * 2. 有显式聚焦档案的内置预设（2026-11-09 审计：本机已有网易云音乐一条）。
- *
- * 预设没有 `applications` 条目，但档案一旦存在就必须可见可编辑；否则移除
- * 按键页编辑器后，它会变成隐藏配置。没有档案的预设仍不进入列表。
+ * 2. 所有已安装的内置预设；预设自带默认聚焦与翻页，需要显示「预置可用」。
+ *    未安装但已有显式档案或被导航指定的预设仍保留，便于清理旧配置。
  */
 export function buildAppRows(
   applications: readonly CustomAppPick[],
@@ -93,7 +91,8 @@ export function buildAppRows(
   }
   for (const preset of presetApps) {
     const key = keyOf(preset.id);
-    if (seen.has(key) || (!profileKeys.has(key) && !extras.has(key))) continue;
+    if (seen.has(key)) continue;
+    if (!preset.installed && !profileKeys.has(key) && !extras.has(key)) continue;
     seen.add(key);
     rows.push({
       target: preset.id,

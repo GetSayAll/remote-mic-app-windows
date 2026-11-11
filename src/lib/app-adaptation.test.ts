@@ -38,7 +38,7 @@ function mappings(overrides: Partial<ButtonMappings> = {}): ButtonMappings {
 }
 
 describe("app adaptation rows", () => {
-  it("lists added apps first, then only presets with an explicit profile", () => {
+  it("lists added apps first, then all installed presets", () => {
     const rows = buildAppRows(
       [
         { name: "Cursor", path: "C:\\Apps\\Cursor.exe" },
@@ -54,29 +54,34 @@ describe("app adaptation rows", () => {
     expect(rows.map((row) => row.target)).toEqual([
       "C:\\Apps\\Cursor.exe",
       "shell:AppsFolder\\Tencent.WeChat",
+      "wechat",
       "netease_music",
       "chrome",
     ]);
-    // 没有显式档案的预设不进入列表。
-    expect(rows.some((row) => row.target === "wechat")).toBe(false);
     expect(rows[2]).toMatchObject({
+      preset: true,
+      name: "微信",
+      path: "C:\\Apps\\Weixin.exe",
+    });
+    expect(rows[3]).toMatchObject({
       preset: true,
       name: "网易云音乐",
       path: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
     });
   });
 
-  it("can expose one preset that the caller navigated to", () => {
-    const rows = buildAppRows([], {}, PRESETS, ["chrome"]);
-    expect(rows).toEqual([
-      {
-        target: "chrome",
-        name: "Chrome 浏览器",
-        path: "C:\\Program Files\\Chrome\\chrome.exe",
-        preset: true,
-        installed: true,
-      },
+  it("lists installed presets and keeps a navigated uninstalled preset", () => {
+    const rows = buildAppRows([], {}, [
+      ...PRESETS,
+      { id: "edge", name: "Edge", installed: false, path: "C:\\Edge.exe" },
+    ], ["edge"]);
+    expect(rows.map((row) => row.target)).toEqual([
+      "wechat",
+      "netease_music",
+      "chrome",
+      "edge",
     ]);
+    expect(rows.at(-1)).toMatchObject({ preset: true, installed: false });
   });
 
   it("deduplicates added apps by case-insensitive path and keeps first name", () => {
@@ -89,7 +94,7 @@ describe("app adaptation rows", () => {
       PRESETS,
     );
 
-    expect(rows).toHaveLength(1);
+    expect(rows.filter((row) => !row.preset)).toHaveLength(1);
     expect(rows[0].name).toBe("Cursor");
   });
 

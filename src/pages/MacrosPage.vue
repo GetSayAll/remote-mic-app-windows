@@ -1232,7 +1232,10 @@ watch(
 <template>
   <div class="macros-page">
     <div class="page-header">
-      <h1>{{ tPage("组合动作") }}</h1>
+      <div class="macros-heading-row">
+        <h1>{{ tPage("组合动作") }}</h1>
+        <span class="count-badge">{{ definitions.length }}</span>
+      </div>
       <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>
 
@@ -1248,10 +1251,6 @@ watch(
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
       <aside class="library-pane">
-        <div class="library-title-row">
-          <span class="library-title">{{ t("我的组合动作") }}</span>
-          <span class="count-badge">{{ definitions.length }}</span>
-        </div>
         <input
           v-model="search"
           class="search-input"
@@ -1951,23 +1950,20 @@ watch(
   gap: 10px;
   min-height: 0;
 }
-.library-title-row {
+.macros-heading-row {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
 }
-.library-title {
-  font-size: 16px;
-  font-weight: 600;
-}
 .count-badge {
-  margin-left: auto;
+  margin-bottom: 3px;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
   color: var(--text-secondary);
   background: var(--pending-surface);
   border-radius: 99px;
-  padding: 1px 8px;
+  padding: 3px 8px;
 }
 .search-input,
 .text-input {

@@ -30,6 +30,7 @@ import {
   effectiveAppProfile,
   findAppBindings,
   findMacroReferences,
+  focusStrategyLabel,
   mergeApplications,
   nextSelectedTarget,
   profileForTarget,
@@ -94,6 +95,13 @@ const fallbackProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
   return row?.preset ? presetFocusDefault(row.target, true) : null;
 });
+const selectedIsPreset = computed(() => Boolean(selectedRow.value?.preset));
+const presetFocusLabel = computed(() => {
+  const row = selectedRow.value;
+  if (!row) return "";
+  const profile = effectiveAppProfile(row, mappings.value.focusProfiles);
+  return profile ? focusStrategyLabel(profile.strategy) : t("只打开 APP");
+});
 /** 没有真实路径的预设只剩产品默认值，用「恢复默认」语义；有路径的按普通 APP 展示。 */
 function isPresetPlaceholder(row: AppAdaptationRow | null): boolean {
   return Boolean(row?.preset && !row.path);
@@ -135,8 +143,9 @@ function selectRow(target: string): void {
   selectedTarget.value = target;
 }
 
-/** 列表摘要对齐 Mac：短聚焦名 + 翻页状态。 */
+/** 列表摘要：预设整体预置可用；自定义 APP 显示短聚焦名 + 翻页状态。 */
 function rowStatus(row: AppAdaptationRow): string {
+  if (row.preset) return t("预置可用");
   const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
   const scroll = scrollRegionForTarget(mappings.value.scrollRegions, row.target)
     ? t("已学习")
@@ -468,11 +477,31 @@ onUnmounted(() => {
           {{ t("应用未找到，请重新添加。") }}
         </p>
 
-        <p class="scope-note">
+        <p v-if="!selectedIsPreset" class="scope-note">
           {{ t("输入框聚焦和上下翻页按 APP 单独设置：只要该 APP 在前台就能用，与「打开 App」动作无关。") }}
         </p>
 
+        <section v-if="selectedIsPreset" class="section-card preset-card">
+          <div class="section-head">
+            <h3>{{ t("预置能力") }}</h3>
+            <span class="scroll-status learned">{{ t("预置可用") }}</span>
+            <span class="spacer"></span>
+          </div>
+          <div class="preset-status-row">
+            <span class="preset-status-label">{{ t("聚焦方式") }}</span>
+            <span class="preset-status-value">{{ presetFocusLabel }}</span>
+            <span class="preset-badge">{{ t("预置可用") }}</span>
+          </div>
+          <div class="preset-status-row">
+            <span class="preset-status-label">{{ t("翻页") }}</span>
+            <span class="preset-status-value">{{ t("上下翻页 · 滚到两端") }}</span>
+            <span class="preset-badge">{{ t("预置可用") }}</span>
+          </div>
+          <p class="hint">{{ t("预置应用已内置自动聚焦与翻页，无需学习或配置。") }}</p>
+        </section>
+
         <AppFocusProfileEditor
+          v-if="!selectedIsPreset"
           :target="selectedRow.target"
           :profile="selectedProfile"
           :fallback="fallbackProfile"
@@ -481,7 +510,7 @@ onUnmounted(() => {
           @notice="showNotice"
         />
 
-        <section class="section-card scroll-card">
+        <section v-if="!selectedIsPreset" class="section-card scroll-card">
           <div class="section-head">
             <h3>{{ t("滚动区域") }}</h3>
             <span class="scroll-status" :class="{ learned: selectedScrollRegion }">
@@ -558,7 +587,7 @@ onUnmounted(() => {
             <span class="spacer"></span>
           </div>
           <p v-if="!bindings.length" class="hint">
-            {{ t("还没有按键绑定这个 APP，可在按键页的“打开应用”里选择它。") }}
+            {{ t("还没有按键绑定这个 APP，可在按键页的“打开 APP”里选择它。") }}
           </p>
           <div v-else class="binding-list">
             <button
@@ -569,21 +598,23 @@ onUnmounted(() => {
               @click="goToBinding(binding.button, binding.trigger)"
             >
               <span class="binding-key">{{ buttonLabel(binding.button) }} · {{ buttonTriggerLabel(binding.trigger) }}</span>
-              <span class="binding-action">{{ t("打开应用") }}</span>
+              <span class="binding-action">{{ t("打开 APP") }}</span>
               <span class="spacer"></span>
               <span class="binding-go">{{ t("去按键页") }}</span>
             </button>
           </div>
 
-          <div class="section-divider" aria-hidden="true"></div>
-          <div class="delete-row">
-            <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
-            <template v-else>
-              <button class="danger-link" type="button" :disabled="saving" @click="confirmDelete = true">
-                {{ isPresetPlaceholder(selectedRow) ? t("恢复默认聚焦方式") : t("删除这个 APP 的适配") }}
-              </button>
-            </template>
-          </div>
+          <template v-if="!selectedIsPreset">
+            <div class="section-divider" aria-hidden="true"></div>
+            <div class="delete-row">
+              <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
+              <template v-else>
+                <button class="danger-link" type="button" :disabled="saving" @click="confirmDelete = true">
+                  {{ t("删除这个 APP 的适配") }}
+                </button>
+              </template>
+            </div>
+          </template>
         </section>
       </section>
     </div>
@@ -920,6 +951,38 @@ onUnmounted(() => {
 }
 .scroll-status.learned {
   color: var(--success-text);
+}
+.preset-card {
+  display: grid;
+  gap: 8px;
+}
+.preset-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+.preset-status-label {
+  min-width: 64px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.preset-status-value {
+  flex: 1 1 auto;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.preset-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-surface);
+  color: var(--success-text);
+  font-size: 11px;
+  font-weight: 600;
 }
 .scroll-learn-row,
 .scroll-edge-row {

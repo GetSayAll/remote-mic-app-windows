@@ -168,6 +168,16 @@ describe("组合动作页 · 库浏览", () => {
     expect(wrapper.text()).toContain("聚焦学习过的输入框");
   });
 
+  it("数量显示在主标题右侧，不再显示「我的组合动作」小节标题", async () => {
+    const wrapper = await mountPage();
+    const heading = wrapper.find(".page-header .macros-heading-row");
+    expect(heading.find("h1").text()).toBe("组合动作");
+    expect(heading.find(".count-badge").text()).toBe("1");
+    expect(wrapper.text()).not.toContain("我的组合动作");
+    expect(wrapper.find(".library-pane .search-input").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("切页重建时首帧直接渲染上次的库（不闪 0）", async () => {
     const first = await mountPage();
     expect(first.findAll(".macro-item")).toHaveLength(1);

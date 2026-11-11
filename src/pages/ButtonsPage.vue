@@ -19,7 +19,7 @@ import {
   MODIFIER_KEYS,
   codeToKeyCode,
 } from "../lib/key-codes";
-import { focusStrategyLabel } from "../lib/app-adaptation";
+import { focusStrategyLabel, scrollRegionForTarget } from "../lib/app-adaptation";
 import {
   captureFailureText,
   captureInactiveText,
@@ -603,7 +603,23 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
 const appPickerOpen = ref(false);
 const appPickerError = ref<string | null>(null);
 const appFilter = ref("");
+const customAppsOpen = ref<boolean | null>(null);
 const filteredCustomApps = computed(() => customApps.value.filter(app => app.name.toLocaleLowerCase().includes(appFilter.value.trim().toLocaleLowerCase())));
+const focusTargetIsPreset = computed(
+  () => Boolean(focusTarget.value && presetAppIds.value.has(focusTarget.value)),
+);
+const customAppsExpanded = computed(
+  () =>
+    customAppsOpen.value ??
+    Boolean(focusTarget.value && !focusTargetIsPreset.value),
+);
+const focusScrollStatus = computed(() => {
+  const target = focusTarget.value;
+  if (!target || focusTargetIsPreset.value) return null;
+  return scrollRegionForTarget(mappings.value.scrollRegions, target)
+    ? t("已学习")
+    : t("需学习");
+});
 watch([presetApps, () => mappings.value.applications], () => {
   registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
 }, { deep: true });
@@ -642,6 +658,7 @@ async function selectApp(app: CustomAppPick): Promise<void> {
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     writeSwitchCache(saved.enabled, lockSelection.value);
+    customAppsOpen.value = true;
     appPickerOpen.value = false;
     statusMessage.value =
       notice ??
@@ -669,6 +686,9 @@ function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
   if (captureGated(button)) return;
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
+  const action = actionOf(button, trigger);
+  customAppsOpen.value =
+    action.type === "open_app" && !presetAppIds.value.has(action.target);
   if (capturingShortcut.value) void finishShortcutCapture();
 }
 
@@ -693,6 +713,9 @@ function applyAction(action: ButtonAction): void {
   const reconciled = reconcileHoldRepeat(actions);
   next.actions[target.button] = reconciled.actions;
   mappings.value = next;
+  if (action.type === "open_app") {
+    customAppsOpen.value = !presetAppIds.value.has(action.target);
+  }
   // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
   // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
   void persist(reconciled.notice ?? undefined);
@@ -2414,10 +2437,7 @@ onUnmounted(() => {
         </section>
 
         <section class="action-section">
-          <h4 class="action-section-title">{{ t("打开应用") }}</h4>
-          <input v-if="customApps.length > 12" v-model="appFilter" class="app-library-search" type="search" :aria-label="t('筛选已添加应用')" :placeholder="t('筛选已添加应用')" />
-          <!-- 预设应用与已添加应用共用一个换行网格（2026-10-03 用户要求）：
-               两组名字连续排布，不再在中间强制换行；长名字的换行规则见 .chip.custom-app。 -->
+          <h4 class="action-section-title">{{ t("打开 APP") }}</h4>
           <div class="preset-grid app-library">
             <button
               v-for="app in presetApps"
@@ -2430,21 +2450,58 @@ onUnmounted(() => {
             >
               {{ openAppLabel(app.name) }}
             </button>
-            <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
-              :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
-              :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ openAppLabel(app.name) }}</button>
-            <!-- 唯一添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
             <button
-              class="chip add-app"
+              class="chip open-custom-app"
+              :class="{ selected: Boolean(focusTarget && !focusTargetIsPreset) }"
               type="button"
-              :title="t('扫描本机应用，或选择任意程序或快捷方式')"
-              @click="appPickerError = null; appPickerOpen = true"
+              :aria-expanded="customAppsExpanded"
+              aria-controls="custom-app-group"
+              @click="customAppsOpen = !customAppsExpanded"
             >
-              {{ t("添加应用") }}
+              {{ t("打开自定义 APP") }}
             </button>
           </div>
-          <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile-summary">
-            <span class="muted">{{ t("聚焦：{summary}", { summary: focusSummary }) }}</span>
+          <div v-if="customAppsExpanded" id="custom-app-group" class="custom-app-group">
+            <p class="action-section-title target-app-title">{{ t("目标 APP") }}</p>
+            <input
+              v-if="customApps.length > 12"
+              v-model="appFilter"
+              class="app-library-search"
+              type="search"
+              :aria-label="t('筛选已添加应用')"
+              :placeholder="t('筛选已添加应用')"
+            />
+            <div class="preset-grid app-library">
+              <button
+                v-for="app in filteredCustomApps"
+                :key="app.path"
+                class="chip custom-app"
+                type="button"
+                :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
+                :title="app.name"
+                @click="applyAction({ type: 'open_app', target: app.path })"
+              >
+                {{ openAppLabel(app.name) }}
+              </button>
+              <!-- 添加自定义 APP 的唯一入口，跟在目标 APP 之后。 -->
+              <button
+                class="chip add-app"
+                type="button"
+                :title="t('扫描本机应用，或选择任意程序或快捷方式')"
+                @click="appPickerError = null; appPickerOpen = true"
+              >
+                {{ t("添加应用") }}
+              </button>
+            </div>
+          </div>
+          <div
+            v-if="showAppFocusStrategy && focusTarget && !focusTargetIsPreset"
+            class="focus-profile-summary"
+          >
+            <span class="muted">
+              {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
+              {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
+            </span>
             <button class="link-button" type="button" @click="configureFocusProfile">
               {{ t("去配置") }}
             </button>
@@ -2751,6 +2808,18 @@ onUnmounted(() => {
    芯片内换行只给自定义应用名（预设名保持单行，避免撑高整行）。 */
 .app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
+/* 「打开自定义 APP」展开后的目标 APP 组：与预设应用分开，只有这里的目标才有
+   聚焦与翻页配置。 */
+.open-custom-app { border-style: dashed; }
+.custom-app-group {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.target-app-title { margin: 0 0 6px; font-size: 12.5px; color: var(--muted); }
+.custom-app-group .app-library-search { margin-top: 0; margin-bottom: 8px; }
 /* 「聚焦方式」只读摘要；可写控件统一在 APP 适配页。 */
 .focus-profile-summary {
   display: flex;
