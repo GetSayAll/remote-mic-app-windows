@@ -318,13 +318,13 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   );
   steps.push("「聚焦输入框」入口可见，动作经真实 IPC 写入并分发到平台聚焦受理");
 
-  // 「打开应用 + 聚焦方式」：面板于 2026-10-15 按用户要求恢复（与 Mac 对齐，见
-  // src/pages/ButtonsPage.vue 同款注释）。这里钉住面板可见；学习与测试两条路径仍经
-  // 真实 IPC 覆盖。
+  // 「打开应用 + 聚焦」：2026-11-09 起可写面板迁到 APP 适配页，按键页只保留只读
+  // 摘要与「去配置」。这里钉住按键页摘要；学习与测试两条路径仍经真实 IPC 覆盖，
+  // 面板本身由 AppsPage 组件测试覆盖。
   await clickButton("打开记事本");
   await waitFor(
-    () => (document.querySelector(".focus-profile") ? true : null),
-    "「聚焦方式」面板可见",
+    () => (document.querySelector(".focus-profile-summary") ? true : null),
+    "按键页「聚焦：…」只读摘要可见",
   );
   const learned = await learnFocusTarget();
   assert(
@@ -332,7 +332,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
     "仿真学习样本不是预期的可编辑目标",
   );
   await testAppFocus("notepad");
-  steps.push("「聚焦方式」面板可见；学习与测试打开聚焦经真实 IPC 覆盖");
+  steps.push("按键页只读聚焦摘要可见；学习与测试打开聚焦经真实 IPC 覆盖");
 
   await openPage("设置");
   mark("settings_page");
