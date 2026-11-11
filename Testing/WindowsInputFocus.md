@@ -90,7 +90,8 @@ cargo run -p sayall-windows --example focus_probe -- --learn               # 生
 - 组合动作聚焦步骤 UI（2026-11-11）：与按键页「打开 APP」使用同一套选择样式——
   预设应用网格 +「打开自定义 APP」切换；手动添加的应用收在「目标 APP」分组内，
   预置路径显示「预置可用」，自定义路径显示「聚焦：… · 翻页：…」摘要与「去配置」。
-  可写聚焦控件仍只在 APP 适配页，本页只读摘要。真机证据：
+  可写聚焦控件仍只在 APP 适配页，本页只读摘要。2026-10-23 旧版曾在本页直接提供
+  学习/录入入口；旧截图 `combo-focus-step.png` 仅作历史对照。真机证据：
   `artifacts/design/2026-11-11-macros-focus-preset-style.png`（自定义目标 Clash Verge、
   目标 APP 分组与摘要）。
 
