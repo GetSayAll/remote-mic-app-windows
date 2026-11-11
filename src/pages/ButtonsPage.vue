@@ -13,7 +13,7 @@ import { reportFrontendEvent, reasonToken } from "../lib/frontend-diagnostics";
 import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { COMBINATION_ACTIONS_ENABLED } from "../lib/feature-flags";
-import { effectiveFocusProfile } from "../lib/focus-defaults";
+import { effectiveFocusProfile, presetFocusDefault } from "../lib/focus-defaults";
 import {
   CAPTURE_MODIFIER_SOURCES,
   MODIFIER_KEYS,
@@ -514,10 +514,32 @@ function isPresetTarget(target: string): boolean {
   return presetApps.value.some((app) => app.id === target);
 }
 
-/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
+/** 目标匹配到的预设 id：内置预设 id 或用户手动添加的预设路径。 */
+const focusTargetPresetId = computed<string | null>(() => {
+  const target = focusTarget.value?.trim().toLocaleLowerCase();
+  if (!target) return null;
+  return (
+    presetApps.value.find(
+      (app) =>
+        app.id.toLocaleLowerCase() === target ||
+        Boolean(app.path && app.path.toLocaleLowerCase() === target),
+    )?.id ?? null
+  );
+});
+const focusTargetIsBuiltInPreset = computed(() =>
+  Boolean(focusTarget.value && presetAppIds.value.has(focusTarget.value)),
+);
+const focusTargetIsLibraryPreset = computed(
+  () => Boolean(focusTargetPresetId.value && !focusTargetIsBuiltInPreset.value),
+);
+
+/** 该目标实际会执行的聚焦档案：手动添加的预设直接使用预设能力。 */
 const focusProfile = computed<AppFocusProfile | null>(() => {
   const target = focusTarget.value;
   if (!target) return null;
+  if (focusTargetIsLibraryPreset.value) {
+    return presetFocusDefault(focusTargetPresetId.value!, true);
+  }
   return effectiveFocusProfile(target, mappings.value.focusProfiles, isPresetTarget);
 });
 
@@ -605,17 +627,15 @@ const appPickerError = ref<string | null>(null);
 const appFilter = ref("");
 const customAppsOpen = ref<boolean | null>(null);
 const filteredCustomApps = computed(() => customApps.value.filter(app => app.name.toLocaleLowerCase().includes(appFilter.value.trim().toLocaleLowerCase())));
-const focusTargetIsPreset = computed(
-  () => Boolean(focusTarget.value && presetAppIds.value.has(focusTarget.value)),
-);
 const customAppsExpanded = computed(
   () =>
     customAppsOpen.value ??
-    Boolean(focusTarget.value && !focusTargetIsPreset.value),
+    Boolean(focusTarget.value && !focusTargetIsBuiltInPreset.value),
 );
 const focusScrollStatus = computed(() => {
   const target = focusTarget.value;
-  if (!target || focusTargetIsPreset.value) return null;
+  if (!target || focusTargetIsBuiltInPreset.value) return null;
+  if (focusTargetIsLibraryPreset.value) return t("预置可用");
   return scrollRegionForTarget(mappings.value.scrollRegions, target)
     ? t("已学习")
     : t("需学习");
@@ -2452,7 +2472,7 @@ onUnmounted(() => {
             </button>
             <button
               class="chip open-custom-app"
-              :class="{ selected: Boolean(focusTarget && !focusTargetIsPreset) }"
+              :class="{ selected: Boolean(focusTarget && !focusTargetIsBuiltInPreset) }"
               type="button"
               :aria-expanded="customAppsExpanded"
               aria-controls="custom-app-group"
@@ -2495,14 +2515,17 @@ onUnmounted(() => {
             </div>
           </div>
           <div
-            v-if="showAppFocusStrategy && focusTarget && !focusTargetIsPreset"
+            v-if="showAppFocusStrategy && focusTarget && !focusTargetIsBuiltInPreset"
             class="focus-profile-summary"
           >
             <span class="muted">
               {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
               {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
             </span>
-            <button class="link-button" type="button" @click="configureFocusProfile">
+            <span v-if="focusTargetIsLibraryPreset" class="preset-pill">
+              {{ t("预置可用") }}
+            </span>
+            <button v-else class="link-button" type="button" @click="configureFocusProfile">
               {{ t("去配置") }}
             </button>
           </div>
@@ -2832,6 +2855,14 @@ onUnmounted(() => {
   border-radius: 8px;
   background: var(--surface-subtle);
   font-size: 12px;
+}
+.preset-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-surface);
+  color: var(--success-text);
+  font-size: 11px;
+  font-weight: 600;
 }
 .focus-profile-summary .link-button {
   padding: 0;

@@ -191,9 +191,10 @@ describe("组合动作页 · 库浏览", () => {
     wrapper.unmount();
   });
 
-  it("空库显示空态与创建引导（对齐 Mac 文案）", async () => {
+  it("空库显示空态与创建引导（对齐 Mac 文案），且不显示数量徽标", async () => {
     getCombinedActionsSpy.mockResolvedValue({ formatVersion: 1, definitions: [] });
     const wrapper = await mountPage();
+    expect(wrapper.find(".page-header .count-badge").exists()).toBe(false);
     expect(wrapper.text()).toContain("创建第一个组合动作");
     expect(wrapper.text()).toContain("把打开 App、按键或输入框聚焦组合起来，再设到遥控器按键上。");
   });

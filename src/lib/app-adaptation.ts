@@ -19,8 +19,10 @@ export interface AppAdaptationRow {
   name: string;
   /** 自定义应用的库路径，或内置预设探测到的真实可执行文件路径。 */
   path?: string;
-  /** 内置预设：只允许清除显式档案，不删除应用库条目。 */
+  /** 用户手动添加的应用恰好是内置预设：使用预设聚焦/翻页能力。 */
   preset: boolean;
+  /** 匹配到的预设 id（例如 `chrome`）；自定义应用为空。 */
+  presetId?: string;
   /** 内置预设是否已安装；自定义应用默认 true。 */
   installed: boolean;
 }
@@ -56,50 +58,59 @@ export function mergeApplications(
 }
 
 /**
- * 列表来源：
- * 1. 用户添加的 APP（`applications`，按添加顺序）。
- * 2. 所有已安装的内置预设；预设自带默认聚焦与翻页，需要显示「预置可用」。
- *    未安装但已有显式档案或被导航指定的预设仍保留，便于清理旧配置。
+ * 列表只列用户手动添加的 APP（`applications`，按添加顺序）。
+ *
+ * 若用户添加的路径正好匹配某个内置预设（例如手动添加 Chrome），该行标记为
+ * `preset` 并带 `presetId`，直接使用预设的聚焦/翻页能力并显示「预置可用」；
+ * 未手动添加的预设不进入列表（2026-11-11 用户要求）。
  */
 export function buildAppRows(
   applications: readonly CustomAppPick[],
-  profiles: Record<string, AppFocusProfile> | undefined,
+  _profiles: Record<string, AppFocusProfile> | undefined,
   presetApps: readonly PresetAppInfo[],
   extraTargets: readonly string[] = [],
 ): AppAdaptationRow[] {
   const rows: AppAdaptationRow[] = [];
   const seen = new Set<string>();
-  const extras = new Set(extraTargets.map(keyOf));
+
+  const presetForTarget = (target: string): PresetAppInfo | undefined => {
+    const key = keyOf(target);
+    if (!key) return undefined;
+    return presetApps.find(
+      (preset) =>
+        keyOf(preset.id) === key ||
+        Boolean(preset.path && keyOf(preset.path) === key),
+    );
+  };
 
   for (const app of applications) {
     const target = app.path.trim();
     const key = keyOf(target);
     if (!key || seen.has(key)) continue;
     seen.add(key);
+    const preset = presetForTarget(target);
     rows.push({
       target,
-      name: app.name.trim() || appFileName(target),
+      name: app.name.trim() || preset?.name || appFileName(target),
       path: target,
-      preset: false,
+      preset: Boolean(preset),
+      presetId: preset?.id,
       installed: true,
     });
   }
 
-  const profileKeys = new Map<string, string>();
-  for (const target of Object.keys(profiles ?? {})) {
-    profileKeys.set(keyOf(target), target);
-  }
-  for (const preset of presetApps) {
-    const key = keyOf(preset.id);
-    if (seen.has(key)) continue;
-    if (!preset.installed && !profileKeys.has(key) && !extras.has(key)) continue;
+  // 允许从按键页带一个尚未写入应用库的自定义 target；预设必须手动添加才显示。
+  for (const extra of extraTargets) {
+    const target = extra.trim();
+    const key = keyOf(target);
+    if (!key || seen.has(key) || presetForTarget(target)) continue;
     seen.add(key);
     rows.push({
-      target: preset.id,
-      name: preset.name,
-      path: preset.path ?? undefined,
-      preset: true,
-      installed: preset.installed,
+      target,
+      name: appFileName(target),
+      path: target,
+      preset: false,
+      installed: true,
     });
   }
 
@@ -127,9 +138,11 @@ export function profileForTarget(
 
 /** 实际会执行的聚焦档案：显式档案优先，预设回落到内置默认。 */
 export function effectiveAppProfile(
-  row: Pick<AppAdaptationRow, "target" | "preset">,
+  row: Pick<AppAdaptationRow, "target" | "preset" | "presetId">,
   profiles: Record<string, AppFocusProfile> | undefined,
 ): AppFocusProfile | null {
+  // 手动添加的预设直接使用预设能力，不继承旧的显式档案。
+  if (row.preset && row.presetId) return presetFocusDefault(row.presetId, true);
   const explicit = profileForTarget(profiles, row.target);
   if (explicit) return explicit;
   return presetFocusDefault(row.target, row.preset);

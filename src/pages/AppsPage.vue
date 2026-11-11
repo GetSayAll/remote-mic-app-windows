@@ -93,7 +93,7 @@ const selectedScrollRegion = computed<ScrollRegionTarget | null>(() =>
 const scrollBusy = computed(() => scrollLearning.value || scrollTesting.value !== null || saving.value);
 const fallbackProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
-  return row?.preset ? presetFocusDefault(row.target, true) : null;
+  return row?.preset ? presetFocusDefault(row.presetId ?? row.target, true) : null;
 });
 const selectedIsPreset = computed(() => Boolean(selectedRow.value?.preset));
 const presetFocusLabel = computed(() => {
@@ -365,7 +365,7 @@ async function selectApp(app: CustomAppPick): Promise<void> {
 async function deleteAdaptation(): Promise<void> {
   const row = selectedRow.value;
   if (!row || deleteBlockedReason.value) return;
-  const next = removeAppAdaptation(mappings.value, row.target, row.preset);
+  const next = removeAppAdaptation(mappings.value, row.target, isPresetPlaceholder(row));
   if (await persist(next)) {
     selectedTarget.value = nextSelectedTarget(rows.value, null);
     confirmDelete.value = false;
@@ -604,7 +604,7 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <template v-if="!selectedIsPreset">
+          <template v-if="!isPresetPlaceholder(selectedRow)">
             <div class="section-divider" aria-hidden="true"></div>
             <div class="delete-row">
               <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>

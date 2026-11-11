@@ -107,7 +107,6 @@ describe("APP adaptation page", () => {
   });
 
   it("shows the empty state and opens the existing app picker", async () => {
-    vi.mocked(listPresetApps).mockResolvedValueOnce([]);
     const wrapper = await mountPage();
     expect(wrapper.text()).toContain("还没有添加任何 APP");
     expect(wrapper.find(".list-panel").exists()).toBe(false);
@@ -131,7 +130,7 @@ describe("APP adaptation page", () => {
       },
     });
     const wrapper = await mountPage();
-    await wrapper.find(".add-app").trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
     await flushPromises();
 
     await wrapper.get('.picker-row input[aria-label="Cursor"]').setValue(true);
@@ -153,14 +152,15 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
   });
 
-  it("lists added apps first and configured presets at their real paths", async () => {
+  it("lists only manually added apps and marks a user-added preset as built-in", async () => {
     configureMappings({
       applications: [
         { name: "Cursor", path: "C:\\Apps\\Cursor.exe" },
         { name: "微信", path: "C:\\Apps\\Weixin.exe" },
+        { name: "Chrome 浏览器", path: "C:\\Program Files\\Chrome\\chrome.exe" },
       ],
       focusProfiles: {
-        netease_music: { strategy: "open_only" },
+        chrome: { strategy: "open_only" },
       },
     });
     const wrapper = await mountPage();
@@ -169,40 +169,24 @@ describe("APP adaptation page", () => {
     expect(rows.map((row) => row.find(".app-row-name").text())).toEqual([
       "Cursor",
       "微信",
-      "记事本",
       "Chrome 浏览器",
-      "网易云音乐",
     ]);
     expect(rows[0].find(".app-row-status").text()).toBe("只打开 · 需学习");
     expect(rows[2].find(".app-row-status").text()).toBe("预置可用");
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
-    await rows[4].trigger("click");
+    await rows[2].trigger("click");
     await flushPromises();
-    expect(wrapper.find(".detail-panel").text()).not.toContain(
-      "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
-    );
     expect(wrapper.find(".detail-panel").text()).toContain("预置可用");
-    expect(wrapper.find(".detail-panel").text()).toContain("只打开 APP");
+    expect(wrapper.find(".detail-panel").text()).toContain("使用 APP 快捷键聚焦");
     expect(wrapper.find(".focus-editor").exists()).toBe(false);
     expect(wrapper.find(".scroll-card").exists()).toBe(false);
   });
 
-  it("selects a preset by its real path and keeps the explicit focus profile", async () => {
-    configureMappings({
-      focusProfiles: { chrome: { strategy: "open_only" } },
-    });
-    const wrapper = await mountPage();
-    const chromeRow = wrapper.findAll(".app-row").find((row) => row.text().includes("Chrome"));
-    await chromeRow!.trigger("click");
-    await flushPromises();
-
-    const detail = wrapper.find(".detail-panel").text();
-    expect(detail).not.toContain("C:\\Program Files\\Chrome\\chrome.exe");
-    expect(detail).toContain("只打开 APP");
-    expect(detail).toContain("预置可用");
-    // 预设不显示可编辑的聚焦与滚动控件。
-    expect(wrapper.find(".focus-editor").exists()).toBe(false);
-    expect(wrapper.find(".scroll-card").exists()).toBe(false);
+  it("does not expose a preset unless it was manually added", async () => {
+    const wrapper = await mountPage({ initialTarget: "notepad" });
+    expect(wrapper.find(".app-row").exists()).toBe(false);
+    expect(wrapper.find(".detail-panel").exists()).toBe(false);
+    expect(wrapper.text()).toContain("还没有添加任何 APP");
   });
 
   it("switches focus strategy and writes only the selected target's profile", async () => {
@@ -369,23 +353,22 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".page-notice").exists()).toBe(false);
   });
 
-  it("shows built-in capabilities for a preset without editable focus or scrolling", async () => {
+  it("shows built-in capabilities for a manually added preset without editable focus or scrolling", async () => {
     configureMappings({
+      applications: [
+        { name: "Chrome 浏览器", path: "C:\\Program Files\\Chrome\\chrome.exe" },
+      ],
       focusProfiles: { chrome: { strategy: "open_only" } },
     });
     const wrapper = await mountPage();
-    const chromeRow = wrapper.findAll(".app-row").find((row) => row.text().includes("Chrome"))!;
-    await chromeRow.trigger("click");
-    await flushPromises();
-
     const detail = wrapper.find(".detail-panel").text();
     expect(detail).not.toContain("C:\\Program Files\\Chrome\\chrome.exe");
     expect(detail).toContain("预置能力");
     expect(detail).toContain("预置可用");
+    expect(detail).toContain("使用 APP 快捷键聚焦");
     expect(wrapper.find(".focus-editor").exists()).toBe(false);
     expect(wrapper.find(".scroll-card").exists()).toBe(false);
-    expect(wrapper.find(".delete-row").exists()).toBe(false);
-    expect(wrapper.findAll("button").some((button) => button.text() === "删除这个 APP 的适配")).toBe(false);
+    expect(wrapper.find(".delete-row").exists()).toBe(true);
   });
 
   it("loads the real application icon instead of a letter tile", async () => {
@@ -445,13 +428,6 @@ describe("APP adaptation page", () => {
     const second = await mountPage();
     const selected = second.findAll(".app-row").find((row) => row.classes().includes("selected"));
     expect(selected?.text()).toContain("微信");
-  });
-
-  it("can expose a preset target passed from the buttons page", async () => {
-    const wrapper = await mountPage({ initialTarget: "notepad" });
-    expect(wrapper.find(".detail-panel").text()).toContain("记事本");
-    expect(wrapper.find(".detail-panel").text()).toContain("自动选择输入框");
-    expect(wrapper.find(".detail-panel").text()).toContain("预置可用");
   });
 
   it("captures an app focus shortcut and releases capture on unmount", async () => {

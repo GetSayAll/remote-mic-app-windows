@@ -1234,7 +1234,7 @@ watch(
     <div class="page-header">
       <div class="macros-heading-row">
         <h1>{{ tPage("组合动作") }}</h1>
-        <span class="count-badge">{{ definitions.length }}</span>
+        <span v-if="definitions.length > 0" class="count-badge">{{ definitions.length }}</span>
       </div>
       <p class="page-subtitle">{{ t("组合动作保存后，请到按键页面的按键操作中选择它。") }}</p>
     </div>

@@ -48,6 +48,18 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       lastError: null,
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    listPresetApps: vi.fn(async () => [
+      { id: "sayall", name: "无线麦 SayAll", installed: true },
+      { id: "wechat", name: "微信", installed: true },
+      { id: "netease_music", name: "网易云音乐", installed: true },
+      { id: "chrome", name: "Chrome 浏览器", installed: true },
+      { id: "chatgpt", name: "ChatGPT", installed: true },
+      { id: "workbuddy", name: "WorkBuddy", installed: true },
+      { id: "dimagent", name: "DimAgent", installed: true },
+      { id: "vokie", name: "Vokie", installed: true },
+      { id: "notepad", name: "记事本", installed: true },
+      { id: "qq", name: "QQ", installed: true },
+    ]),
     activateAppForLearning: vi.fn(async () => undefined),
     learnFocusTarget: vi.fn(async () => ({
       controlType: "Edit",
@@ -199,6 +211,7 @@ import {
   importButtonMappingConfiguration,
   learnFocusPoint,
   learnFocusTarget,
+  listPresetApps,
   pickCustomApp,
   saveLockMappingSelection,
   scanPairedRemotes,
@@ -1514,6 +1527,34 @@ describe("buttons mapping page", () => {
     expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
       { page: "apps", params: { appTarget: "shell:AppsFolder\\Example!App" } },
     ]);
+  });
+
+  it("手动添加的预设显示预置可用，不提供可编辑配置", async () => {
+    const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    vi.mocked(listPresetApps).mockResolvedValueOnce([
+      { id: "chrome", name: "Chrome 浏览器", installed: true, path: target },
+    ]);
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      applications: [{ name: "Chrome", path: target }],
+      focusProfiles: {},
+    });
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("使用 APP 快捷键聚焦");
+    expect(summary.text()).toContain("翻页：预置可用");
+    expect(summary.find(".preset-pill").text()).toBe("预置可用");
+    expect(summary.find(".link-button").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("keeps the last focus failure visible beside the read-only summary", async () => {
