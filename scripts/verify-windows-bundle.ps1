@@ -76,11 +76,16 @@ $srcTauriDir = Split-Path -Parent $configPath
 $payloadNames = @(
     "sayall-helper.exe",
     "frida-gadget.dll",
+    "sayall-mcp.exe",
     "sayall-helper-arm64.exe",
     "frida-gadget-arm64.dll"
 )
 $stagedPayloads = @($payloadNames | Where-Object { Test-Path -LiteralPath (Join-Path $srcTauriDir $_) -PathType Leaf })
-if ($stagedPayloads -notcontains "sayall-helper.exe" -or $stagedPayloads -notcontains "frida-gadget.dll") {
+if (
+    $stagedPayloads -notcontains "sayall-helper.exe" -or
+    $stagedPayloads -notcontains "frida-gadget.dll" -or
+    $stagedPayloads -notcontains "sayall-mcp.exe"
+) {
     throw "x64 bundle resources were not staged in src-tauri: $srcTauriDir"
 }
 $arm64PayloadNames = @("sayall-helper-arm64.exe", "frida-gadget-arm64.dll")
