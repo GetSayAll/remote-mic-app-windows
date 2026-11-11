@@ -53,13 +53,21 @@ fn open_app_effective_profile(
     mappings: &ButtonMappings,
     target: &str,
 ) -> Option<crate::focus::AppFocusProfile> {
+    focus_profile_for_target(&mappings.focus_profiles, target)
+}
+
+/// 目标对应的实际聚焦档案：预设优先（含手动添加的预设路径），其余读取用户档案。
+///
+/// 组合动作的聚焦步骤与按键页的「打开应用 + 聚焦」必须使用同一判定，
+/// 否则手动添加的预设路径会在组合动作里退化成「只打开」。
+pub(crate) fn focus_profile_for_target(
+    profiles: &std::collections::BTreeMap<String, crate::focus::AppFocusProfile>,
+    target: &str,
+) -> Option<crate::focus::AppFocusProfile> {
     if let Some(app) = crate::app_launcher::preset_app_for_target(target) {
         return Some(preset_focus_profile(app.id));
     }
-    if let Some(profile) = mappings.focus_profiles.get(target) {
-        return Some(profile.clone());
-    }
-    None
+    profiles.get(target).cloned()
 }
 
 /// 预设应用的默认聚焦入口。
@@ -3505,6 +3513,45 @@ mod tests {
             preset_focus_profile("notepad").strategy,
             crate::focus::FocusStrategy::AutoComposer
         );
+    }
+
+    #[test]
+    fn focus_profile_for_target_prefers_presets_and_keeps_custom_profiles() {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "chrome".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::OpenOnly,
+                shortcut: None,
+                recorded: None,
+                point: None,
+            },
+        );
+        // 旧显式档案不能覆盖预设能力，否则组合动作会与 UI 摘要不一致。
+        assert_eq!(
+            focus_profile_for_target(&profiles, "chrome")
+                .expect("Chrome 预设档案")
+                .strategy,
+            crate::focus::FocusStrategy::AppShortcut
+        );
+
+        let custom = r"C:\Tools\Editor.exe";
+        profiles.insert(
+            custom.to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::OpenOnly,
+                shortcut: None,
+                recorded: None,
+                point: None,
+            },
+        );
+        assert_eq!(
+            focus_profile_for_target(&profiles, custom)
+                .expect("自定义档案")
+                .strategy,
+            crate::focus::FocusStrategy::OpenOnly
+        );
+        assert!(focus_profile_for_target(&profiles, r"C:\Tools\Missing.exe").is_none());
     }
 
     #[test]

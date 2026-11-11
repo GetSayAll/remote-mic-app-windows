@@ -664,11 +664,10 @@ impl Default for WindowsPlatform {
                 macro_runtime::WindowsMacroStepperSource::new(Arc::clone(&injector), {
                     let profiles = Arc::clone(&macro_focus_profiles);
                     Arc::new(move |target: &str| {
-                        profiles
+                        let profiles = profiles
                             .read()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .get(target)
-                            .cloned()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        crate::button_mapping::focus_profile_for_target(&profiles, target)
                     })
                 }),
             );

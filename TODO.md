@@ -31,7 +31,7 @@
   - 验证：前端 `pnpm test`（669 passed / 10 skipped）、`pnpm build`、`vue-tsc --noEmit`；`cargo test --workspace -j 1` 全通过；浏览器 1066×800 空态与有内容态走查（左右栏 228 + 14 + 618.5，无横向溢出）；安装版通过 UIA 学习 Chrome 的 `RootWebArea`，测试向下翻页读回百分比变化；独立探针在 Chrome 测试页验证 PageDown/LargeIncrement、PageUp/滚轮回退、ToBottom/ToTop 都产生可观察位移。
   - 已知边界：私有键位方案的绑定反查 deferred；微信 4.x 等无滚动树的 APP 只能走无光标滚轮回退，无法读回验证；Store 应用图标依赖可解析的可执行文件路径，解析失败回退通用图标。
 
-- [x] **APP 分类与预设能力对齐 Mac（2026-11-11，用户要求）**：按键页动作分组「打开应用」改为「打开 APP」，只列预设应用；末尾「打开自定义 APP」展开「目标 APP」分组，用户自己添加的 APP 从预设列表移入该分组，分组内保留「添加应用」入口。预设应用不再显示聚焦/翻页配置，使用内置聚焦与翻页；自定义 APP 才显示「聚焦：… · 翻页：…」摘要和「去配置」。APP 适配左列只列用户手动添加的 APP：手动添加的路径若匹配预设（如 Chrome），该行标注「预置可用」并只读显示预置聚焦/翻页能力，可删除；未手动添加的预设不进入列表。组合动作页移除「我的组合动作」小节标题，数量徽标移到主标题右侧并收紧间距，数量小于等于 0 时隐藏。
+- [x] **APP 分类与预设能力对齐 Mac（2026-11-11，用户要求）**：按键页动作分组「打开应用」改为「打开 APP」，只列预设应用；末尾「打开自定义 APP」展开「目标 APP」分组，用户自己添加的 APP 从预设列表移入该分组，分组内保留「添加应用」入口。预设应用不再显示聚焦/翻页配置，使用内置聚焦与翻页；自定义 APP 才显示「聚焦：… · 翻页：…」摘要和「去配置」。APP 适配左列只列用户手动添加的 APP：手动添加的路径若匹配预设（如 Chrome），该行标注「预置可用」并只读显示预置聚焦/翻页能力，可删除；未手动添加的预设不进入列表。组合动作页移除「我的组合动作」小节标题，数量徽标移到主标题右侧并收紧间距，数量小于等于 0 时隐藏。组合动作「聚焦学习过的输入框」步骤同步采用相同分组样式：预设网格 +「打开自定义 APP」+「目标 APP」，预置目标显示「预置可用」，自定义目标显示「聚焦：… · 翻页：…」摘要与「去配置」。
   - 实现：`src/pages/ButtonsPage.vue`、`src/pages/AppsPage.vue`、`src/pages/MacrosPage.vue`、`src/lib/app-adaptation.ts`、`src/lib/i18n/en/{buttons,apps}.ts`、`src/runtime-simulation.ts`。
   - 验证：前端全量 41 文件 / 675 passed / 10 skipped，`vue-tsc --noEmit`、`vite build`、runtime simulation 27 steps passed；安装版截图见 `artifacts/design/2026-11-11-preset-app-adaptation.png`、`2026-11-11-buttons-custom-app.png`、`2026-11-11-macros-count.png`。
   - 已知边界：预设应用的逐应用预置滚动/聚焦差异仍需 RC001/RC003 + 真实应用真机验收，自动聚焦走产品默认策略与 UIA 回退。
