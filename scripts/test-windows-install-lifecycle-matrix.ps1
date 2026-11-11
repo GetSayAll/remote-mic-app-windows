@@ -294,10 +294,15 @@ try {
     $appProcess.WaitForExit()
     $appProcess = $null
 
-    $expectedDowngradeExitCode = 1638
+    # 静默降级会被两处拦截，退出码取决于哪一处先到：
+    #   * Tauri 2.12.x 生成的 .onInit 在 allowDowngrades=false 且 silent/passive/update 时
+    #     直接 Abort（NSIS 默认退出码 2），发生在 NSIS_HOOK_PREINSTALL 之前；
+    #   * 本仓库 preinstall SemVer 门禁返回 1638（交互模式，以及 Tauri 2.11.x 的静默路径）。
+    # 两者都表示拒绝降级；真正的判据是下面逐项核对当前版本与文件未被替换。
+    $expectedDowngradeExitCodes = @(1638, 2)
     $downgradeExitCode = Invoke-Installer $predecessorInstaller.FullName
-    if ($downgradeExitCode -ne $expectedDowngradeExitCode) {
-        throw "Downgrade installer returned $downgradeExitCode instead of $expectedDowngradeExitCode"
+    if ($expectedDowngradeExitCodes -notcontains $downgradeExitCode) {
+        throw "Downgrade installer returned $downgradeExitCode instead of a rejection code ($($expectedDowngradeExitCodes -join ' / '))"
     }
     $afterDowngrade = Get-SingleInstallation $currentVersion
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $afterDowngrade.AppExecutable).Hash -ne $currentExecutableHash) {
