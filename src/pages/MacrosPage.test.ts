@@ -671,8 +671,11 @@ describe("组合动作页 · 编辑向导", () => {
     expect(body.find(".focus-profile-summary").text()).toContain("自动选择输入框");
     // 可写控件已迁到 APP 适配页，组合动作页不再复制一份。
     expect(body.find(".focus-strategy-option").exists()).toBe(false);
-    expect(body.findAll(".app-library .chip")).toHaveLength(12);
-    expect(body.findAll(".chip").map((chip) => chip.text())).toContain("打开记事本");
+    const focusChips = body.findAll(".app-library .chip").map((chip) => chip.text());
+    expect(focusChips).toHaveLength(11);
+    expect(focusChips).toContain("打开记事本");
+    expect(focusChips).toContain("添加应用");
+    expect(focusChips).not.toContain("扫描本机应用");
 
     await body.find(".focus-profile-summary .link-button").trigger("click");
     expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
@@ -741,9 +744,11 @@ describe("组合动作页 · 编辑向导", () => {
 
     const body = wrapper.find(".step-card-body");
     const appChips = body.findAll(".app-library .chip").map((chip) => chip.text());
-    expect(appChips).toHaveLength(12);
+    expect(appChips).toHaveLength(11);
     expect(appChips).toContain("打开微信");
     expect(appChips).toContain("打开 QQ");
+    expect(appChips).toContain("添加应用");
+    expect(appChips).not.toContain("扫描本机应用");
     expect(body.text()).not.toContain("按键页还没有「打开应用」动作");
     expect(body.find(".focus-profile-summary").text()).toContain("自动选择输入框");
   });
@@ -861,16 +866,16 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.find(".step-card-body .chip.selected").text()).toBe("打开记事本并聚焦");
   });
 
-  it("「扫描本机应用」在组合动作页打开本机应用弹窗", async () => {
+  it("「添加应用」在组合动作页打开应用选择弹窗", async () => {
     const wrapper = await mountPage();
     await findButton(wrapper, "编辑").trigger("click");
     await flushPromises();
     await findButton(wrapper, "编排步骤").trigger("click");
     await flushPromises();
-    const scan = wrapper.findAll("button").find((item) => item.text() === "扫描本机应用")!;
-    await scan.trigger("click");
+    const add = wrapper.findAll("button").find((item) => item.text() === "添加应用")!;
+    await add.trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("本机应用");
+    expect(wrapper.text()).toContain("选择应用");
   });
 
   it("单键或快捷键列出已保存与常用的快捷键，点选即写入", async () => {
@@ -897,15 +902,19 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Ctrl + C");
   });
 
-  it("「添加应用」写入共享自定义应用列表并选中", async () => {
+  it("「添加应用」的文件兜底写入共享自定义应用列表并选中", async () => {
     pickCustomAppSpy.mockResolvedValue({ name: "自定义App", path: "C:\\Apps\\Custom.exe" });
     const wrapper = await mountPage();
     await findButton(wrapper, "编辑").trigger("click");
     await flushPromises();
     await findButton(wrapper, "编排步骤").trigger("click");
     await flushPromises();
-    const add = wrapper.findAll("button").find((item) => item.text().includes("添加应用"))!;
+    const add = wrapper.findAll("button").find((item) => item.text() === "添加应用")!;
     await add.trigger("click");
+    await flushPromises();
+    await wrapper.get(".registered-apps-dialog .picker-program-pick").trigger("click");
+    await flushPromises();
+    await wrapper.get(".registered-apps-dialog .primary-button").trigger("click");
     await flushPromises();
     const saved = saveButtonMappingsSpy.mock.calls.at(-1)?.[0] as {
       applications?: Array<{ name: string; path: string }>;

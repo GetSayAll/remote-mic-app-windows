@@ -199,6 +199,10 @@ button, input { font: inherit; }
    （配置为打开应用的按键不触发：启动目标应用使本窗口失焦）。
    幽灵环的成因必然伴随一次指针交互，故按指针模态判定：既消除幽灵环，
    也不剥夺非 Tab 导航用户的焦点指示。鼠标按下打开指针模态，Tab 关闭。 */
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible) { outline: none; }
+button:disabled:focus,
+button:disabled:focus-visible { outline: none; }
 button:focus-visible,
 input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 body.pointer-nav button:focus-visible,
@@ -321,7 +325,9 @@ nav { display: grid; gap: 4px; }
 .primary-button { color: var(--text-on-accent); background: var(--accent); }
 .primary-button:hover { background: var(--accent-dark); }
 .secondary-button, .device-list button { color: var(--text-control); border-color: var(--border); background: var(--surface-control); }
-button:disabled { cursor: not-allowed; opacity: 0.55; }
+/* 禁用态统一用默认箭头。Windows 的 not-allowed 光标是红色禁止符号；按钮在
+   点击后进入异步禁用时会停在按钮上，看起来像凭空出现“红色禁用标识”。 */
+button:disabled { cursor: default; opacity: 0.55; }
 .badge { display: inline-flex; align-items: center; min-height: 26px; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
 .badge.pending { color: var(--pending-text); background: var(--pending-surface); }
 .badge.warning { color: var(--warning-text); background: var(--warning-surface); }
@@ -568,13 +574,13 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-cell.flashed { background: var(--pressed-surface); }
 /* 不可编辑的格子：禁用态（保留卡片与已配置显示，仅不可编辑）。
    现状只在「全按键支持」关闭时的返回/音量± 上出现（2026-10-03）。 */
-.mapping-cell:disabled { cursor: not-allowed; opacity: 0.5; }
+.mapping-cell:disabled { cursor: default; opacity: 0.5; }
 .mapping-cell:disabled:hover { background: var(--mapping-neutral); }
 /* 「全按键支持」关闭时的三键卡片：整卡置灰、不可点、悬停给出开启指引
    （2026-10-03 Andy 定稿）。格子不再二次降透明，避免卡片 × 格子叠加过暗；
    格子同时不吃指针事件——悬停改由卡片/容器的 title 承担（原生 tooltip 对
    disabled 控件的支持因引擎而异，不能赌），点击仍由动作函数守卫拦下。 */
-.mapping-card.is-locked { opacity: 0.55; cursor: not-allowed; }
+.mapping-card.is-locked { opacity: 0.55; cursor: default; }
 .mapping-card.is-locked:hover { background: var(--mapping-neutral); border-color: var(--border-strong); box-shadow: none; }
 .mapping-card.is-locked .mapping-cell { opacity: 1; pointer-events: none; }
 .voice-card { cursor: default; }
@@ -601,7 +607,7 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .chip:hover { border-color: var(--accent-border); background: var(--accent-hover); box-shadow: 0 2px 8px var(--shadow-control); transform: translateY(-1px); }
 .chip:active { transform: translateY(0); }
 .chip.selected { border-color: var(--accent-border); background: var(--accent-surface); font-weight: 600; color: var(--accent-text); box-shadow: 0 1px 5px var(--accent-surface); }
-.chip:disabled, .chip:disabled:hover { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; border-color: var(--border-strong); background: var(--surface-chip); color: var(--muted); }
+.chip:disabled, .chip:disabled:hover { opacity: 0.45; cursor: default; transform: none; box-shadow: none; border-color: var(--border-strong); background: var(--surface-chip); color: var(--muted); }
 /* 「打开常用语」的会员标识（对齐 macOS 常用语分组的粉色徽标）。 */
 .member-badge { display: inline-flex; align-items: center; margin-left: 6px; padding: 0 7px; border-radius: 999px; background: rgba(233, 30, 99, 0.14); color: #c2185b; font-size: 11px; font-weight: 700; line-height: 18px; }
 html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); color: #f9a8d4; }
@@ -794,7 +800,7 @@ html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); co
   color: var(--accent-text);
   font-weight: 600;
 }
-.chip-select .chip:disabled { cursor: not-allowed; opacity: 0.55; }
+.chip-select .chip:disabled { cursor: default; opacity: 0.55; }
 .callout-small { margin-top: 9px; font-size: 12.5px; }
 .checklist { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .checklist li {

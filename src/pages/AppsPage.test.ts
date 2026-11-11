@@ -10,6 +10,7 @@ import {
   getButtonMappings,
   getCombinedActions,
   learnFocusTarget,
+  learnScrollRegion,
   listPresetApps,
   saveButtonMappings,
   scanRegisteredApps,
@@ -17,6 +18,7 @@ import {
   stopShortcutCapture,
   subscribeShortcutCaptureEdges,
   testAppFocus,
+  testScrollRegion,
   type ShortcutCaptureEdge,
 } from "../lib/bridge";
 
@@ -25,6 +27,7 @@ const baseMappings = {
   actions: {},
   applications: [] as Array<{ name: string; path: string }>,
   focusProfiles: {} as Record<string, unknown>,
+  scrollRegions: {} as Record<string, unknown>,
 };
 
 vi.mock("../lib/bridge", async (importOriginal) => {
@@ -36,6 +39,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       actions: {},
       applications: [],
       focusProfiles: {},
+      scrollRegions: {},
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
     getApplicationIcon: vi.fn(async (path: string) =>
@@ -59,6 +63,19 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       className: "RichEdit",
     })),
     testAppFocus: vi.fn(async () => undefined),
+    learnScrollRegion: vi.fn(async () => ({
+      controlType: "Document",
+      automationId: "RootWebArea",
+      className: "",
+      normalizedRect: { x: 0, y: 0.1, width: 1, height: 0.8 },
+    })),
+    testScrollRegion: vi.fn(async () => ({
+      method: "scroll_pattern",
+      beforePercent: 10,
+      afterPercent: 90,
+      moved: true,
+      atEdge: false,
+    })),
     scanRegisteredApps: vi.fn(async () => []),
     startShortcutCapture: vi.fn(async () => []),
     stopShortcutCapture: vi.fn(async () => null),
@@ -116,9 +133,8 @@ describe("APP adaptation page", () => {
     await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
     await flushPromises();
 
-    await wrapper.get(".picker-app input").setValue(true);
-    const add = wrapper.findAll("button").find((button) => button.text().startsWith("添加所选"))!;
-    await add.trigger("click");
+    await wrapper.get('.picker-row input[aria-label="Cursor"]').setValue(true);
+    await wrapper.get(".picker-actions .primary-button").trigger("click");
     await flushPromises();
 
     const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
@@ -496,6 +512,65 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".page-notice").exists()).toBe(false);
     expect(wrapper.find(".modifier-grid").exists()).toBe(false);
     wrapper.unmount();
+  });
+
+  it("shows a learned scroll region and tests paging", async () => {
+    const target = "C:\\Apps\\Cursor.exe";
+    configureMappings({
+      applications: [{ name: "Cursor", path: target }],
+      scrollRegions: {
+        [target]: {
+          controlType: "Document",
+          automationId: "RootWebArea",
+          normalizedRect: { x: 0, y: 0.1, width: 1, height: 0.8 },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    expect(wrapper.find(".scroll-card").text()).toContain("已学习");
+    expect(wrapper.find(".app-row").text()).toContain("已学习");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "测试向上翻页")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(testScrollRegion).toHaveBeenCalledWith(target, "page_up");
+    expect(wrapper.find(".scroll-message").text()).toContain("内容已移动，这个区域可以翻页。");
+    expect(wrapper.find(".scroll-message").classes()).toContain("success");
+  });
+
+  it("learns and clears a scroll region without touching focus profiles", async () => {
+    const target = "C:\\Apps\\Cursor.exe";
+    configureMappings({ applications: [{ name: "Cursor", path: target }] });
+    const wrapper = await mountPage();
+    expect(wrapper.find(".scroll-card").text()).toContain("需学习");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "学习滚动区域")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(activateAppForLearning).toHaveBeenCalledWith(target);
+    expect(learnScrollRegion).toHaveBeenCalled();
+    const learned = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      scrollRegions?: Record<string, { automationId?: string }>;
+    };
+    expect(learned.scrollRegions?.[target]?.automationId).toBe("RootWebArea");
+    expect(wrapper.find(".scroll-card").text()).toContain("已学习");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "清除学习结果")!
+      .trigger("click");
+    await flushPromises();
+    const cleared = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      scrollRegions?: Record<string, unknown>;
+    };
+    expect(cleared.scrollRegions).toBeUndefined();
+    expect(wrapper.find(".scroll-message").exists()).toBe(false);
   });
 
   it("sends a focus test request", async () => {

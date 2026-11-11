@@ -133,6 +133,9 @@ mod reconnect;
 pub mod remote_target;
 #[cfg(windows)]
 mod resource_probe;
+pub mod scroll_region;
+#[cfg(windows)]
+pub mod scroll_region_windows;
 pub mod send_input;
 /// 真实注入运行时（2026-09-06 起 pub：预设注入链路真机验证探针
 /// examples/preset_inject_probe.rs 需复用与映射引擎完全相同的管线）。
@@ -1254,6 +1257,43 @@ impl WindowsPlatform {
         self.button_mapping
             .learn_focus_point(target)
             .map_err(PlatformError::SendInput)
+    }
+
+    /// UI「学习滚动区域」：等待用户点击目标应用的可滚动内容区。
+    pub fn learn_scroll_region(&self) -> Result<scroll_region::ScrollRegionTarget, PlatformError> {
+        #[cfg(windows)]
+        {
+            scroll_region_windows::learn_scroll_region_for_foreground()
+                .map_err(|error| PlatformError::SendInput(error.to_string()))
+        }
+        #[cfg(not(windows))]
+        {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    /// UI「测试滚动」：先激活目标应用，再用已保存的区域执行一次翻页。
+    pub fn test_scroll_region(
+        &self,
+        target: &str,
+        command: scroll_region::ScrollCommand,
+    ) -> Result<scroll_region::ScrollOutcome, PlatformError> {
+        #[cfg(windows)]
+        {
+            app_launcher::activate_or_launch(target).map_err(PlatformError::SendInput)?;
+            let _ = app_launcher::wait_for_target_foreground(
+                target,
+                std::time::Duration::from_millis(1200),
+            );
+            let region = self.button_mappings().scroll_regions.get(target).cloned();
+            scroll_region_windows::scroll_foreground(region, command)
+                .map_err(|error| PlatformError::SendInput(error.to_string()))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (target, command);
+            Err(PlatformError::UnsupportedPlatform)
+        }
     }
 
     /// 订阅语义按键边沿（画布高亮数据源）。

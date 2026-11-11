@@ -1,7 +1,7 @@
 # APP 适配（Windows）界面设计与功能计划
 
 - 日期：2026-11-09
-- 状态：聚焦首版已实现（P1–P5），自动化验证通过；真实应用验收仍为 `deferred`；滚动区域仍为第二阶段；未发布
+- 状态：聚焦首版与滚动区域首版已实现（P1–P6），自动化验证通过；预置滚动规则与部分真实应用验收仍为 `deferred`；未发布
 - 参考实现：`HD838A/remote-mic-app`，`origin/main`
 - 设计稿：[2026-11-09-app-adaptation.html](../artifacts/design/2026-11-09-app-adaptation.html)
 - 设计板截图：[2026-11-09-app-adaptation.png](../artifacts/design/2026-11-09-app-adaptation.png)
@@ -48,15 +48,17 @@
 - 聚焦方式五种策略中保留快捷键兜底；成功修改不再弹顶部提示，只保留内联状态与错误提示。
 - 按键页和组合动作页改为只读摘要 + 「去配置」；可写控件统一在 APP 适配页。
 - 绑定反查（基础按键配置）、删除/恢复默认适配、跨页导航。
+- 滚动区域首版：APP 详情内学习（3 秒内点击内容区，超时用当前光标）、已学习/需学习状态、测试向上/向下翻页与到两端、清除记录；档案按 APP 保存到 `scrollRegions`，schema 升到 5。
+- 翻页执行优先 UIA `ScrollPattern`；失败时向区域内命中的子窗口发送 `WM_MOUSEWHEEL`，不移动光标，并在可读回时用滚动百分比验证。新增 `page_up` / `page_down` / `scroll_to_top` / `scroll_to_bottom` 动作。
 - 窗口默认与最小内容尺寸保持 1066.67 × 800（不缩小用户已合入的最小高度）；启动时显式按逻辑像素重设默认/最小尺寸并居中，避免 Tauri 初始窗口在高 DPI 会话里落到错误尺寸。
 - 中英文文案与 1066×800 空态浏览器走查。
 - 收尾：组合动作页删除残留的可写聚焦编辑器死代码；编辑器在改选策略/切换目标时作废进行中的学习与迟到回调，录入启动与卸载均成对释放后端捕获。
 
 未实现 / deferred：
 
-- 滚动区域与翻页动作（Windows 尚无引擎）。
+- 预置滚动规则：首版全部 APP 都从「需学习」开始，不显示虚假的「预置可用」。
 - 私有键位方案的绑定反查。
-- 真实应用与安装版真机验收（本机安装版进程占用单实例，未强杀）。
+- 微信 4.x 等完全不暴露滚动树的 APP 只能走滚轮回退，无法读回验证；真机逐应用验收仍为 `deferred`。
 
 验证命令与结果见 §6；本轮自动化结果以实际执行记录为准。
 
@@ -67,7 +69,7 @@
 - 不新增 APP 级导入导出。
 - 不把「打开应用」拆成多个动作。
 - 不在本页编辑按键自定义快捷键或常用语。
-- 翻页滚动引擎（Windows 当前没有）单列第二阶段，不与聚焦首版捆绑。
+- 翻页滚动引擎首版已接入；预置规则仍单列后续阶段，不与聚焦首版捆绑。
 
 ## 2. 现状与依据
 
@@ -194,7 +196,7 @@ Windows 的 `focusProfiles` 和 `applications` 是两张表：
    - 说明「翻页键会滚动这个 APP 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。」
    - 按钮：学习滚动区域 / 测试向上翻页 / 测试向下翻页 / 清除学习结果或恢复预置。
    - 第二行：滚到两端（滚到顶部 / 滚到底部）。
-   - **Windows 当前没有此能力：首版不渲染此卡，不放置不可用假按钮；第二阶段实现后再启用。**
+   - 已启用此卡：没有记录时显示「需学习」；学习成功后显示「已学习」并启用测试与清除。首版没有预置规则，因此不会显示「预置可用」。
 5. **绑定到它的按键卡**
    - 标题 + 数量 badge。
    - 每行：`上键 · 长按` + `打开应用` + `去按键页`。
@@ -234,7 +236,7 @@ Windows 的 `focusProfiles` 和 `applications` 是两张表：
 | --- | --- | --- | --- |
 | 聚焦策略 | 两个主选项 + 快捷键兜底 | 两个主选项 + 快捷键兜底 | 2026-11-09 用户要求暂时移除 Windows 独有的自动选择 / 点击位置入口；旧档案仍可执行 |
 | 列表 | 用户添加的 APP | 用户添加的 APP | 用户明确要求与 Mac 一致 |
-| 滚动区域 | 已有 | 目标态，第二阶段 | Windows 没有滚动区域与翻页动作 |
+| 滚动区域 | 已有（含预置） | 首版已实现学习 / 测试 / 清除；预置规则后续 | Windows UIA `ScrollPattern` 可用性与预置需逐应用验证 |
 | 输入框学习时限 | 3 秒 | 3 秒 | 2026-11-09 用户要求与 Mac 一致，Windows 学习窗口同步改为 3 秒 |
 | 权限 | 辅助功能权限 | 无单独权限提示 | Windows UIA 走现有进程权限，不伪造 Mac 文案 |
 | 图标 | 系统真实图标 | 首版字母/首字占位 | 现有扫描 IPC 不返回图标 |
@@ -278,7 +280,8 @@ interface ButtonMappings {
   - 翻页：`LargeIncrement` / `LargeDecrement`。
   - 到两端：`NoAmount` + `Minimum` / `Maximum`。
   - 失败时回退为在区域中心注入滚轮；不移动键盘焦点。
-- 内置预置只按真实应用逐项验证后再加；首版第二阶段可以先全部「需学习」。
+- 内置预置只按真实应用逐项验证后再加；首版全部「需学习」，已在 schema 5 中预留
+  `scrollRegions`（当前实现）与后续预置扩展。
 
 ### 4.3 跨页导航
 
@@ -421,7 +424,7 @@ interface NavigationRequest {
 - 更新 `TODO.md`、测试文档、`design-qa.md` 相关条目。
 - 中英文截图与文案审查。
 
-### P6 滚动区域（第二阶段，需另行确认）
+### P6 滚动区域（首版已实现，2026-11-09 第二轮）
 
 1. 先做可行性探针：
    - 对 Chrome、VS Code、微信、记事本、WorkBuddy 检查 UIA `ScrollPattern` 可用性与滚动百分比。
@@ -453,7 +456,7 @@ cargo check --workspace
 cargo check -p sayall-windows-app --features runtime-simulation
 ```
 
-本轮已执行（2026-11-09）：前端 665 passed / 10 skipped、`pnpm build` 与 `vue-tsc --noEmit` 通过；`cargo test --workspace -j 1` 全通过（`sayall-windows` 525 passed / 16 ignored，`sayall-windows-app` 207 passed / 1 ignored）。默认并行的 `cargo test --workspace` 曾在本地因内存耗尽失败（`STATUS_STACK_BUFFER_OVERRUN` / `LNK1102`），串行运行即为上述通过结果，未发现代码失败。
+本轮已执行（2026-11-09，滚动区域首版）：前端 669 passed / 10 skipped、`pnpm build` 与 `vue-tsc --noEmit` 通过；`cargo test --workspace -j 1` 全通过（`sayall-windows` 536 passed / 16 ignored，`sayall-windows-app` 207 passed / 1 ignored）；NSIS 本地测试包内嵌前端校验 18/18。安装版通过 UIA 在 Chrome 上学习 `RootWebArea`，测试向下翻页读回 `moved=true`；独立探针在 Chrome 400 行测试页验证 `LargeIncrement`、滚轮回退、`SetScrollPercent` 到两端均产生可观察位移。默认并行的 `cargo test --workspace` 曾在本地因内存耗尽失败，串行运行即为上述通过结果。
 
 新增/更新的前端测试：
 

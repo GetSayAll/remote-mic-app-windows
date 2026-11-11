@@ -56,7 +56,6 @@ import {
   mouseMoveLabels,
   openAppLabel,
   openCommonPhraseExample,
-  pickCustomApp,
   registerCommonPhraseAvailability,
   registerPresetAppNames,
   registerMacroNames,
@@ -609,34 +608,55 @@ watch([presetApps, () => mappings.value.applications], () => {
   registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);
 }, { deep: true });
 
-async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
+/**
+ * 应用选择器确认：把选中的 APP 写入应用库，并立即绑定到当前编辑格。
+ *
+ * 选择器一次只返回一个 APP，不再区分扫描/文件来源；两者都走同一个
+ * `open_app` 动作。应用库与按键动作放在一次保存里，避免半写入。
+ */
+async function selectApp(app: CustomAppPick): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   appPickerError.value = null;
   try {
-    const unique = new Map((mappings.value.applications ?? []).map(app => [app.path.toLowerCase(), app]));
-    for (const app of apps) unique.set(app.path.toLowerCase(), app);
-    const saved = await saveButtonMappings({ ...mappings.value, applications: [...unique.values()] });
+    const target = editingTarget.value;
+    const applications = [...(mappings.value.applications ?? [])];
+    const key = app.path.toLowerCase();
+    if (!applications.some((candidate) => candidate.path.toLowerCase() === key)) {
+      applications.push({ name: app.name, path: app.path });
+    }
+    const next: ButtonMappings = {
+      ...mappings.value,
+      applications,
+      actions: { ...mappings.value.actions },
+    };
+    let notice: string | null = null;
+    if (target) {
+      const actions = { ...actionsOf(target.button) };
+      actions[target.trigger] = { type: "open_app", target: app.path };
+      const reconciled = reconcileHoldRepeat(actions);
+      next.actions[target.button] = reconciled.actions;
+      notice = reconciled.notice;
+    }
+    const saved = await saveButtonMappings(next);
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+    writeSwitchCache(saved.enabled, lockSelection.value);
     appPickerOpen.value = false;
-    statusMessage.value = t("已添加 {count} 个应用，按键绑定未改变", { count: apps.length });
+    statusMessage.value =
+      notice ??
+      (target
+        ? t("已选择：{name}", { name: app.name })
+        : t("已添加应用：{name}", { name: app.name }));
   } catch (cause) {
     appPickerError.value = operationErrorText(
-      "add scanned apps failed",
+      "select app failed",
       cause,
       "没能添加应用，请重试。",
     );
   } finally {
     busy.value = false;
   }
-}
-
-/** 打开原生文件选择器添加自定义应用，并应用到当前编辑格。 */
-async function addCustomApp(): Promise<void> {
-  const pick = await pickCustomApp();
-  if (!pick || !editingTarget.value) return;
-  applyAction({ type: "open_app", target: pick.path });
 }
 
 function selectButton(button: RemoteButton): void {
@@ -840,6 +860,7 @@ const REPEAT_MODIFIER_KEYS = new Set<KeyCode>([
 function actionAllowsRepeat(action: ButtonAction): boolean {
   // 切换应用会话内每次触发只前进一项；按住连发等价于系统 Alt+Tab 连续 Tab。
   if (action.type === "app_switcher") return true;
+  if (action.type === "page_up" || action.type === "page_down") return true;
   if (action.type === "scroll" || action.type === "mouse_move") return true;
   if (action.type !== "shortcut") return false;
   return action.chord.keys.length === 1 && !REPEAT_MODIFIER_KEYS.has(action.chord.keys[0]);
@@ -2412,15 +2433,14 @@ onUnmounted(() => {
             <button v-for="app in filteredCustomApps" :key="app.path" class="chip custom-app" type="button"
               :class="{ selected: openAppTargetOf(editingTarget.button, editingTarget.trigger) === app.path }"
               :title="app.name" @click="applyAction({ type: 'open_app', target: app.path })">{{ openAppLabel(app.name) }}</button>
-            <!-- 扫描 / 添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
-            <button class="chip" type="button" @click="appPickerError = null; appPickerOpen = true">{{ t("扫描本机应用") }}</button>
+            <!-- 唯一添加入口紧跟在所有应用之后、同一网格内换行（2026-10-20 用户要求：不要单独占一行）。 -->
             <button
               class="chip add-app"
               type="button"
-              :title="t('从本机选择任意程序或快捷方式')"
-              @click="addCustomApp"
+              :title="t('扫描本机应用，或选择任意程序或快捷方式')"
+              @click="appPickerError = null; appPickerOpen = true"
             >
-              {{ t("＋ 添加应用") }}
+              {{ t("添加应用") }}
             </button>
           </div>
           <div v-if="showAppFocusStrategy && focusTarget" class="focus-profile-summary">
@@ -2570,6 +2590,24 @@ onUnmounted(() => {
                 @click="applyAction({ type: 'scroll', direction, steps: scrollSteps })">{{ direction === "up" ? t("滚轮向上") : t("滚轮向下") }}</button>
             </div>
           </div>
+          <div class="page-action-row">
+            <button
+              v-for="item in [
+                { type: 'page_up' as const, label: '向上翻页' },
+                { type: 'page_down' as const, label: '向下翻页' },
+                { type: 'scroll_to_top' as const, label: '滚到顶部' },
+                { type: 'scroll_to_bottom' as const, label: '滚到底部' },
+              ]"
+              :key="item.type"
+              class="chip"
+              :class="{ selected: selectedAction?.type === item.type }"
+              type="button"
+              :title="t('使用 APP 适配里学习的滚动区域；没有记录时自动寻找可滚动容器')"
+              @click="applyAction({ type: item.type })"
+            >
+              {{ t(item.label) }}
+            </button>
+          </div>
           <label v-if="mouseAmountVisible" class="mouse-amount">
             <span>{{ mouseAmountKind === "mouse_move" ? t("每次移动") : t("每次滚动") }}</span>
             <input v-model="mouseAmountDraft"
@@ -2683,7 +2721,7 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
-    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @add="addScannedApps" />
+    <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
 </template>
@@ -2701,6 +2739,7 @@ onUnmounted(() => {
 .ok-click-hint { margin: 6px 0 0; font-size: 12px; }
 .mouse-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .mouse-action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.page-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .mouse-amount { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
 .mouse-amount input { width: 88px; max-width: 100%; padding: 5px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; }
 .mouse-amount-hint { color: var(--muted); }

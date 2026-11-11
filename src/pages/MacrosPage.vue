@@ -43,7 +43,6 @@ import {
   newStepId,
   nextMacroVersion,
   openAppLabel,
-  pickCustomApp,
   registerMacroNames,
   registerPresetAppNames,
   saveButtonMappings,
@@ -866,49 +865,26 @@ function applyChordToSelectedStep(chord: MacroChord): void {
   setStatus(t("已选择：{chord}", { chord: macroChordLabel(chord) }), "success");
 }
 
-/** 「添加应用」：复用按键页的原生选择器，并把应用写入共享的自定义应用列表。 */
-async function addCustomAppToStep(): Promise<void> {
-  try {
-    const pick = await pickCustomApp();
-    if (!pick) return;
-    const mappings = await getButtonMappings();
-    const applications = [
-      ...(mappings.applications ?? []).filter((app) => app.path !== pick.path),
-      { name: pick.name, path: pick.path },
-    ];
-    const saved = await saveButtonMappings({ ...mappings, applications });
-    customApps.value = (saved.applications ?? []).map((app) => ({
-      id: app.path,
-      name: app.name,
-    }));
-    renameStepTarget(pick.path);
-    setStatus(t("已添加应用：{name}", { name: pick.name }), "success");
-  } catch (error) {
-    setStatus(t("添加应用失败：{error}", { error: messageOf(error) }), "error");
-  }
-}
-
-/** 「扫描本机应用」弹窗确认：写入共享自定义应用列表，并选中第一个新增应用。 */
-async function addScannedApps(apps: CustomAppPick[]): Promise<void> {
-  if (apps.length === 0) return;
+/** 「添加应用」弹窗确认：写入共享自定义应用列表，并把当前步骤切换到该 APP。 */
+async function selectApp(app: CustomAppPick): Promise<void> {
   appPickerSaving.value = true;
   appPickerError.value = null;
   try {
     const mappings = await getButtonMappings();
-    const unique = new Map((mappings.applications ?? []).map((app) => [app.path.toLowerCase(), app]));
-    for (const app of apps) unique.set(app.path.toLowerCase(), app);
-    const saved = await saveButtonMappings({
-      ...mappings,
-      applications: [...unique.values()],
-    });
+    const key = app.path.toLowerCase();
+    const applications = [...(mappings.applications ?? [])];
+    if (!applications.some((candidate) => candidate.path.toLowerCase() === key)) {
+      applications.push({ name: app.name, path: app.path });
+    }
+    const saved = await saveButtonMappings({ ...mappings, applications });
     customApps.value = (saved.applications ?? []).map((app) => ({
       id: app.path,
       name: app.name,
     }));
     appPickerOpen.value = false;
     void reloadPresetApps();
-    renameStepTarget(apps[0].path);
-    setStatus(t("已添加 {count} 个应用", { count: apps.length }), "success");
+    renameStepTarget(app.path);
+    setStatus(t("已选择：{name}", { name: app.name }), "success");
   } catch (error) {
     appPickerError.value = messageOf(error);
   } finally {
@@ -1581,10 +1557,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="appPickerOpen = true">{{ t("扫描本机应用") }}</button>
-                      <button class="chip add-app" type="button" @click="addCustomAppToStep">
-                        {{"＋ "}}{{ t("添加应用") }}
-                      </button>
+                      <button class="chip add-app" type="button" :title="t('扫描本机应用，或选择任意程序或快捷方式')" @click="appPickerError = null; appPickerOpen = true">{{ t("添加应用") }}</button>
                     </div>
                   </div>
                   <span class="field-hint">
@@ -1613,10 +1586,7 @@ watch(
                       >
                         {{ app.name }}
                       </button>
-                      <button class="chip" type="button" @click="appPickerOpen = true">{{ t("扫描本机应用") }}</button>
-                      <button class="chip add-app" type="button" @click="addCustomAppToStep">
-                        {{"＋ "}}{{ t("添加应用") }}
-                      </button>
+                      <button class="chip add-app" type="button" :title="t('扫描本机应用，或选择任意程序或快捷方式')" @click="appPickerError = null; appPickerOpen = true">{{ t("添加应用") }}</button>
                     </div>
                   </div>
                   <div class="field">
@@ -1775,11 +1745,13 @@ watch(
                       >
                         {{ tr(openAppLabel(app.name)) }}
                       </button>
-                      <button class="chip" type="button" @click="appPickerOpen = true">
-                        {{ t("扫描本机应用") }}
-                      </button>
-                      <button class="chip add-app" type="button" @click="addCustomAppToStep">
-                        {{"＋ "}}{{ t("添加应用") }}
+                      <button
+                        class="chip add-app"
+                        type="button"
+                        :title="t('扫描本机应用，或选择任意程序或快捷方式')"
+                        @click="appPickerError = null; appPickerOpen = true"
+                      >
+                        {{ t("添加应用") }}
                       </button>
                     </div>
                   </div>
@@ -1928,7 +1900,7 @@ watch(
       :saving="appPickerSaving"
       :save-error="appPickerError"
       @close="appPickerOpen = false"
-      @add="addScannedApps"
+      @select="selectApp"
     />
   </div>
 </template>
@@ -2061,7 +2033,7 @@ watch(
 }
 .btn:disabled {
   opacity: 0.5;
-  cursor: not-allowed;
+  cursor: default;
 }
 .btn.primary {
   background: var(--accent);
