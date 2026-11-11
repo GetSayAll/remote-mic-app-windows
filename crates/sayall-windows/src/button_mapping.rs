@@ -3630,6 +3630,8 @@ mod tests {
 
     #[test]
     fn gate_edge_and_hid_report_merge_into_one_press() {
+        // 运行时退出会清进程级 app_switcher 遮蔽；与其他运行时测试串行，避免互相清掩码。
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -3692,6 +3694,7 @@ mod tests {
 
     #[test]
     fn listener_stop_releases_held_buttons_without_firing() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -3750,6 +3753,7 @@ mod tests {
 
     #[test]
     fn usage_counters_record_deduped_presses() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let usage = Arc::new(UsageCounters::default());
         let snapshot = Arc::new(StdMutex::new(RawInputSnapshot::default()));
         let runtime = ButtonMappingRuntime::new(
@@ -3797,6 +3801,7 @@ mod tests {
 
     #[test]
     fn set_mappings_preserves_back_and_volume_buttons_and_sets_persistent_mask() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         // 返回/音量±现在属于可配置按键；左键映射也必须保留并进入普通逐键武装机制。
         let runtime = ButtonMappingRuntime::new(
             Arc::new(RecordingInjector::default()) as Arc<dyn MappingInjector>,
@@ -4291,6 +4296,7 @@ mod tests {
     /// 未认领时照常触发（对照）。
     #[test]
     fn phrase_claim_precedes_gesture_recognition() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4346,6 +4352,7 @@ mod tests {
     /// 从未开始的按压做判定，污染下一轮为「幽灵双击」。
     #[test]
     fn phrase_claimed_press_release_is_consumed_without_ghost_gestures() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4404,6 +4411,7 @@ mod tests {
     /// 长按计时在 550ms 后引爆「幽灵长按」。
     #[test]
     fn panel_claimed_release_without_a_recorded_press_clears_stale_state() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4451,6 +4459,7 @@ mod tests {
     /// 关闭面板并清认领状态（评审 B2 的公开侧调用点，2026-10-15）。
     #[test]
     fn device_removed_and_listener_stopped_reset_the_phrase_host() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
@@ -4497,6 +4506,7 @@ mod tests {
     /// 补发一次幽灵单击）。
     #[test]
     fn phrase_claimed_press_survives_a_source_loss_without_ghost_gestures() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
         let injector = Arc::new(RecordingInjector::default());
         let host = Arc::new(MockPhraseHost::default());
         injector
