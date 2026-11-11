@@ -13,8 +13,10 @@ import {
   hideMainWindow,
   takeUpdateCompletedVersion,
   type AppIconIdentifier,
+  type RemoteModel,
   type RuntimeSnapshot,
 } from "./lib/bridge";
+import { loadRemoteModelHint, recognizedRemoteModel, storeRemoteModelHint } from "./lib/remote-artwork";
 import { profileAccountLabel } from "./lib/profile";
 import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
@@ -61,6 +63,12 @@ watch(activePage, (page) => {
   if (page === "profile") void refreshProfileLabel();
 });
 const runtime = ref<RuntimeSnapshot | null>(null);
+const lastKnownRemoteModel = ref<RemoteModel>(loadRemoteModelHint());
+watch(() => recognizedRemoteModel(runtime.value?.platform.connection), (model) => {
+  if (model === "unknown") return;
+  lastKnownRemoteModel.value = model;
+  storeRemoteModelHint(model);
+});
 const loadError = ref("");
 const { bannerVisible, info: updateInfo, dismissBanner, runStartupSilentCheck } = useAppUpdate();
 let runtimePollTimer: ReturnType<typeof setInterval> | undefined;
@@ -171,10 +179,13 @@ const activePageProps = computed(() => {
   if (activePage.value === "apps") {
     return { runtime: runtime.value, initialTarget: params?.appTarget ?? null };
   }
-  if (activePage.value === "buttons" && params?.button && params?.trigger) {
+  if (activePage.value === "buttons") {
     return {
       runtime: runtime.value,
-      initialEditor: { button: params.button, trigger: params.trigger },
+      remoteModelHint: lastKnownRemoteModel.value,
+      ...(params?.button && params?.trigger
+        ? { initialEditor: { button: params.button, trigger: params.trigger } }
+        : null),
     };
   }
   return { runtime: runtime.value };
@@ -306,6 +317,7 @@ onUnmounted(() => {
       v-if="showOnboarding"
       class="window-body"
       :runtime="runtime"
+      :remote-model-hint="lastKnownRemoteModel"
       @completed="onOnboardingCompleted"
     />
     <div v-else class="app-shell window-body">

@@ -7,6 +7,11 @@ export default {
 
   // 输入工具卡片与状态胶囊
   "豆包输入法": "Doubao",
+  "当前遥控器请使用微信输入法和默认语音键。": "Use WeType and its default voice trigger key with this remote.",
+  "请选择微信输入法，以设置当前遥控器所需的默认语音键。": "Choose WeType to set the default voice trigger key required by this remote.",
+  "推荐用于 Chrome 听写": "Recommended for dictation in Chrome",
+  "先点 Chrome 里的草稿框，再按住语音键说话。等文字出现在草稿里，确认内容后手动发送。说话时请留在当前输入框。":
+    "Click the draft field in Chrome and hold the voice button to speak. Wait for the text, review the draft, then send it yourself. Stay in the same field while speaking.",
   "要开启“支持更多输入工具”": "Turn on “More Input Tools”",
   "微信输入法": "WeType",
   "用默认语音键，最省事": "Uses the default voice trigger key; simplest option",
@@ -78,10 +83,10 @@ export default {
   "语音功能已就绪，按住遥控器语音键就能说话":
     "Voice is ready. Hold the remote's voice button and speak.",
   "连接后即可使用遥控器语音键": "Connect the remote to use its voice button.",
-  "正在寻找小米遥控器…": "Looking for Xiaomi remotes…",
-  "找到 {count} 个已配对的小米遥控器":
-    "Paired Xiaomi remotes found: {count}",
-  "没有找到已配对的小米遥控器": "No paired Xiaomi remote found",
+  "正在寻找遥控器…": "Looking for remotes…",
+  "找到 {count} 个已配对的遥控器":
+    "Paired remotes found: {count}",
+  "没有找到已配对的遥控器": "No paired remote found",
   "已连接，正在确认语音功能": "Connected. Confirming voice support…",
   "遥控器连接已释放，本次运行已停止自动重连":
     "Remote connection released. Automatic reconnection is off for this session.",

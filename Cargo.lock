@@ -3165,6 +3165,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sayall-macos"
+version = "0.0.0"
+dependencies = [
+ "sayall-core",
+]
+
+[[package]]
 name = "sayall-mcp"
 version = "0.0.0"
 dependencies = [
@@ -3208,10 +3215,12 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
+ "tempfile",
  "webview2-com",
  "windows 0.62.2",
  "windows-core 0.62.2",

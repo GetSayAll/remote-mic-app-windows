@@ -22,6 +22,8 @@ mod audio;
 pub mod battery;
 #[cfg(windows)]
 mod ble;
+mod local_dictation;
+pub use local_dictation::LocalDictationStatus;
 #[cfg(windows)]
 mod bluetooth_radio;
 mod button_gestures;
@@ -104,6 +106,8 @@ pub fn restore_input_method_after_capture() -> String {
 /// 本次开机的引导类型与「快速启动」开关状态（只读取证，2026-10-20）。
 /// 现场背景：hiberboot 开机后部分蓝牙适配器带旧固件状态，链路反复断开。
 pub mod boot_type;
+#[cfg(windows)]
+mod chromecast_hid_windows;
 /// 断连循环检测（纯逻辑）：识别"短时间内连续多次短会话"，只报告不恢复。
 #[cfg_attr(not(windows), allow(dead_code))]
 mod disconnect_loop;
@@ -221,6 +225,7 @@ pub fn device_token(raw: &str) -> String {
 pub enum RemoteModel {
     Rc001,
     Rc003,
+    Chromecast,
     #[default]
     Unknown,
 }
@@ -800,7 +805,15 @@ pub(crate) fn apply_enhanced_capture_state(
     enabled: bool,
 ) {
     enhanced_capture_enabled.store(enabled, Ordering::Relaxed);
-    rc003_bridge.set_capture_targets(enabled, button_mapping.mappings().mapped_mask());
+    // CAST-13：按当前目标型号选目标集路径——Chromecast 走消费页 usage，
+    // 小米走键盘报告 usage。桥接层保证两套目标集不混流。
+    let (target, _) = crate::remote_target::current();
+    if matches!(target, crate::remote_target::Target::Chromecast(_)) {
+        rc003_bridge
+            .set_cast_capture_targets(enabled, button_mapping.chromecast_mappings().mapped_mask());
+    } else {
+        rc003_bridge.set_capture_targets(enabled, button_mapping.mappings().mapped_mask());
+    }
 }
 
 impl WindowsPlatform {
@@ -1356,22 +1369,65 @@ impl WindowsPlatform {
         }
     }
 
+    /// Opt in to the next utterance from the currently connected Chromecast.
+    pub fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        #[cfg(windows)]
+        {
+            self.runtime.arm_local_dictation()
+        }
+        #[cfg(not(windows))]
+        {
+            Err(PlatformError::UnsupportedPlatform)
+        }
+    }
+
+    pub fn local_dictation_status(&self, _token: u64) -> LocalDictationStatus {
+        #[cfg(windows)]
+        {
+            self.runtime.local_dictation_status(_token)
+        }
+        #[cfg(not(windows))]
+        {
+            LocalDictationStatus::Idle
+        }
+    }
+
+    /// Move the completed 16 kHz mono PCM out once; the receiver owns its lifetime.
+    pub fn take_local_dictation(&self, _token: u64) -> Option<Vec<i16>> {
+        #[cfg(windows)]
+        {
+            self.runtime.take_local_dictation(_token)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    pub fn cancel_local_dictation(&self, _token: u64) -> bool {
+        #[cfg(windows)]
+        {
+            self.runtime.cancel_local_dictation(_token)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     pub fn connect_remote(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
         #[cfg(windows)]
         {
             // 用户在应用里选/换遥控器的**那一刻**就发布「正在用的那支」的地址
             // （2026-10-13 现场补充）：会话要等能力协商完才 Ready，而 Raw Input
-            // 绑定与助手选宿主都需要这个地址——只等 Ready 的话，应用刚启动、或
+            // 绑定提前需要这个地址——只等 Ready 的话，应用刚启动、或
             // 刚点连接而能力协商还没回来的那段时间里，两支遥控器同时在线就又会
             // 歧义失败（现场：`raw_input_listener` 每 10 秒失败一次，向导卡在
             // `remote.listener_not_ready`）。
-            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
-            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
+            // 此时型号尚未确认，只在内存里发布候选。BLE 识别为小米后才写助手
+            // 目标文件，避免把 Chromecast 地址提供给小米助手。
             let address = crate::bluetooth_address_from_device_id(&device_id);
-            crate::remote_target::set(address);
-            if address.is_some() {
-                self.rc003_bridge.request_retarget();
-            }
+            crate::remote_target::set_candidate(address);
             self.runtime.connect(device_id)
         }
 
@@ -1399,13 +1455,8 @@ impl WindowsPlatform {
         {
             // 启动时按已保存的选择立刻发布（同 `connect_remote` 的理由）：
             // 不等会话 Ready，Raw Input 就能在"两支同型号同时在位"时绑对那一支。
-            // 目标刚变：立刻叫醒助手的 watchdog（`R` 行），不必等它自己的 2 秒轮询——
-            // 换机后"按下就赶不上"的窗口由此从秒级压到毫秒级（2026-10-13 现场）。
             let address = crate::bluetooth_address_from_device_id(&device_id);
-            crate::remote_target::set(address);
-            if address.is_some() {
-                self.rc003_bridge.request_retarget();
-            }
+            crate::remote_target::set_candidate(address);
             self.runtime.restore(device_id)
         }
 
@@ -1555,6 +1606,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub fn is_supported_remote_name(raw_name: &str) -> bool {
+    if remote_model_from_name(raw_name) == RemoteModel::Chromecast {
+        return true;
+    }
     matches!(
         raw_name.trim().to_lowercase().as_str(),
         "mi rc"
@@ -1580,6 +1634,7 @@ pub fn remote_model_from_name(raw_name: &str) -> RemoteModel {
         .filter(|ch| !ch.is_whitespace())
         .collect();
     match compact.as_str() {
+        "chromecastremote" => RemoteModel::Chromecast,
         "xiaomibluetoothremote2" | "小米蓝牙遥控器2" | "小米蓝牙语音遥控器2" => {
             RemoteModel::Rc001
         }
@@ -1666,6 +1721,10 @@ pub enum PlatformError {
     WorkerUnavailable,
     #[error("BLE operation timed out")]
     OperationTimedOut,
+    #[error("请先连接已就绪的 Google Chromecast 遥控器")]
+    LocalDictationNotReady,
+    #[error("已有语音会话，请先完成或取消后再试")]
+    LocalDictationBusy,
     #[error("Xiaomi voice remote GATT service is missing")]
     VoiceServiceMissing,
     #[error("Xiaomi voice remote GATT characteristic {0} is missing")]
@@ -1857,6 +1916,20 @@ mod tests {
             Some(RemoteModel::Rc003)
         );
         assert_eq!(remote_model_from_model_number("RC002"), None);
+    }
+
+    #[test]
+    fn identifies_chromecast_without_claiming_other_google_remotes() {
+        assert!(is_supported_remote_name("Chromecast Remote"));
+        assert_eq!(
+            remote_model_from_name(" Chromecast Remote "),
+            RemoteModel::Chromecast
+        );
+        assert_eq!(
+            remote_model_from_name("Google TV Remote"),
+            RemoteModel::Unknown
+        );
+        assert!(!is_supported_remote_name("Google TV Remote"));
     }
 
     #[test]

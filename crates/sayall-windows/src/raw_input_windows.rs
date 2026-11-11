@@ -1,11 +1,17 @@
 use crate::button_mapping::EngineMessage;
+use crate::chromecast_hid_windows::Reader as CastHidReader;
 use crate::key_gate;
 use crate::raw_input::{
-    button_for_usage, decode_report_usages, normalize_device_path, parse_raw_hid_body,
-    select_single_device_path, DevicePathError, RawInputPhase, RawInputSnapshot, RawKeyboardEvent,
+    button_for_usage, chromecast_button_for_consumer_usage, chromecast_path_matches_target,
+    decode_chromecast_report, decode_report_usages, device_path_matches_chromecast_remote,
+    normalize_device_path, parse_raw_hid_body, report_route, select_single_device_path,
+    ChromecastInput, DevicePathError, RawInputDecodeError, RawInputPhase, RawInputSnapshot,
+    RawKeyboardEvent, RemoteButton, ReportRoute,
 };
+use crate::remote_target::Target;
 use crate::PlatformError;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
@@ -14,22 +20,34 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Devices::HumanInterfaceDevice::{
+    HidP_GetCaps, HidP_GetUsages, HidP_Input, HidP_MaxUsageListLength, HIDP_CAPS,
+    HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
+};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
-    GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
-    HRAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RAWKEYBOARD, RIDEV_DEVNOTIFY,
-    RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
+    GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, GetRegisteredRawInputDevices,
+    RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER,
+    RAWKEYBOARD, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME,
+    RIDI_PREPARSEDDATA, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, UnregisterClassW,
-    HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT,
-    WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
+    HWND_MESSAGE, MSG, RIM_INPUT, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
+    WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const CONSUMER_USAGE_PAGE: u16 = 0x0c;
+const CONSUMER_CONTROL_USAGE: u16 = 0x01;
+const CAST_DESCRIPTOR_REPORT_BYTES: usize = 3;
+const MAX_CAST_PREPARSED_BYTES: usize = 64 * 1024;
+const MAX_CAST_ACTIVE_USAGES: usize = 128;
+const CAST_DECODE_ERROR_PREFIX: &str = "Chromecast HID 报文解码失败";
+const WM_CAST_HID_READY: u32 = WM_APP + 1;
 /// 监听器观察到遥控器活动后武装 key_gate 的宽限（毫秒）。
 /// 2026-09-06 与 key_gate::ARM_GRACE_MS 一致提升为 4s：RC003 键盘孪生
 /// 孤立按压首沿泄漏后由此武装，4s 内后续按压不再泄漏（修复左键双响应，
@@ -48,10 +66,12 @@ const GIDC_REMOVAL: u32 = 2;
 /// 定时审计以"当前枚举结果是否仍包含绑定路径"为判据，弥补通知的漏失。
 const BINDING_AUDIT_TIMER_ID: usize = 0x5A11;
 const BINDING_AUDIT_INTERVAL_MS: u32 = 10_000;
+const WINDOW_INPUT_LOG_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_RAW_INPUT_REGISTRATIONS: u32 = 64;
 /// 遥控器 HID 接口缺失时给用户看的说明（启动路径与审计路径共用同一份文案，
 /// 避免两处各写一份而逐渐不一致）。
 const AWAITING_DEVICE_MESSAGE: &str =
-    "未找到小米遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
+    "未找到遥控器 HID 接口（Windows 侧 HOGP 链路尚未就绪，常见于断连、\
      睡眠唤醒或蓝牙栈僵死）。监听已就位，系统恢复该接口后会自动重新绑定，\
      无需手动重连或重启应用。";
 static CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -65,7 +85,7 @@ thread_local! {
 #[derive(Debug)]
 pub struct RawInputRuntime {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
-    engine: Mutex<Option<Sender<EngineMessage>>>,
+    engine: Sender<EngineMessage>,
     control: Mutex<Option<ListenerControl>>,
 }
 
@@ -75,7 +95,7 @@ impl RawInputRuntime {
         // 直接投递（见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）。
         Self {
             snapshot,
-            engine: Mutex::new(Some(engine)),
+            engine,
             control: Mutex::new(None),
         }
     }
@@ -112,12 +132,9 @@ impl RawInputRuntime {
         let snapshot = Arc::clone(&self.snapshot);
         let thread_stop = Arc::clone(&stop_requested);
         let thread_hwnd = Arc::clone(&hwnd);
-        let engine = self
-            .engine
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| mpsc::channel().0);
+        // Each listener run shares the same mapping worker, including after a
+        // failed startup or an explicit stop and restart.
+        let engine = self.engine.clone();
         let join = thread::Builder::new()
             .name("sayall-raw-input".to_owned())
             .spawn(move || {
@@ -137,7 +154,8 @@ impl RawInputRuntime {
                 // 门控只有在真正绑定到唯一遥控器 HID 设备时才具备归因来源（HID 报文
                 // 武装）。Awaiting 期间设备不在位，必须保持关闭——否则钩子会在没有
                 // 归因来源时仍按“监听器运行中”判定；接口恢复重绑时再打开。
-                key_gate::set_listener_active(snapshot.phase == RawInputPhase::Ready);
+                // The listener thread publishes whether the bound model supports the gate.
+                // Chromecast must never enable Xiaomi's keyboard suppression rules.
                 let awaiting = snapshot.phase == RawInputPhase::Awaiting;
                 crate::ble::gatt_note(format!(
                     "raw_input_listener action=start phase=completed terminal_result=passed matched_device_count={} awaiting_remote_hid_interface={}",
@@ -252,6 +270,156 @@ fn wait_for_thread(control: &mut ListenerControl, timeout: Duration) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CastRawInputCounters {
+    accepted_packets: u64,
+    rejected_paths: u64,
+    hid_reports: u64,
+    decoded_hid_reports: u64,
+    decoded_keyboard_packets: u64,
+    direct_reports: u64,
+    decode_failures: u64,
+    keyboard_unmapped: u64,
+    raw_engine_forwarded: u64,
+    engine_forwarded: u64,
+    engine_closed: u64,
+    last_report: Option<(u8, usize)>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct WindowInputCounters {
+    messages: u64,
+    packet_size_failed: u64,
+    packet_read_failed: u64,
+    short_header: u64,
+    unattributed_header: u64,
+    device_name_failed: u64,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct XiaomiRawInputCounters {
+    accepted_packets: u64,
+    rejected_paths: u64,
+    decoded_hid_reports: u64,
+    decoded_keyboard_packets: u64,
+    decode_failures: u64,
+    engine_forwarded: u64,
+    engine_closed: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RawInputRegistration {
+    keyboard: CollectionRegistration,
+    consumer_control: CollectionRegistration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CollectionRegistration {
+    target: &'static str,
+    flags: u32,
+}
+
+fn collection_registration(
+    registrations: &[RAWINPUTDEVICE],
+    window: HWND,
+    usage_page: u16,
+    usage: u16,
+) -> CollectionRegistration {
+    let Some(device) = registrations
+        .iter()
+        .find(|device| device.usUsagePage == usage_page && device.usUsage == usage)
+    else {
+        return CollectionRegistration {
+            target: "missing",
+            flags: 0,
+        };
+    };
+    CollectionRegistration {
+        target: if device.hwndTarget == window {
+            "listener"
+        } else {
+            "other_window"
+        },
+        // Windows may not echo all requested flags. Keep the readback value
+        // distinct from ownership and from the successful registration call.
+        flags: device.dwFlags.0,
+    }
+}
+
+fn read_registration(window: HWND) -> RawInputRegistration {
+    let failed = CollectionRegistration {
+        target: "readback_failed",
+        flags: 0,
+    };
+    let unavailable = RawInputRegistration {
+        keyboard: failed,
+        consumer_control: failed,
+    };
+    let struct_size = size_of::<RAWINPUTDEVICE>() as u32;
+    let mut count = 0;
+    if unsafe { GetRegisteredRawInputDevices(None, &mut count, struct_size) } == u32::MAX
+        || count > MAX_RAW_INPUT_REGISTRATIONS
+    {
+        return unavailable;
+    }
+    let mut registrations = vec![RAWINPUTDEVICE::default(); count as usize];
+    if count > 0 {
+        let read = unsafe {
+            GetRegisteredRawInputDevices(Some(registrations.as_mut_ptr()), &mut count, struct_size)
+        };
+        if read as usize > registrations.len() {
+            return unavailable;
+        }
+        registrations.truncate(read as usize);
+    }
+    RawInputRegistration {
+        keyboard: collection_registration(&registrations, window, 0x01, 0x06),
+        consumer_control: collection_registration(
+            &registrations,
+            window,
+            CONSUMER_USAGE_PAGE,
+            CONSUMER_CONTROL_USAGE,
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CastReportSource {
+    RawInput,
+    DirectHid,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CastReportRoute {
+    owner: Option<CastReportSource>,
+    needs_release: bool,
+}
+
+impl CastReportRoute {
+    fn accepts(&mut self, incoming: CastReportSource, pressed: bool) -> bool {
+        if self.needs_release {
+            if self.owner == Some(incoming) && !pressed {
+                self.needs_release = false;
+            }
+            return false;
+        }
+        // A release cannot claim a transport. Both edges must come from the
+        // same stream once a press has established ownership for this ID.
+        if self.owner.is_none() && pressed {
+            self.owner = Some(incoming);
+        }
+        self.owner == Some(incoming)
+    }
+}
+
+fn cast_report_index(report_id: u8) -> Option<usize> {
+    match report_id {
+        1 => Some(0),
+        2 => Some(1),
+        _ => None,
+    }
+}
+
 struct ListenerContext {
     selected_path: String,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
@@ -262,6 +430,432 @@ struct ListenerContext {
     /// 只用于把日志压成**边沿**（设备一直在位就静默），避免 10 秒一次的审计把
     /// 诊断日志刷满（LOGGING.md「状态未变化不重复刷」）。
     binding_present: bool,
+    input_generation: Option<u64>,
+    window_input: WindowInputCounters,
+    window_last_audit: Option<(WindowInputCounters, Instant)>,
+    xiaomi_input: XiaomiRawInputCounters,
+    xiaomi_last_audit: Option<(usize, XiaomiRawInputCounters)>,
+    registration: Option<RawInputRegistration>,
+    cast_collections: BTreeSet<String>,
+    cast_generation: Option<u64>,
+    cast_hid_descriptor: Option<(HANDLE, ChromecastHidDescriptor)>,
+    cast_report_rejection_logged: bool,
+    cast_input: CastRawInputCounters,
+    cast_last_audit: Option<(usize, CastRawInputCounters)>,
+    cast_reader: Option<CastHidReader>,
+    cast_reader_status: Option<&'static str>,
+    cast_report_routes: [CastReportRoute; 2],
+}
+
+impl ListenerContext {
+    fn sync_input_generation(&mut self, generation: u64) {
+        if self.input_generation != Some(generation) {
+            self.input_generation = Some(generation);
+            self.window_last_audit = None;
+            self.xiaomi_input = XiaomiRawInputCounters::default();
+            self.xiaomi_last_audit = None;
+        }
+    }
+
+    fn audit_registration(&mut self, window: HWND) {
+        let state = read_registration(window);
+        if self.registration != Some(state) {
+            self.registration = Some(state);
+            crate::ble::gatt_note(format!(
+                "raw_input action=registration_readback keyboard_target={} keyboard_flags=0x{:x} consumer_control_target={} consumer_control_flags=0x{:x}",
+                state.keyboard.target, state.keyboard.flags, state.consumer_control.target, state.consumer_control.flags
+            ));
+        }
+    }
+
+    fn audit_window_input(&mut self, target: Target, generation: u64, stopping: bool) {
+        let now = Instant::now();
+        if self.window_last_audit.is_some_and(|(previous, last_log)| {
+            previous == self.window_input
+                || (!stopping
+                    && previous.messages > 0
+                    && now.duration_since(last_log) < WINDOW_INPUT_LOG_INTERVAL)
+        }) {
+            return;
+        }
+        self.window_last_audit = Some((self.window_input, now));
+        let target_kind = match target {
+            Target::Chromecast(_) => "chromecast",
+            Target::XiaomiOrUnselected(Some(_)) => "xiaomi",
+            Target::XiaomiOrUnselected(None) => "unselected",
+        };
+        let WindowInputCounters {
+            messages,
+            packet_size_failed,
+            packet_read_failed,
+            short_header,
+            unattributed_header,
+            device_name_failed,
+        } = self.window_input;
+        // The window receives deliveries before attribution. Count them for
+        // this listener's lifetime without logging individual input events.
+        crate::ble::gatt_note(format!(
+            "raw_input action=window_flow generation={generation} target_kind={target_kind} scope=listener_lifetime messages={messages} packet_size_failed={packet_size_failed} packet_read_failed={packet_read_failed} short_header={short_header} unattributed_header={unattributed_header} device_name_failed={device_name_failed}"
+        ));
+    }
+
+    fn audit_xiaomi_input(&mut self, generation: u64, matched: usize) {
+        let audit = (matched, self.xiaomi_input);
+        if self.xiaomi_last_audit == Some(audit) {
+            return;
+        }
+        self.xiaomi_last_audit = Some(audit);
+        let XiaomiRawInputCounters {
+            accepted_packets,
+            rejected_paths,
+            decoded_hid_reports,
+            decoded_keyboard_packets,
+            decode_failures,
+            engine_forwarded,
+            engine_closed,
+        } = self.xiaomi_input;
+        crate::ble::gatt_note(format!(
+            "raw_input feature=xiaomi action=button_flow generation={generation} matched={matched} accepted_packets={accepted_packets} rejected_paths={rejected_paths} decoded_hid_reports={decoded_hid_reports} decoded_keyboard_packets={decoded_keyboard_packets} decode_failures={decode_failures} engine_forwarded={engine_forwarded} engine_closed={engine_closed}"
+        ));
+    }
+
+    fn forward_xiaomi_input(&mut self, message: EngineMessage) {
+        if self.engine.send(message).is_ok() {
+            self.xiaomi_input.engine_forwarded += 1;
+        } else {
+            self.xiaomi_input.engine_closed += 1;
+        }
+    }
+
+    fn set_cast_generation(&mut self, generation: u64) {
+        if self.cast_generation != Some(generation) {
+            self.cast_generation = Some(generation);
+            self.cast_collections.clear();
+            self.cast_hid_descriptor = None;
+            self.cast_report_rejection_logged = false;
+            self.cast_input = CastRawInputCounters::default();
+            self.cast_last_audit = None;
+            self.cast_reader = None;
+            self.cast_reader_status = None;
+            self.cast_report_routes = [CastReportRoute::default(); 2];
+        }
+    }
+
+    fn refresh_cast_reader(&mut self, hwnd: HWND, path: &str, address: u64, generation: u64) {
+        if self.cast_reader.is_some()
+            || crate::remote_target::current() != (Target::Chromecast(Some(address)), generation)
+        {
+            return;
+        }
+        let hwnd = hwnd.0 as usize;
+        let status = match CastHidReader::open(path, address, move || unsafe {
+            let _ = PostMessageW(
+                Some(HWND(hwnd as *mut c_void)),
+                WM_CAST_HID_READY,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }) {
+            Ok(Some(reader)) => {
+                let reader_id = reader.id();
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=direct_reader_binding generation={generation} reader_id={reader_id}"
+                ));
+                self.cast_reader = Some(reader);
+                "worker_started"
+            }
+            Ok(None) => "no_selected_collection",
+            Err(error) => error,
+        };
+        if self.cast_reader_status != Some(status) {
+            self.cast_reader_status = Some(status);
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=direct_reader generation={generation} status={status}"
+            ));
+        }
+    }
+
+    fn read_cast_reports(&mut self) {
+        let (Target::Chromecast(Some(address)), generation) = crate::remote_target::current()
+        else {
+            self.cast_reader = None;
+            return;
+        };
+        self.set_cast_generation(generation);
+        // The worker posts a wake for each enqueued report. Bound one window
+        // dispatch so an active device cannot starve disconnect/stop messages.
+        for _ in 0..32 {
+            let Some(reader) = self.cast_reader.as_ref() else {
+                break;
+            };
+            if reader.is_finished() {
+                self.cast_reader = None;
+                self.cast_reader_status = None;
+                if self
+                    .cast_report_routes
+                    .iter()
+                    .any(|route| route.owner == Some(CastReportSource::DirectHid))
+                {
+                    self.cast_collection_removed(address, generation);
+                }
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=direct_reader generation={generation} status=stopped"
+                ));
+                break;
+            }
+            let Some((report_id, buttons)) = reader.try_recv() else {
+                break;
+            };
+            self.cast_input.direct_reports += 1;
+            self.cast_input.last_report = Some((report_id, CAST_DESCRIPTOR_REPORT_BYTES));
+            self.forward_cast_report(
+                address,
+                generation,
+                CastReportSource::DirectHid,
+                report_id,
+                buttons,
+            );
+        }
+    }
+
+    fn audit_cast_input(&mut self, generation: u64, matched: usize) {
+        let audit = (matched, self.cast_input);
+        if self.cast_last_audit == Some(audit) {
+            return;
+        }
+        self.cast_last_audit = Some(audit);
+        let CastRawInputCounters {
+            accepted_packets,
+            rejected_paths,
+            hid_reports,
+            decoded_hid_reports,
+            decoded_keyboard_packets,
+            direct_reports,
+            decode_failures,
+            keyboard_unmapped,
+            raw_engine_forwarded,
+            engine_forwarded,
+            engine_closed,
+            last_report,
+        } = self.cast_input;
+        // Record a zero-packet baseline and changes only. Enumeration alone
+        // cannot tell whether Windows ever delivered a button report.
+        let report = last_report.map_or_else(
+            || "report_id=none report_bytes=0".to_owned(),
+            |(id, bytes)| format!("report_id={id} report_bytes={bytes}"),
+        );
+        crate::ble::gatt_note(format!(
+            "raw_input feature=chromecast action=button_flow generation={generation} matched={matched} accepted_packets={accepted_packets} rejected_paths={rejected_paths} hid_reports={hid_reports} decoded_hid_reports={decoded_hid_reports} decoded_keyboard_packets={decoded_keyboard_packets} direct_reports={direct_reports} decode_failures={decode_failures} keyboard_unmapped={keyboard_unmapped} raw_engine_forwarded={raw_engine_forwarded} engine_forwarded={engine_forwarded} engine_closed={engine_closed} {report}"
+        ));
+    }
+
+    fn forward_cast_report(
+        &mut self,
+        address: u64,
+        generation: u64,
+        source: CastReportSource,
+        report_id: u8,
+        buttons: BTreeSet<RemoteButton>,
+    ) {
+        if let Some(index) = cast_report_index(report_id) {
+            let route = &mut self.cast_report_routes[index];
+            let previous = route.owner;
+            if !route.accepts(source, !buttons.is_empty()) {
+                return;
+            }
+            if previous.is_none() {
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=select_button_transport generation={generation} report_id={report_id} source={source:?}"
+                ));
+            }
+        }
+        if source == CastReportSource::DirectHid {
+            self.snapshot.lock().unwrap().raw_event_count += 1;
+        }
+        self.forward_cast_button(
+            address,
+            generation,
+            ChromecastInput::Hid { report_id, buttons },
+            source,
+        );
+    }
+
+    fn forward_cast_button(
+        &mut self,
+        address: u64,
+        target_generation: u64,
+        input: ChromecastInput,
+        source: CastReportSource,
+    ) {
+        if self
+            .engine
+            .send(EngineMessage::Chromecast {
+                address,
+                target_generation,
+                input,
+            })
+            .is_ok()
+        {
+            self.cast_input.engine_forwarded += 1;
+            if source == CastReportSource::RawInput {
+                self.cast_input.raw_engine_forwarded += 1;
+            }
+        } else {
+            self.cast_input.engine_closed += 1;
+        }
+    }
+
+    fn decode_cast_hid(
+        &mut self,
+        device: HANDLE,
+        report: &[u8],
+    ) -> Result<BTreeSet<RemoteButton>, String> {
+        if !is_descriptor_cast_report(report) {
+            return decode_chromecast_report(report).map_err(|error| {
+                match error {
+                    RawInputDecodeError::UnsupportedReportShape(_) => "unsupported_report_length",
+                    RawInputDecodeError::InvalidReportPrefix => "unsupported_report_id_or_usage",
+                    _ => "malformed_report",
+                }
+                .to_owned()
+            });
+        }
+        if !self
+            .cast_hid_descriptor
+            .as_ref()
+            .is_some_and(|(cached_device, _)| *cached_device == device)
+        {
+            self.cast_hid_descriptor = Some((device, ChromecastHidDescriptor::read(device)?));
+            crate::ble::gatt_note(
+                "raw_input feature=chromecast action=load_descriptor phase=completed terminal_result=passed report_id=1 report_bytes=3 usage_page=consumer".to_owned(),
+            );
+        }
+        self.cast_hid_descriptor
+            .as_ref()
+            .expect("descriptor present after successful read")
+            .1
+            .decode(report)
+    }
+
+    fn record_cast_report_rejection(&mut self, report_id: u8, length: usize, error: String) {
+        if !self.cast_report_rejection_logged {
+            self.cast_report_rejection_logged = true;
+            crate::ble::gatt_note(format!(
+                "raw_input feature=chromecast action=decode phase=completed terminal_result=failed error_domain=hid error_code=report_rejected reason={error} report_id={report_id} report_bytes={length} retryable=true"
+            ));
+        }
+        self.snapshot.lock().unwrap().last_error =
+            Some(format!("{CAST_DECODE_ERROR_PREFIX}（{error}）"));
+    }
+
+    fn clear_cast_decode_error(&self) {
+        if self.cast_report_rejection_logged {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            if snapshot
+                .last_error
+                .as_ref()
+                .is_some_and(|error| error.starts_with(CAST_DECODE_ERROR_PREFIX))
+            {
+                snapshot.last_error = None;
+            }
+        }
+    }
+
+    fn cast_collection_removed(&mut self, address: u64, target_generation: u64) {
+        // The other transport can still have a duplicate press queued, and
+        // a reopened reader can see a held key. Keep the owner and require
+        // its neutral state before dispatching another press on that report ID.
+        for route in &mut self.cast_report_routes {
+            route.needs_release |= route.owner.is_some();
+        }
+        let _ = self.engine.send(EngineMessage::Chromecast {
+            address,
+            target_generation,
+            input: ChromecastInput::CollectionRemoved,
+        });
+    }
+}
+
+fn is_descriptor_cast_report(report: &[u8]) -> bool {
+    report.len() == CAST_DESCRIPTOR_REPORT_BYTES && report[0] == 1
+}
+
+struct ChromecastHidDescriptor {
+    // GetRawInputDeviceInfoW requires aligned storage. The buffer owns its copy
+    // of the opaque preparsed data; no HidD_FreePreparsedData call is needed.
+    data: Vec<usize>,
+    usage_limit: usize,
+}
+
+impl ChromecastHidDescriptor {
+    fn read(device: HANDLE) -> Result<Self, String> {
+        let mut size = 0;
+        let result =
+            unsafe { GetRawInputDeviceInfoW(Some(device), RIDI_PREPARSEDDATA, None, &mut size) };
+        let bytes = size as usize;
+        if result == u32::MAX || !(1..=MAX_CAST_PREPARSED_BYTES).contains(&bytes) {
+            return Err("preparsed_data_size_invalid".to_owned());
+        }
+        let mut data = vec![0usize; bytes.div_ceil(size_of::<usize>())];
+        let written = unsafe {
+            GetRawInputDeviceInfoW(
+                Some(device),
+                RIDI_PREPARSEDDATA,
+                Some(data.as_mut_ptr().cast()),
+                &mut size,
+            )
+        };
+        if written as usize != bytes {
+            return Err("preparsed_data_read_failed".to_owned());
+        }
+        let pointer = PHIDP_PREPARSED_DATA(data.as_ptr() as isize);
+        let mut caps = HIDP_CAPS::default();
+        let status = unsafe { HidP_GetCaps(pointer, &mut caps) };
+        if status != HIDP_STATUS_SUCCESS
+            || caps.UsagePage != CONSUMER_USAGE_PAGE
+            || caps.Usage != CONSUMER_CONTROL_USAGE
+            || usize::from(caps.InputReportByteLength) != CAST_DESCRIPTOR_REPORT_BYTES
+        {
+            return Err("consumer_collection_mismatch".to_owned());
+        }
+        let usage_limit = unsafe {
+            HidP_MaxUsageListLength(HidP_Input, Some(CONSUMER_USAGE_PAGE), pointer) as usize
+        };
+        if !(1..=MAX_CAST_ACTIVE_USAGES).contains(&usage_limit) {
+            return Err("consumer_usage_count_invalid".to_owned());
+        }
+        Ok(Self { data, usage_limit })
+    }
+
+    fn pointer(&self) -> PHIDP_PREPARSED_DATA {
+        PHIDP_PREPARSED_DATA(self.data.as_ptr() as isize)
+    }
+
+    fn decode(&self, report: &[u8]) -> Result<BTreeSet<RemoteButton>, String> {
+        let mut report = <[u8; CAST_DESCRIPTOR_REPORT_BYTES]>::try_from(report)
+            .map_err(|_| "invalid_report_length".to_owned())?;
+        let mut usages = [0u16; MAX_CAST_ACTIVE_USAGES];
+        let mut count = self.usage_limit as u32;
+        let status = unsafe {
+            HidP_GetUsages(
+                HidP_Input,
+                CONSUMER_USAGE_PAGE,
+                None,
+                usages.as_mut_ptr(),
+                &mut count,
+                self.pointer(),
+                &mut report,
+            )
+        };
+        if status != HIDP_STATUS_SUCCESS || count as usize > self.usage_limit {
+            return Err(format!("consumer_usage_parse_status_{:08x}", status.0));
+        }
+        Ok(usages[..count as usize]
+            .iter()
+            .copied()
+            .filter_map(chromecast_button_for_consumer_usage)
+            .collect())
+    }
 }
 
 fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
@@ -287,9 +881,23 @@ fn listener_thread(
     }
     hwnd_slot.store(0, Ordering::Release);
     THREAD_CONTEXT.with(|slot| {
-        if let Some(context) = slot.borrow_mut().take() {
+        if let Some(mut context) = slot.borrow_mut().take() {
             // 监听器退出：引擎释放全部按住状态（取消手势计时，不触发动作）。
             let _ = context.engine.send(EngineMessage::ListenerStopped);
+            let (target, generation) = crate::remote_target::current();
+            if context.input_generation == Some(generation) {
+                context.audit_window_input(target, generation, true);
+                let matched = context.snapshot.lock().unwrap().matched_device_count as usize;
+                match target {
+                    Target::Chromecast(Some(_)) if context.cast_generation == Some(generation) => {
+                        context.audit_cast_input(generation, matched);
+                    }
+                    Target::XiaomiOrUnselected(_) => {
+                        context.audit_xiaomi_input(generation, matched)
+                    }
+                    _ => {}
+                }
+            }
         }
     });
 
@@ -407,21 +1015,44 @@ fn run_listener(
             let first =
                 normalize_device_path(paths.first().map(String::as_str).unwrap_or_default());
             crate::ble::gatt_note(format!(
-                "raw_input binding_initial action=ambiguous_pick selected_path={first} \
+                "raw_input binding_initial action=ambiguous_pick \
                  matched_device_count={count}"
             ));
             first
         }
     };
+    key_gate::set_listener_active(
+        !selected_path.is_empty() && !device_path_matches_chromecast_remote(&selected_path),
+    );
     THREAD_CONTEXT.with(|slot| {
-        *slot.borrow_mut() = Some(ListenerContext {
+        let mut context = ListenerContext {
             selected_path: selected_path.clone(),
             snapshot: Arc::clone(&snapshot),
             engine,
             remote_voice_f5_pressed: false,
             // 启动时就绑定成功 = 设备此刻在位；空路径是 Awaiting，等接口出现。
             binding_present: !selected_path.is_empty(),
-        });
+            input_generation: None,
+            window_input: WindowInputCounters::default(),
+            window_last_audit: None,
+            xiaomi_input: XiaomiRawInputCounters::default(),
+            xiaomi_last_audit: None,
+            registration: None,
+            cast_collections: BTreeSet::new(),
+            cast_generation: None,
+            cast_hid_descriptor: None,
+            cast_report_rejection_logged: false,
+            cast_input: CastRawInputCounters::default(),
+            cast_last_audit: None,
+            cast_reader: None,
+            cast_reader_status: None,
+            cast_report_routes: [CastReportRoute::default(); 2],
+        };
+        let (target, generation) = crate::remote_target::current();
+        context.sync_input_generation(generation);
+        context.audit_registration(window);
+        context.audit_window_input(target, generation, false);
+        *slot.borrow_mut() = Some(context);
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
     TARGET_PATH_ACCEPT_LOGGED.store(false, Ordering::Relaxed);
@@ -439,8 +1070,7 @@ fn run_listener(
     // 启动时的绑定结论要留痕：后续所有 binding_audit 记录都以此为基准，
     // 没有这一条就无法判断"是从未绑上"还是"绑上后掉了"（2026-09-18）。
     crate::ble::gatt_note(format!(
-        "raw_input binding_initial selected_path={selected_path} matched_device_count={} \
-         phase={}",
+        "raw_input binding_initial matched_device_count={} phase={}",
         paths.len(),
         if selected_path.is_empty() {
             "awaiting"
@@ -472,7 +1102,7 @@ fn run_listener(
         _ => {
             crate::ble::gatt_note(format!(
                 "raw_input binding_audit action=timer_armed interval_ms={BINDING_AUDIT_INTERVAL_MS} \
-                 selected_path={selected_path} binding_present={}",
+                 binding_present={}",
                 !selected_path.is_empty()
             ));
         }
@@ -536,6 +1166,18 @@ unsafe extern "system" fn window_proc(
                     }
                 });
             }
+            if wparam.0 & 0xff == RIM_INPUT as usize {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            } else {
+                LRESULT(0)
+            }
+        }
+        WM_CAST_HID_READY => {
+            THREAD_CONTEXT.with(|slot| {
+                if let Some(context) = slot.borrow_mut().as_mut() {
+                    context.read_cast_reports();
+                }
+            });
             LRESULT(0)
         }
         WM_INPUT_DEVICE_CHANGE => {
@@ -560,7 +1202,7 @@ unsafe extern "system" fn window_proc(
                     );
                     return LRESULT(0);
                 }
-                audit_binding();
+                audit_binding(hwnd);
             }
             LRESULT(0)
         }
@@ -614,7 +1256,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
         Ok(path) => normalize_device_path(&path),
         Err(_) => return,
     };
-    let is_remote = crate::raw_input::device_path_matches_xiaomi_remote(&device_path);
+    let is_remote = crate::raw_input::device_path_matches_supported_remote(&device_path);
     THREAD_CONTEXT.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let context = match borrowed.as_mut() {
@@ -643,7 +1285,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                         paths.len()
                     ));
                     // 重新绑定到唯一设备后，门控重新具备归因来源。
-                    key_gate::set_listener_active(true);
+                    key_gate::set_listener_active(!device_path_matches_chromecast_remote(&context.selected_path));
                     // 遥控器 HID 接口已回到无线电上：通知 ble 立即重试，
                     // 不必等退避到期（只提前，不延后/不门控）。
                     // 只在确实绑定到遥控器时发出——`paths` 已由
@@ -657,15 +1299,29 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                 // 已绑定且本次选择变歧义：保留既有绑定，不回退。
             }
         } else if event == GIDC_REMOVAL {
+            let (target, generation) = crate::remote_target::current();
+            let cast_removal = matches!(target, Target::Chromecast(Some(address))
+                if chromecast_path_matches_target(&device_path, address));
+            if let Target::Chromecast(Some(address)) = target {
+                if cast_removal {
+                    context.set_cast_generation(generation);
+                    context.cast_collections.remove(&device_path);
+                    context.cast_hid_descriptor = None;
+                    context.cast_reader = None;
+                    context.cast_collection_removed(address, generation);
+                }
+            }
             if device_path == context.selected_path {
                 context.selected_path.clear();
                 let mut state = context.snapshot.lock().unwrap();
                 state.phase = RawInputPhase::Awaiting;
                 state.last_error = Some(
-                    "小米遥控器 HID 接口已移除（断连/睡眠），等待重新连接后自动恢复".to_owned(),
+                    "遥控器 HID 接口已移除（断连/睡眠），等待重新连接后自动恢复".to_owned(),
                 );
                 drop(state);
-                let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                if !cast_removal {
+                    let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                }
                 // 解绑即失去归因来源：关闭门控并清空武装宽限，避免按住中的键在
                 // 接口恢复重绑后仍带着旧武装状态被吞。
                 key_gate::set_listener_active(false);
@@ -687,13 +1343,17 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
 ///
 /// 只在状态**变化**时写日志：设备一直在位就静默返回，避免 10 秒一次的审计刷屏
 /// （LOGGING.md「状态未变化不重复刷」）。
-fn audit_binding() {
+fn audit_binding(hwnd: HWND) {
     THREAD_CONTEXT.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let context = match borrowed.as_mut() {
             Some(context) => context,
             None => return,
         };
+        let (target, generation) = crate::remote_target::current();
+        context.sync_input_generation(generation);
+        context.audit_registration(hwnd);
+        context.audit_window_input(target, generation, false);
         let paths = match enumerate_matching_device_paths() {
             Ok(paths) => paths,
             Err(error) => {
@@ -708,6 +1368,27 @@ fn audit_binding() {
                 return;
             }
         };
+        if let Target::Chromecast(Some(address)) = target {
+            context.set_cast_generation(generation);
+            let present: BTreeSet<_> =
+                paths.iter().map(|path| normalize_device_path(path)).collect();
+            if !context.cast_collections.is_subset(&present) {
+                context.cast_hid_descriptor = None;
+                context.cast_reader = None;
+                context.cast_collection_removed(address, generation);
+            }
+            context.cast_collections = present;
+            if let [path] = paths.as_slice() {
+                context.read_cast_reports();
+                context.refresh_cast_reader(hwnd, path, address, generation);
+            }
+            context.audit_cast_input(generation, paths.len());
+        } else {
+            context.cast_reader = None;
+            if matches!(target, Target::XiaomiOrUnselected(_)) {
+                context.audit_xiaomi_input(generation, paths.len());
+            }
+        }
         let still_bound = !context.selected_path.is_empty()
             && paths
                 .iter()
@@ -731,14 +1412,24 @@ fn audit_binding() {
         // 永远等不到释放边沿（粘键），代价远高于沿用旧绑定。旧路径确实还在候选里时
         // 沿用它是无代价的；真换了设备/实例（旧路径不在候选里）才退回 Ambiguous。
         let candidate_count = paths.len();
-        match crate::raw_input::select_single_device_path_preferring(&paths, &context.selected_path)
-        {
+        let candidate = crate::raw_input::select_single_device_path_preferring(
+            &paths,
+            &context.selected_path,
+        );
+        // Several collections can belong to one confirmed Cast. This path is
+        // only the diagnostic anchor; reports still match the exact address.
+        let candidate = match (target, candidate) {
+            (Target::Chromecast(Some(_)), Err(DevicePathError::Ambiguous(_))) => {
+                paths.first().cloned().ok_or(DevicePathError::Missing)
+            }
+            (_, candidate) => candidate,
+        };
+        match candidate {
             Ok(path) => {
                 let rebound_path = normalize_device_path(&path);
                 // 换了还是没换？前者说明设备/实例真的变了，后者说明多候选里沿用了
                 // 旧绑定。两者的诊断含义完全不同，所以分开记（2026-09-18）。
                 let kept_previous = rebound_path == context.selected_path;
-                let previous_path = context.selected_path.clone();
                 context.selected_path = rebound_path;
                 context.binding_present = true;
                 let stale_remote_event_count = {
@@ -749,12 +1440,10 @@ fn audit_binding() {
                     state.stale_remote_event_count
                 };
                 // 重新绑定后门控才重新具备归因来源。
-                key_gate::set_listener_active(true);
+                key_gate::set_listener_active(!device_path_matches_chromecast_remote(&context.selected_path));
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=rebound kept_previous={kept_previous} \
-                     matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count} \
-                     previous_path={previous_path} rebound_path={}",
-                    context.selected_path
+                     matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count}"
                 ));
             }
             Err(crate::raw_input::DevicePathError::Missing) => {
@@ -763,7 +1452,6 @@ fn audit_binding() {
                     return;
                 }
                 context.binding_present = false;
-                let previous_path = context.selected_path.clone();
                 context.selected_path.clear();
                 let stale_remote_event_count = {
                     let mut state = context.snapshot.lock().unwrap();
@@ -773,13 +1461,15 @@ fn audit_binding() {
                     state.stale_remote_event_count
                 };
                 // 接口消失：让引擎释放按住状态，避免留下永远等不到配对的按下边沿。
-                let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                if !matches!(target, Target::Chromecast(_)) {
+                    let _ = context.engine.send(EngineMessage::DeviceRemoved);
+                }
                 key_gate::set_listener_active(false);
-                // 带上丢失的路径与陈旧报文计数：这是判断"按键失效是接口消失还是
+                // 记下解绑原因与陈旧报文计数：这是判断"按键失效是接口消失还是
                 // 报文被路径过滤丢弃"的关键一组数字（2026-09-18）。
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=unbound reason=device_missing \
-                     stale_remote_event_count={stale_remote_event_count} lost_path={previous_path}"
+                     stale_remote_event_count={stale_remote_event_count}"
                 ));
             }
             Err(crate::raw_input::DevicePathError::Ambiguous(count)) => {
@@ -791,8 +1481,7 @@ fn audit_binding() {
                         context.snapshot.lock().unwrap().stale_remote_event_count;
                     crate::ble::gatt_note(format!(
                         "raw_input binding_audit action=ambiguous candidate_count={count} \
-                         stale_remote_event_count={stale_remote_event_count} kept_path={}",
-                        context.selected_path
+                         stale_remote_event_count={stale_remote_event_count}"
                     ));
                 }
             }
@@ -801,82 +1490,93 @@ fn audit_binding() {
 }
 
 fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
-    let mut size = 0u32;
-    let header_size = size_of::<RAWINPUTHEADER>() as u32;
-    let first = unsafe { GetRawInputData(handle, RID_INPUT, None, &mut size, header_size) };
-    if first == u32::MAX || size < header_size {
-        return Err("GetRawInputData size query failed".to_owned());
-    }
-    let mut bytes = vec![0u8; size as usize];
-    let written = unsafe {
-        GetRawInputData(
-            handle,
-            RID_INPUT,
-            Some(bytes.as_mut_ptr().cast()),
-            &mut size,
-            header_size,
-        )
-    };
-    if written == u32::MAX || written as usize != bytes.len() {
-        return Err("GetRawInputData returned an incomplete packet".to_owned());
-    }
-    let header = unsafe { bytes.as_ptr().cast::<RAWINPUTHEADER>().read_unaligned() };
-    // 注入事件（hDevice 为空）不属于任何遥控器设备：静默忽略，
-    // 避免把 GetRawInputDeviceInfoW(NULL) 的错误写入诊断快照。
-    if header.hDevice.is_invalid() || header.hDevice.0.is_null() {
-        return Ok(());
-    }
-    let device_path = get_device_name(header.hDevice)?;
-    let body = &bytes[header_size as usize..];
-
     THREAD_CONTEXT.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let context = borrowed
             .as_mut()
             .ok_or_else(|| "Raw Input listener context is unavailable".to_owned())?;
+        context.window_input.messages += 1;
+
+        let mut size = 0u32;
+        let header_size = size_of::<RAWINPUTHEADER>() as u32;
+        let first = unsafe { GetRawInputData(handle, RID_INPUT, None, &mut size, header_size) };
+        if first == u32::MAX || size < header_size {
+            if first == u32::MAX {
+                context.window_input.packet_size_failed += 1;
+            } else {
+                context.window_input.short_header += 1;
+            }
+            return Err("GetRawInputData size query failed".to_owned());
+        }
+        let mut bytes = vec![0u8; size as usize];
+        let written = unsafe {
+            GetRawInputData(
+                handle,
+                RID_INPUT,
+                Some(bytes.as_mut_ptr().cast()),
+                &mut size,
+                header_size,
+            )
+        };
+        if written == u32::MAX || written as usize != bytes.len() {
+            context.window_input.packet_read_failed += 1;
+            return Err("GetRawInputData returned an incomplete packet".to_owned());
+        }
+        let header = unsafe { bytes.as_ptr().cast::<RAWINPUTHEADER>().read_unaligned() };
+        // 注入事件（hDevice 为空）不属于任何遥控器设备：不尝试读取设备名，
+        // 避免把 GetRawInputDeviceInfoW(NULL) 的错误写入诊断快照。
+        if header.hDevice.is_invalid() || header.hDevice.0.is_null() {
+            context.window_input.unattributed_header += 1;
+            return Ok(());
+        }
+        let device_path = get_device_name(header.hDevice).inspect_err(|_| {
+            context.window_input.device_name_failed += 1;
+        })?;
+        let body = &bytes[header_size as usize..];
         let normalized = normalize_device_path(&device_path);
         // 接受判据（2026-10-13 现场，纯逻辑在 `raw_input::report_path_accepted`）：
         // 有目标地址时**只认那一支**（绑定路径或同地址的其他实例）；绑定若停在另一支上，
         // 那一支的报文一律按"另一支"处理；还没有目标时沿用旧行为（只认绑定路径）。
         // 现场教训：只看"报文路径 == 绑定路径"，会在启动抢绑或换机时把**另一支遥控器**的
         // 按键当成本机按键（用户连的是 2 Pro、按 2 却让②步通过了）。
-        let accepted = crate::raw_input::report_path_accepted(
-            &context.selected_path,
-            crate::remote_target::get(),
-            &normalized,
-        );
-        if !accepted {
+        let (target, target_generation) = crate::remote_target::current();
+        context.sync_input_generation(target_generation);
+        let Some(route) = report_route(&context.selected_path, target, &normalized) else {
             // 绑定失配或"不是当前那一支"：报文可能来自别的设备（物理键盘等），也可能是
             // 遥控器的 HID 接口换了实例而本地绑定还没跟上。只有后者值得计数——它是"绑定失效"
             // 的直接证据，也是把「设备根本没发报文」与「报文被路径过滤丢弃」
             // 区分开的唯一线索（2026-09-18 现场正是无法区分这两者才迟迟定不了位）。
-            if crate::raw_input::device_path_matches_xiaomi_remote(&normalized) {
-                let (count, first) = {
+            if crate::raw_input::device_path_matches_supported_remote(&normalized) {
+                if matches!(target, Target::Chromecast(Some(_)))
+                    && device_path_matches_chromecast_remote(&normalized)
+                {
+                    context.set_cast_generation(target_generation);
+                    context.cast_input.rejected_paths += 1;
+                }
+                if matches!(target, Target::XiaomiOrUnselected(_))
+                    && crate::raw_input::device_path_matches_xiaomi_remote(&normalized)
+                {
+                    context.xiaomi_input.rejected_paths += 1;
+                }
+                let first = {
                     let mut state = context.snapshot.lock().unwrap();
                     state.stale_remote_event_count += 1;
-                    (
-                        state.stale_remote_event_count,
-                        state.stale_remote_event_count == 1,
-                    )
+                    state.stale_remote_event_count == 1
                 };
                 // 只在第一次失配时写日志（计数的**开始时刻**才是定位线索；
                 // 后续每条都写会把诊断日志刷满，而这批报文的真实来源靠计数即可）。
                 if first {
-                    let bound_path = context.selected_path.clone();
                     let binding_present = context.binding_present;
                     let phase = context.snapshot.lock().unwrap().phase;
                     crate::ble::gatt_note(format!(
-                        "raw_input stale_remote_event first_seen bound_path={bound_path} \
-                         binding_present={binding_present} phase={phase:?} \
-                         event_path={normalized} \
-                         hint=遥控器仍在发报文但路径与绑定不符（多候选时期最可能），\
-                         或绑定被审计清空后报文仍到达"
+                        "raw_input stale_remote_event first_seen binding_present={binding_present} \
+                         phase={phase:?} target_kind={}",
+                        if matches!(target, Target::Chromecast(_)) { "chromecast" } else { "xiaomi_or_unselected" }
                     ));
                 }
-                let _ = count;
             }
             return Ok(());
-        }
+        };
         if normalized != context.selected_path {
             // 走的是新增的"目标地址"兜底路径：旧绑定没跟上实例变化，但输入没受影响。
             // 只记第一次（无设备身份、无路径），下一次现场看这条就知道兜底在工作。
@@ -888,17 +1588,87 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         }
         context.snapshot.lock().unwrap().raw_event_count += 1;
 
-        if header.dwType == RIM_TYPEKEYBOARD.0 {
-            if body.len() < size_of::<RAWKEYBOARD>() {
-                return Err("RAWKEYBOARD packet is truncated".to_owned());
+        if let ReportRoute::Chromecast(address) = route {
+            context.set_cast_generation(target_generation);
+            context.cast_input.accepted_packets += 1;
+            if context.cast_input.accepted_packets == 1 {
+                let packet_type = match header.dwType {
+                    kind if kind == RIM_TYPEHID.0 => "hid",
+                    kind if kind == RIM_TYPEKEYBOARD.0 => "keyboard",
+                    _ => "other",
+                };
+                crate::ble::gatt_note(format!(
+                    "raw_input feature=chromecast action=first_button_packet generation={target_generation} packet_type={packet_type}"
+                ));
             }
-            let keyboard = unsafe { body.as_ptr().cast::<RAWKEYBOARD>().read_unaligned() };
-            let event = RawKeyboardEvent {
-                make_code: keyboard.MakeCode,
-                flags: keyboard.Flags,
-                virtual_key: keyboard.VKey,
-                message: keyboard.Message,
-            };
+            context.cast_collections.insert(normalized);
+            if header.dwType == RIM_TYPEHID.0 {
+                let reports = parse_raw_hid_body(body).map_err(|error| {
+                    context.cast_input.decode_failures += 1;
+                    error.to_string()
+                })?;
+                for report in reports {
+                    let report_id = report[0];
+                    context.cast_input.hid_reports += 1;
+                    context.cast_input.last_report = Some((report_id, report.len()));
+                    if cast_report_index(report_id).is_some_and(|index| {
+                        context.cast_report_routes[index].owner == Some(CastReportSource::DirectHid)
+                    }) {
+                        continue;
+                    }
+                    match context.decode_cast_hid(header.hDevice, report) {
+                        Ok(buttons) => {
+                            context.cast_input.decoded_hid_reports += 1;
+                            context.clear_cast_decode_error();
+                            context.forward_cast_report(
+                                address,
+                                target_generation,
+                                CastReportSource::RawInput,
+                                report_id,
+                                buttons,
+                            );
+                        }
+                        Err(error) => {
+                            context.cast_input.decode_failures += 1;
+                            context.record_cast_report_rejection(report_id, report.len(), error);
+                            if is_descriptor_cast_report(report) {
+                                // The missing state could be the release. Clear
+                                // the pending gesture without firing a shortcut.
+                                let _ = context.engine.send(EngineMessage::Chromecast {
+                                    address,
+                                    target_generation,
+                                    input: ChromecastInput::ReportRejected,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if header.dwType == RIM_TYPEKEYBOARD.0 {
+                let event = decode_keyboard(body).inspect_err(|_| {
+                    context.cast_input.decode_failures += 1;
+                })?;
+                context.cast_input.decoded_keyboard_packets += 1;
+                if let Some(edge) = event.chromecast_edge() {
+                    context.forward_cast_button(
+                        address,
+                        target_generation,
+                        ChromecastInput::Keyboard(edge),
+                        CastReportSource::RawInput,
+                    );
+                } else {
+                    context.cast_input.keyboard_unmapped += 1;
+                }
+            }
+            // This device never enters Xiaomi's F5 or native key gate paths.
+            return Ok(());
+        }
+
+        context.xiaomi_input.accepted_packets += 1;
+        if header.dwType == RIM_TYPEKEYBOARD.0 {
+            let event = decode_keyboard(body).inspect_err(|_| {
+                context.xiaomi_input.decode_failures += 1;
+            })?;
+            context.xiaomi_input.decoded_keyboard_packets += 1;
             // Raw Input 在同一进程内每种设备类只能注册一个接收窗口；由本
             // 主监听器统一把已归因的小米遥控器语音 F5 转发给抑制器与
             // BLE 立即重连逻辑，避免第二个注册窗口相互覆盖。
@@ -913,10 +1683,18 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             if let Some(button) = event.button() {
                 key_gate::arm_button(button, GATE_ARM_GRACE_MS);
             }
-            let _ = context.engine.send(EngineMessage::Keyboard(event));
+            context.forward_xiaomi_input(EngineMessage::Keyboard(event));
         } else if header.dwType == RIM_TYPEHID.0 {
-            for report in parse_raw_hid_body(body).map_err(|error| error.to_string())? {
-                let usages = decode_report_usages(report).map_err(|error| error.to_string())?;
+            let reports = parse_raw_hid_body(body).map_err(|error| {
+                context.xiaomi_input.decode_failures += 1;
+                error.to_string()
+            })?;
+            for report in reports {
+                let usages = decode_report_usages(report).map_err(|error| {
+                    context.xiaomi_input.decode_failures += 1;
+                    error.to_string()
+                })?;
+                context.xiaomi_input.decoded_hid_reports += 1;
                 // HID 报文（独立管线，不受键盘 LL 钩子影响）到达即武装
                 // 对应按键：其键盘孪生事件在钩子里据此归因吞键。
                 for usage in &usages {
@@ -924,10 +1702,23 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                         key_gate::arm_button(button, GATE_ARM_GRACE_MS);
                     }
                 }
-                let _ = context.engine.send(EngineMessage::HidUsages(usages));
+                context.forward_xiaomi_input(EngineMessage::HidUsages(usages));
             }
         }
         Ok(())
+    })
+}
+
+fn decode_keyboard(body: &[u8]) -> Result<RawKeyboardEvent, String> {
+    if body.len() < size_of::<RAWKEYBOARD>() {
+        return Err("RAWKEYBOARD packet is truncated".to_owned());
+    }
+    let keyboard = unsafe { body.as_ptr().cast::<RAWKEYBOARD>().read_unaligned() };
+    Ok(RawKeyboardEvent {
+        make_code: keyboard.MakeCode,
+        flags: keyboard.Flags,
+        virtual_key: keyboard.VKey,
+        message: keyboard.Message,
     })
 }
 
@@ -948,23 +1739,33 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
         return Err("GetRawInputDeviceList enumeration failed".to_owned());
     }
 
+    let (target, _) = crate::remote_target::current();
     let mut paths = Vec::new();
     for device in devices.into_iter().take(written as usize) {
         if device.dwType != RIM_TYPEKEYBOARD && device.dwType != RIM_TYPEHID {
             continue;
         }
         if let Ok(path) = get_device_name(device.hDevice) {
-            if crate::raw_input::device_path_matches_xiaomi_remote(&path) {
+            let matches = match target {
+                Target::XiaomiOrUnselected(_) => {
+                    crate::raw_input::device_path_matches_xiaomi_remote(&path)
+                }
+                Target::Chromecast(Some(address)) => chromecast_path_matches_target(&path, address),
+                Target::Chromecast(None) => false,
+            };
+            if matches {
                 paths.push(path);
             }
         }
     }
     // 两台同型号遥控器同时在线时按「应用正在用的那支」收窄候选（2026-10-13）：
     // 地址未知时这一行是恒等变换（行为与过去完全一致）。
-    Ok(crate::raw_input::filter_paths_for_target(
-        &paths,
-        crate::remote_target::get(),
-    ))
+    match target {
+        Target::XiaomiOrUnselected(address) => {
+            Ok(crate::raw_input::filter_paths_for_target(&paths, address))
+        }
+        Target::Chromecast(_) => Ok(paths),
+    }
 }
 
 fn get_device_name(device: windows::Win32::Foundation::HANDLE) -> Result<String, String> {
@@ -1000,8 +1801,211 @@ fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {
 }
 
 #[cfg(test)]
+pub(crate) fn chromecast_descriptor_test_edges() -> [ChromecastInput; 2] {
+    use windows::Win32::Devices::HumanInterfaceDevice::{
+        HidP_InitializeReportForID, HIDP_REPORT_TYPE,
+    };
+    use windows::Win32::Foundation::NTSTATUS;
+
+    // The generated binding borrows a read-only slice for this output
+    // parameter. Declare the actual mutable C pointer for the test helper.
+    #[link(name = "hid")]
+    extern "system" {
+        fn HidP_SetUsages(
+            report_type: HIDP_REPORT_TYPE,
+            usage_page: u16,
+            link_collection: u16,
+            usage_list: *mut u16,
+            usage_count: *mut u32,
+            data: PHIDP_PREPARSED_DATA,
+            report: *mut u8,
+            report_bytes: u32,
+        ) -> NTSTATUS;
+    }
+
+    let mut count = 0;
+    let stride = size_of::<RAWINPUTDEVICELIST>() as u32;
+    let queried = unsafe { GetRawInputDeviceList(None, &mut count, stride) };
+    assert_ne!(queried, u32::MAX);
+    let mut devices = vec![RAWINPUTDEVICELIST::default(); count as usize];
+    let listed = unsafe { GetRawInputDeviceList(Some(devices.as_mut_ptr()), &mut count, stride) };
+    assert_ne!(listed, u32::MAX);
+    let (device, descriptor) = devices[..listed as usize]
+        .iter()
+        .filter(|entry| entry.dwType == RIM_TYPEHID)
+        .find_map(|entry| {
+            let path = get_device_name(entry.hDevice).ok()?;
+            if !device_path_matches_chromecast_remote(&path) {
+                return None;
+            }
+            Some((
+                entry.hDevice,
+                ChromecastHidDescriptor::read(entry.hDevice).ok()?,
+            ))
+        })
+        .expect("present Chromecast consumer HID descriptor with three-byte input reports");
+    let mut release = [0; CAST_DESCRIPTOR_REPORT_BYTES];
+    assert_eq!(
+        unsafe { HidP_InitializeReportForID(HidP_Input, 1, descriptor.pointer(), &mut release) },
+        HIDP_STATUS_SUCCESS
+    );
+    let mut press = release;
+    let mut usage = 0x0041u16;
+    let mut usage_count = 1u32;
+    assert_eq!(
+        unsafe {
+            HidP_SetUsages(
+                HidP_Input,
+                CONSUMER_USAGE_PAGE,
+                0,
+                &mut usage,
+                &mut usage_count,
+                descriptor.pointer(),
+                press.as_mut_ptr(),
+                press.len() as u32,
+            )
+        },
+        HIDP_STATUS_SUCCESS
+    );
+
+    let mut listener = ListenerContext {
+        selected_path: String::new(),
+        snapshot: Arc::new(Mutex::new(RawInputSnapshot::default())),
+        engine: mpsc::channel().0,
+        remote_voice_f5_pressed: false,
+        binding_present: true,
+        input_generation: None,
+        window_input: WindowInputCounters::default(),
+        window_last_audit: None,
+        xiaomi_input: XiaomiRawInputCounters::default(),
+        xiaomi_last_audit: None,
+        registration: None,
+        cast_collections: BTreeSet::new(),
+        cast_generation: None,
+        cast_hid_descriptor: None,
+        cast_report_rejection_logged: false,
+        cast_input: CastRawInputCounters::default(),
+        cast_last_audit: None,
+        cast_reader: None,
+        cast_reader_status: None,
+        cast_report_routes: [CastReportRoute::default(); 2],
+    };
+    [press, release].map(|report| {
+        let mut body = [0; 8 + CAST_DESCRIPTOR_REPORT_BYTES];
+        body[..4].copy_from_slice(&(CAST_DESCRIPTOR_REPORT_BYTES as u32).to_le_bytes());
+        body[4..8].copy_from_slice(&1u32.to_le_bytes());
+        body[8..].copy_from_slice(&report);
+        let reports = parse_raw_hid_body(&body).unwrap();
+        let report = reports[0];
+        ChromecastInput::Hid {
+            report_id: report[0],
+            buttons: listener.decode_cast_hid(device, report).unwrap(),
+        }
+    })
+}
+
+#[cfg(test)]
 mod tests {
-    use super::voice_f5_wake_edge;
+    use super::{
+        cast_report_index, collection_registration, is_descriptor_cast_report, read_registration,
+        voice_f5_wake_edge, CastReportRoute, CastReportSource, RawInputRuntime,
+    };
+    use crate::button_mapping::EngineMessage;
+    use crate::raw_input::RawInputSnapshot;
+    use std::sync::atomic::Ordering;
+    use std::sync::{mpsc, Arc, Mutex};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK};
+
+    #[test]
+    fn registration_readback_distinguishes_expected_collection_and_window() {
+        let listener = HWND(1 as *mut _);
+        let mut entry = RAWINPUTDEVICE {
+            usUsagePage: 0x0c,
+            usUsage: 0x01,
+            dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
+            hwndTarget: listener,
+        };
+        assert_eq!(
+            collection_registration(&[entry], listener, 0x0c, 0x01).target,
+            "listener"
+        );
+        assert_eq!(
+            collection_registration(&[entry], listener, 0x01, 0x06).target,
+            "missing"
+        );
+        assert_eq!(
+            collection_registration(&[entry], HWND::default(), 0x0c, 0x01).target,
+            "other_window"
+        );
+        entry.dwFlags = RIDEV_INPUTSINK;
+        assert_eq!(
+            collection_registration(&[entry], listener, 0x0c, 0x01).flags,
+            RIDEV_INPUTSINK.0
+        );
+    }
+
+    #[test]
+    fn chromecast_report_ids_have_independent_transport_owners() {
+        use CastReportSource::{DirectHid, RawInput};
+        let mut routes = [CastReportRoute::default(); 2];
+        for (id, primary, twin) in [(1, DirectHid, RawInput), (2, RawInput, DirectHid)] {
+            let route = &mut routes[cast_report_index(id).unwrap()];
+            assert!(!route.accepts(twin, false));
+            assert!(route.accepts(primary, true));
+            assert!(route.accepts(primary, false));
+            assert!(!route.accepts(twin, true));
+            assert!(!route.accepts(twin, false));
+            route.needs_release = true;
+            assert!(!route.accepts(twin, false));
+            assert!(!route.accepts(primary, true));
+            assert!(!route.accepts(primary, false));
+            assert!(route.accepts(primary, true));
+        }
+        assert_eq!(routes[0].owner, Some(DirectHid));
+        assert_eq!(routes[1].owner, Some(RawInput));
+    }
+
+    #[test]
+    fn listener_restarts_keep_the_mapping_engine_channel() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let (engine, events) = mpsc::channel();
+        let runtime =
+            RawInputRuntime::new(Arc::new(Mutex::new(RawInputSnapshot::default())), engine);
+        for attempt in 1..=2 {
+            // The Windows listener uses a process-local message-only window.
+            // Observe only cleanup through an inert channel, with no key input.
+            runtime.start().expect("listener starts without a remote");
+            let listener = runtime
+                .control
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .hwnd
+                .load(Ordering::Acquire);
+            let registrations = read_registration(HWND(listener as *mut _));
+            assert_eq!(registrations.keyboard.target, "listener");
+            assert_eq!(registrations.consumer_control.target, "listener");
+            runtime.stop().expect("listener stops before restarting");
+            assert_eq!(
+                events
+                    .try_iter()
+                    .filter(|event| matches!(event, EngineMessage::ListenerStopped))
+                    .count(),
+                1,
+                "attempt {attempt} must notify the same mapping engine when it releases input"
+            );
+        }
+    }
+
+    #[test]
+    fn chromecast_descriptor_decoder_only_handles_three_byte_report_one() {
+        assert!(is_descriptor_cast_report(&[1, 0, 0]));
+        assert!(!is_descriptor_cast_report(&[1, 7]));
+        assert!(!is_descriptor_cast_report(&[2, 0x41, 0]));
+        assert!(!is_descriptor_cast_report(&[]));
+    }
 
     #[test]
     fn voice_f5_wakes_reconnect_once_per_physical_hold() {

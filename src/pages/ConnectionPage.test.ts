@@ -448,6 +448,30 @@ describe("VB-CABLE first-launch guidance", () => {
     wrapper.unmount();
   });
 
+  it("requires the WeType preset before showing Chromecast Chrome dictation instructions", async () => {
+    const connection = { ...emptyConnection, phase: "ready" as const, remoteModel: "chromecast" as const };
+    mocks.getConnectionSnapshot.mockResolvedValue(connection);
+    mocks.getVoiceInputTool.mockResolvedValue("other");
+    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["enter"] });
+    const wrapper = mount(ConnectionPage, {
+      props: { runtime: { ...runtime, platform: { ...runtime.platform, connection } } },
+    });
+    await flushPromises();
+
+    const cards = wrapper.findAll<HTMLButtonElement>(".tool-card");
+    expect(cards.filter((card) => !card.element.disabled).map((card) => card.find("strong").text()))
+      .toEqual(["微信输入法"]);
+    expect(wrapper.find(".tool-card.selected").exists()).toBe(false);
+    expect(wrapper.text()).toContain("请选择微信输入法，以设置当前遥控器所需的默认语音键。");
+    expect(mocks.setVoiceInputTool).not.toHaveBeenCalled();
+
+    await cards.find((card) => !card.element.disabled)!.trigger("click");
+    await flushPromises();
+    expect(mocks.setVoiceHoldHotkey).toHaveBeenCalledWith({ keys: ["left_control", "left_windows"] });
+    expect(wrapper.text()).toContain("确认内容后手动发送");
+    wrapper.unmount();
+  });
+
   it("点豆包卡片：自动把快捷键设为右 Alt、落存工具选择并显示该工具的清单", async () => {
     const wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();

@@ -305,6 +305,17 @@ pub async fn check_app_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AppUpdateInfo, String> {
+    // Preview builds are distributed as local files. Return before resolving
+    // dynamic endpoints, which can bypass an empty updater config.
+    if app.config().identifier == crate::CHROMECAST_PREVIEW_IDENTIFIER {
+        return Ok(AppUpdateInfo {
+            current_version: app.package_info().version.to_string(),
+            available: false,
+            version: None,
+            notes: None,
+            date: None,
+        });
+    }
     let started = Instant::now();
     let include_prereleases = state
         .settings
@@ -452,6 +463,9 @@ pub async fn set_app_update_preferences(
 
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if app.config().identifier == crate::CHROMECAST_PREVIEW_IDENTIFIER {
+        return Err("请使用新的本机预览包更新".to_owned());
+    }
     let started = Instant::now();
     let mut update = state
         .pending_update

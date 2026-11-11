@@ -9,7 +9,7 @@
  * - 每一步「能否继续」都由实时能力状态决定（页面访问与点击不是通过条件）；
  * - 阻断一律返回稳定失败码（小写 token），供页面显示与结构化日志使用。
  */
-import type { ConnectionPhase, RawInputPhase, VoiceInputTool } from "../lib/bridge";
+import type { ConnectionPhase, RawInputPhase, RemoteModel, VoiceInputTool } from "../lib/bridge";
 
 export type OnboardingStep =
   | "welcome"
@@ -56,6 +56,7 @@ export type OnboardingBlockCode =
   | "audio.not_selected"
   | "audio.not_ready"
   | "tool.not_selected"
+  | "tool.chromecast.wetype_required"
   | "tool.conflict.vokie_running"
   | "tool.doubao.authorization_required"
   | "tool.vokie.not_installed"
@@ -100,6 +101,7 @@ export function phaseOf(step: OnboardingStep): OnboardingPhase {
 /** 门禁上下文：由页面从运行快照/设备探测组装，本模块不发起任何调用。 */
 export interface OnboardingContext {
   remote: {
+    model?: RemoteModel;
     connectionPhase: ConnectionPhase;
     bleVoiceReady: boolean;
     rawInputPhase: RawInputPhase;
@@ -116,6 +118,7 @@ export interface OnboardingContext {
   };
   voiceTool: {
     tool: VoiceInputTool | null;
+    weTypeChordReady?: boolean;
     /** 豆包路径必需：「支持更多输入工具」（全按键支持）已开启且授权完成。 */
     doubaoCaptureEnabled: boolean;
     vokieInstalled: boolean;
@@ -157,11 +160,13 @@ export function evaluateGate(step: OnboardingStep, context: OnboardingContext): 
     case "audio":
       return evaluateAudio(context.audio);
     case "voice_tool":
-      return evaluateVoiceTool(context.voiceTool);
+      return evaluateVoiceTool(context.voiceTool, context.remote.model);
     case "voice_test":
       return context.voiceTest.verified ? pass() : block("voice_test.not_verified");
     case "controls":
-      return context.controls.distinctButtons >= 3 ? pass() : block("controls.not_confirmed");
+      return context.remote.model === "chromecast" || context.controls.distinctButtons >= 3
+        ? pass()
+        : block("controls.not_confirmed");
     case "complete":
       return evaluateComplete(context);
   }
@@ -173,6 +178,7 @@ function evaluateRemote(remote: OnboardingContext["remote"]): StepGate {
   if (!CONNECTED_PHASES.includes(remote.connectionPhase) || !remote.bleVoiceReady) {
     return block("remote.not_connected");
   }
+  if (remote.model === "chromecast") return pass();
   // 已收到按键 = 输入链路事实上可用，这是最终判据。RC003「全按键支持」的边沿
   // 由提权助手经桥接直接送入映射引擎，不依赖 Raw Input 绑定到 HID 接口；这类
   // 机器上 Raw Input 可能长期停在 awaiting（现场：matched=0、semantic_edges=198）。
@@ -206,8 +212,13 @@ function evaluateAudio(audio: OnboardingContext["audio"]): StepGate {
   return pass();
 }
 
-function evaluateVoiceTool(voiceTool: OnboardingContext["voiceTool"]): StepGate {
+function evaluateVoiceTool(voiceTool: OnboardingContext["voiceTool"], model?: RemoteModel): StepGate {
   const tool = voiceTool.tool;
+  if (model === "chromecast") {
+    return tool === "wechat" && voiceTool.weTypeChordReady === true
+      ? pass()
+      : block("tool.chromecast.wetype_required");
+  }
   if (tool === null) {
     return block("tool.not_selected");
   }
@@ -243,7 +254,7 @@ function evaluateComplete(context: OnboardingContext): StepGate {
   const gates = [
     evaluateRemoteReady(context.remote),
     evaluateAudio(context.audio),
-    evaluateVoiceTool(context.voiceTool),
+    evaluateVoiceTool(context.voiceTool, context.remote.model),
     context.voiceTest.verified ? pass() : block("voice_test.not_verified"),
   ];
   return gates.find((gate) => !gate.ok) ?? pass();

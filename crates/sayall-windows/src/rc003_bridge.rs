@@ -99,7 +99,8 @@ use serde::Serialize;
 
 use crate::button_mapping::EngineMessage;
 use crate::raw_input::{
-    button_for_usage, ButtonEdge, RemoteButton, ENHANCED_CAPTURE_BUTTON_USAGES,
+    button_for_usage, consumer_usage_for_chromecast_button, ButtonEdge, RemoteButton,
+    ENHANCED_CAPTURE_BUTTON_USAGES,
 };
 
 /// 语音键的 HID 键盘 usage：遥控器语音键同时以键盘 **F5（0x003E）** 上报
@@ -372,6 +373,10 @@ pub enum BridgeLine {
     Edges {
         usages: Vec<u16>,
     },
+    /// CAST-13：Chromecast 消费页边沿（`C` 行，与 `Edges` 同构）。
+    CastEdges {
+        usages: Vec<u16>,
+    },
     Ping,
     /// 助手正在做设备节点级恢复（绝对状态）：`true` 期间主程序不应按
     /// 「捕获失效」重启助手，因为 `pnputil remove-device` 可能耗时一分钟以上。
@@ -470,6 +475,15 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
                 .map_err(|_| "E 时间戳不是整数".to_string())?;
             let usages = parse_usage_payload(parts.next().unwrap_or("-"))?;
             Ok(Some(BridgeLine::Edges { usages }))
+        }
+        "C" => {
+            parts
+                .next()
+                .ok_or_else(|| "C 缺少时间戳".to_string())?
+                .parse::<u64>()
+                .map_err(|_| "C 时间戳不是整数".to_string())?;
+            let usages = parse_usage_payload(parts.next().unwrap_or("-"))?;
+            Ok(Some(BridgeLine::CastEdges { usages }))
         }
         "P" => Ok(Some(BridgeLine::Ping)),
         "R" => {
@@ -579,6 +593,8 @@ struct BridgeShared {
     malformed_total: u64,
     watchdog_release_total: u64,
     pressed: BTreeSet<u16>,
+    /// CAST-13：消费页当前按下集（绝对状态）。
+    cast_pressed: BTreeSet<u16>,
     last_rx: Option<Instant>,
     owned: BTreeSet<u16>,
     ownership_last_rx: Option<Instant>,
@@ -601,6 +617,7 @@ impl Default for BridgeShared {
             malformed_total: 0,
             watchdog_release_total: 0,
             pressed: BTreeSet::new(),
+            cast_pressed: BTreeSet::new(),
             last_rx: None,
             owned: BTreeSet::new(),
             ownership_last_rx: None,
@@ -614,6 +631,8 @@ impl Default for BridgeShared {
 struct CaptureTargets {
     generation: u64,
     usages: BTreeSet<u16>,
+    /// CAST-13：Chromecast 消费页目标集（`T` 行第三段）。
+    cast_usages: BTreeSet<u16>,
 }
 
 impl Default for CaptureTargets {
@@ -621,6 +640,7 @@ impl Default for CaptureTargets {
         Self {
             generation: 1,
             usages: BTreeSet::new(),
+            cast_usages: BTreeSet::new(),
         }
     }
 }
@@ -1023,6 +1043,45 @@ impl Rc003Bridge {
             format_usage_payload(&usages)
         ));
     }
+
+    /// 更新 Chromecast 增强捕获目标（CAST-13）。
+    ///
+    /// 与 [`Self::set_capture_targets`] 的差别：目标集走消费页 usage 表
+    /// （`consumer_usage_for_chromecast_button`），经 `T` 行第三段下发；
+    /// 键盘报告目标集同时清空（两套 usage 表语义不同，不混流）；
+    /// 无"恒接管三键"（谷歌键没有 Windows 原生零事件问题）。
+    pub fn set_cast_capture_targets(&self, enabled: bool, mapped_mask: u64) {
+        let cast_usages: BTreeSet<u16> = if enabled {
+            crate::raw_input::ALL_BUTTONS
+                .iter()
+                .filter(|button| ((mapped_mask >> button.ordinal()) & 1) == 1)
+                .filter_map(|button| consumer_usage_for_chromecast_button(*button))
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        let generation = {
+            let mut targets = lock(&self.targets);
+            if targets.cast_usages == cast_usages && targets.usages.is_empty() {
+                return;
+            }
+            targets.generation = targets.generation.wrapping_add(1).max(1);
+            targets.cast_usages = cast_usages.clone();
+            targets.usages = BTreeSet::new();
+            targets.generation
+        };
+        clear_ownership(&self.shared);
+        let releases = apply_usages(&self.shared, &self.targets, &BTreeSet::new());
+        for edge in releases {
+            let _ = self.sender.send(EngineMessage::GateEdge(edge));
+        }
+        lock(&self.shared).cast_pressed.clear();
+        note(format!(
+            "enhanced_capture event=cast_targets_changed generation={generation} enabled={enabled} usages={}",
+            format_usage_payload(&cast_usages)
+        ));
+    }
+
     /// 更新语音键报告层合成目标（2026-09-29 产品化：配置来源 = app 的
     /// 「按住说话快捷键」设置，helper 不再单独设置）。
     ///
@@ -1581,6 +1640,57 @@ fn handle_connection(
                         session_edges += 1;
                     }
                 }
+                BridgeLine::CastEdges { usages } => {
+                    let wanted: BTreeSet<u16> = usages.into_iter().collect();
+                    let (before, after) = {
+                        let mut state = lock(shared);
+                        let before = state.cast_pressed.clone();
+                        state.cast_pressed = wanted.clone();
+                        (before, wanted)
+                    };
+                    let (target, target_generation) = crate::remote_target::current();
+                    let address = match target {
+                        crate::remote_target::Target::Chromecast(Some(addr)) => addr,
+                        _ => {
+                            lock(shared).usages_dropped += after.difference(&before).count() as u64;
+                            continue;
+                        }
+                    };
+                    let mut edges: Vec<ButtonEdge> = Vec::new();
+                    for usage in after.difference(&before) {
+                        if let Some(button) =
+                            crate::raw_input::chromecast_button_for_consumer_usage(*usage)
+                        {
+                            edges.push(ButtonEdge {
+                                button,
+                                is_pressed: true,
+                            });
+                        }
+                    }
+                    for usage in before.difference(&after) {
+                        if let Some(button) =
+                            crate::raw_input::chromecast_button_for_consumer_usage(*usage)
+                        {
+                            edges.push(ButtonEdge {
+                                button,
+                                is_pressed: false,
+                            });
+                        }
+                    }
+                    for edge in edges {
+                        let message = EngineMessage::Chromecast {
+                            address,
+                            target_generation,
+                            input: crate::raw_input::ChromecastInput::Keyboard(edge),
+                        };
+                        if sender.send(message).is_err() {
+                            drop_reason = "engine_gone";
+                            break 'outer;
+                        }
+                        lock(shared).edges_applied += 1;
+                    }
+                    session_edges += 1;
+                }
                 BridgeLine::Ping => {}
                 BridgeLine::Recovering { active } => {
                     let changed = {
@@ -1718,9 +1828,10 @@ fn handle_connection(
                 if write_line(
                     &mut writer,
                     &format!(
-                        "T {} {}",
+                        "T {} {} {}",
                         target.generation,
-                        format_usage_payload(&target.usages)
+                        format_usage_payload(&target.usages),
+                        format_usage_payload(&target.cast_usages)
                     ),
                 )
                 .is_err()
@@ -2036,6 +2147,7 @@ mod tests {
         Arc::new(Mutex::new(CaptureTargets {
             generation: 1,
             usages: usages.iter().copied().collect(),
+            cast_usages: BTreeSet::new(),
         }))
     }
 
@@ -2984,7 +3096,7 @@ mod tests {
         }
         assert!(target_line.starts_with("T "), "实际收到 {target_line:?}");
         assert!(
-            target_line.trim().ends_with("4a,80,81,f1"),
+            target_line.trim().starts_with("T 3 4a,80,81,f1"),
             "热更新必须带上恒接管的三键：实际收到 {target_line:?}"
         );
         stream.write_all(b"E 3 4a\n").unwrap();

@@ -94,6 +94,7 @@ export default {
   "电源": "Power",
   "单击": "Single Press",
   "双击": "Double Press",
+  "三击": "Triple Press",
   "长按": "Long Press",
 
   // 快捷键预设

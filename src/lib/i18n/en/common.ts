@@ -1,5 +1,17 @@
 // English strings for common. Key = exact Chinese source passed to t().
 export default {
+  "支持小米 RC001 / RC003；Google Chromecast 语音遥控器为实验支持，尚待真机验证。": "Xiaomi RC001 / RC003 are supported. Google Chromecast Voice Remote support is experimental and awaits device validation.",
+  "准备好小米 RC001 / RC003 或 Google Chromecast 语音遥控器，并确保它有电。": "Prepare a Xiaomi RC001 / RC003 or Google Chromecast Voice Remote with charged batteries.",
+  "谷歌遥控器：同时按住返回和主页键，指示灯闪烁后在 Windows 蓝牙列表中选择 Chromecast Remote。以下 TV / 菜单键步骤仅适用于小米遥控器。": "Google remote: hold Back and Home until the light flashes, then select Chromecast Remote in Windows Bluetooth settings. The TV / Menu steps below apply only to Xiaomi remotes.",
+  "Google Chromecast 语音遥控器": "Google Chromecast Voice Remote",
+  "信源": "Input",
+  "点击遥控器图或卡片可编辑单击，点击各格子可编辑对应手势。部分按键可能同时触发 Windows 的原有操作。": "Click the remote diagram or a card to edit its single press. Click a cell to edit that gesture. Some buttons may also trigger their usual Windows action.",
+  "语音已连接，Windows 还没有提供普通按键通道。可以先保存配置，收到实体按键后才会执行。": "Voice is connected, but Windows has not exposed the regular buttons yet. You can save mappings now. They will run when SayAll receives a physical press.",
+  "部分按键可能同时触发 Windows 的原有操作。": "Some buttons may also trigger their usual Windows action.",
+  "测试当前映射": "Test Current Mapping",
+  "已运行按键测试，请检查前台应用中的效果。": "Mapping test ran. Check the result in the foreground app.",
+  "没能测试按键映射，请重试。": "Couldn't test the mapping. Try again.",
+  "没能读取按键映射，请重试。": "Couldn't load button mappings. Try again.",
   // 产品名
   "无线麦 SayAll": "SayAll",
   "设置页面": "Page navigation",

@@ -18,10 +18,11 @@ defineEmits<{ openBluetoothSettings: [] }>();
 
     <div class="onboarding-card accent">
       <h4>{{ t("首次使用：遥控器怎么连电脑") }}</h4>
+      <p>{{ t("谷歌遥控器：同时按住返回和主页键，指示灯闪烁后在 Windows 蓝牙列表中选择 Chromecast Remote。以下 TV / 菜单键步骤仅适用于小米遥控器。") }}</p>
       <ul class="onboarding-numlist">
         <li>
           <span class="onboarding-num">1</span>
-          <span>{{ t("准备好：小米蓝牙语音遥控器 2 或 2 Pro（目前只支持这两种型号），并确保它有电。") }}</span>
+          <span>{{ t("准备好小米 RC001 / RC003 或 Google Chromecast 语音遥控器，并确保它有电。") }}</span>
         </li>
         <li>
           <span class="onboarding-num">2</span>

@@ -5,6 +5,7 @@ import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDi
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import { reasonToken, reportFrontendEvent } from "../lib/frontend-diagnostics";
 import { t, tPage } from "../lib/i18n";
+import { isWeTypeVoiceChord, WETYPE_VOICE_KEYS } from "../lib/wetype-voice";
 import {
   captureFailureText,
   captureInactiveText,
@@ -142,7 +143,11 @@ const captureStartingVoiceHotkey = ref(false);
 const waitingPreheldRelease = ref(false);
 const voiceCaptureDisplay = ref<KeyCode[]>([]);
 /** 当前选择的输入工具；null = 尚未读取（或从未选择过，正在推断）。 */
-const voiceInputTool = ref<VoiceInputTool | null>(null);
+const storedVoiceInputTool = ref<VoiceInputTool | null>(null);
+const isChromecast = computed(() => connection.value.remoteModel === "chromecast");
+const voiceInputTool = computed(() =>
+  isChromecast.value && storedVoiceInputTool.value !== "wechat" ? null : storedVoiceInputTool.value,
+);
 const savingVoiceInputTool = ref(false);
 /**
  * 正在为哪个工具落"按住说话快捷键"（含两段 IPC 全程）。见 toolChordPill：
@@ -179,9 +184,6 @@ const voiceCapturePressed = new Set<KeyCode>();
 const voiceCaptureEverPressed: KeyCode[] = [];
 let voiceCapturedKeys: KeyCode[] | null = null;
 
-/** 按住说话快捷键默认值（v1 固定，适配微信输入法的默认语音热键）。 */
-const DEFAULT_VOICE_HOTKEY_KEYS: KeyCode[] = ["left_control", "left_windows"];
-
 /**
  * 输入工具 → "按住说话快捷键"（2026-09-30 连接页改版的设计契约）：
  * 选工具即自动落这个组合，用户不需要理解快捷键本身。
@@ -189,7 +191,7 @@ const DEFAULT_VOICE_HOTKEY_KEYS: KeyCode[] = ["left_control", "left_windows"];
  */
 const VOICE_TOOL_CHORDS: Record<VoiceInputTool, KeyCode[] | null> = {
   doubao: ["right_alt"],
-  wechat: [...DEFAULT_VOICE_HOTKEY_KEYS],
+  wechat: [...WETYPE_VOICE_KEYS],
   vokie: ["right_alt"],
   other: null,
 };
@@ -263,7 +265,7 @@ function toolChordPill(tool: VoiceInputTool): { ok: boolean; label: string } {
  */
 function deriveToolFromChord(chord: KeyChord | null): VoiceInputTool {
   const normalized = chord ? [...chord.keys].sort().join("+") : "";
-  if (normalized === [...DEFAULT_VOICE_HOTKEY_KEYS].sort().join("+")) return "wechat";
+  if (normalized === [...WETYPE_VOICE_KEYS].sort().join("+")) return "wechat";
   if (normalized === "right_alt") return "doubao";
   return "other";
 }
@@ -273,20 +275,20 @@ function deriveToolFromChord(chord: KeyChord | null): VoiceInputTool {
  * 并把工具选择持久化（决定下次进页展示哪套引导与开关）。
  */
 async function selectVoiceInputTool(tool: VoiceInputTool): Promise<void> {
-  if (savingVoiceInputTool.value) return;
+  if (savingVoiceInputTool.value || (isChromecast.value && tool !== "wechat")) return;
   if (capturingVoiceHotkey.value) {
     await finishVoiceHotkeyCapture(t("已切换输入工具，已取消录入"));
   }
-  const previous = voiceInputTool.value;
+  const previous = storedVoiceInputTool.value;
   savingVoiceInputTool.value = true;
   // 乐观态窗口：工具已切、快捷键还在写盘路上，期间状态胶囊不许判成"未同步"。
   applyingTool.value = tool;
   voiceHotkeyMessage.value = "";
-  voiceInputTool.value = tool;
+  storedVoiceInputTool.value = tool;
   try {
     await setVoiceInputTool(tool);
   } catch (error) {
-    voiceInputTool.value = previous;
+    storedVoiceInputTool.value = previous;
     voiceHotkeyMessage.value = actionErrorText("set_voice_input_tool", error);
     savingVoiceInputTool.value = false;
     applyingTool.value = null;
@@ -448,7 +450,7 @@ const rc003CaptureHint = ref("");
  * issue #206）：`null` = 尚未读到，按可用处理，不因一次 IPC 失败把功能锁死。
  */
 const captureSupport = ref<CaptureSupport | null>(null);
-const captureUnsupported = computed(() => captureSupport.value?.available === false);
+const captureUnsupported = computed(() => isChromecast.value || captureSupport.value?.available === false);
 
 /**
  * 本机不可用时的文案（与按键页同一句，名称随本页入口）：
@@ -719,7 +721,7 @@ async function finishVoiceHotkeyCapture(cancelMessage?: string): Promise<void> {
       ? seenKeyCount <= 1
       : keys.length === 1 && CAPTURE_MODIFIER_KEYS.has(keys[0]));
   if (shouldInferWetypeChord) {
-    await applyVoiceHotkey([...DEFAULT_VOICE_HOTKEY_KEYS]);
+    await applyVoiceHotkey([...WETYPE_VOICE_KEYS]);
     // applyVoiceHotkey 成功会覆写消息，推断说明必须在其后写入；失败时保留错误信息。
     if (voiceHotkey.value) {
       voiceHotkeyMessage.value = t(
@@ -754,7 +756,7 @@ function appendWetypeChordNotice(keys: KeyCode[]): void {
   const appliedPrefix = t("按住说话快捷键已设为 {chord}", { chord: "" }).trim();
   if (!voiceHotkeyMessage.value.startsWith(appliedPrefix)) return;
   const normalized = [...keys].sort().join("+");
-  if ([...DEFAULT_VOICE_HOTKEY_KEYS].sort().join("+") === normalized) return;
+  if ([...WETYPE_VOICE_KEYS].sort().join("+") === normalized) return;
   voiceHotkeyMessage.value += t(
     "。注意：按住说话会把该组合注入系统来唤起微信输入法语音，若与微信输入法语音键不一致将无法生效",
   );
@@ -860,11 +862,13 @@ async function initializeShortcutSettings(): Promise<void> {
   ]);
   voiceHotkey.value = chord;
   if (storedTool) {
-    voiceInputTool.value = storedTool;
+    storedVoiceInputTool.value = storedTool;
     return;
   }
   const derived = deriveToolFromChord(chord);
-  voiceInputTool.value = derived;
+  // A Cast preview must ask for an explicit tool instead of guessing from an old shortcut.
+  if (isChromecast.value) return;
+  storedVoiceInputTool.value = derived;
   void setVoiceInputTool(derived).catch(() => undefined);
 }
 
@@ -1007,12 +1011,12 @@ async function refreshAudio() {
 async function scan() {
   scanning.value = true;
   operationMessage.value = "";
-  scanMessage.value = t("正在寻找小米遥控器…");
+  scanMessage.value = t("正在寻找遥控器…");
   try {
     devices.value = await scanPairedRemotes();
     scanMessage.value = devices.value.length
-      ? t("找到 {count} 个已配对的小米遥控器", { count: devices.value.length })
-      : t("没有找到已配对的小米遥控器");
+      ? t("找到 {count} 个已配对的遥控器", { count: devices.value.length })
+      : t("没有找到已配对的遥控器");
   } catch (error) {
     devices.value = [];
     scanMessage.value = actionErrorText("scan_paired_remotes", error);
@@ -1414,13 +1418,15 @@ onUnmounted(() => {
               class="tool-card"
               :class="{ selected: voiceInputTool === card.id }"
               type="button"
-              :disabled="savingVoiceInputTool"
+              :disabled="savingVoiceInputTool || (isChromecast && card.id !== 'wechat')"
               @click="selectVoiceInputTool(card.id)"
             >
               <span class="radio" aria-hidden="true"></span>
               <span>
                 <strong>{{ t(card.name) }}</strong>
-                <small>{{ t(card.note) }}</small>
+                <small v-if="isChromecast && card.id !== 'wechat'">{{ t("当前遥控器请使用微信输入法和默认语音键。") }}</small>
+                <small v-else-if="isChromecast && card.id === 'wechat'">{{ t("推荐用于 Chrome 听写") }}</small>
+                <small v-else>{{ t(card.note) }}</small>
               </span>
             </button>
           </div>
@@ -1646,7 +1652,12 @@ onUnmounted(() => {
           <p v-if="voiceHotkeyMessage" class="tiny muted voice-hotkey-message">
             {{ voiceHotkeyMessage }}
           </p>
-          <div class="info-callout callout-small">
+          <div v-if="isChromecast" class="info-callout callout-small">
+            {{ voiceInputTool === "wechat" && isWeTypeVoiceChord(voiceHotkey)
+              ? t("先点 Chrome 里的草稿框，再按住语音键说话。等文字出现在草稿里，确认内容后手动发送。说话时请留在当前输入框。")
+              : t("请选择微信输入法，以设置当前遥控器所需的默认语音键。") }}
+          </div>
+          <div v-else class="info-callout callout-small">
             {{ t("避免其他 App 使用同一个快捷键（Vokie、Chatterfly 这类语音工具会抢在输入法前面）。按住语音键时，如果当前输入法还不是你选的工具，可能需要再按住一次才能正常使用。") }}
           </div>
         </section>

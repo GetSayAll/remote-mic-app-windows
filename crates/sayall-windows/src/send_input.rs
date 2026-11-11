@@ -613,6 +613,10 @@ pub enum ButtonAction {
 }
 
 impl ButtonAction {
+    fn is_disabled(&self) -> bool {
+        *self == Self::Disabled
+    }
+
     /// 「按住连续触发」是否适用于该动作：只允许可连续执行的动作。
     ///
     /// - 单键快捷键（删除/退格/方向/字母/媒体键等）可连续执行；
@@ -764,6 +768,7 @@ pub fn send_wheel_with(
 pub enum ButtonTrigger {
     Single,
     Double,
+    Triple,
     Long,
 }
 
@@ -772,6 +777,8 @@ pub enum ButtonTrigger {
 pub struct ButtonActions {
     pub single: ButtonAction,
     pub double: ButtonAction,
+    #[serde(default, skip_serializing_if = "ButtonAction::is_disabled")]
+    pub triple: ButtonAction,
     pub long: ButtonAction,
     /// 「按住连续触发」指定的槽位（单击或长按；`None` = 关闭）。
     ///
@@ -796,6 +803,7 @@ impl Default for ButtonActions {
         Self {
             single: ButtonAction::Disabled,
             double: ButtonAction::Disabled,
+            triple: ButtonAction::Disabled,
             long: ButtonAction::Disabled,
             hold_repeat: None,
             ok_context_click: false,
@@ -808,6 +816,7 @@ impl ButtonActions {
         match trigger {
             ButtonTrigger::Single => &self.single,
             ButtonTrigger::Double => &self.double,
+            ButtonTrigger::Triple => &self.triple,
             ButtonTrigger::Long => &self.long,
         }
     }
@@ -816,6 +825,7 @@ impl ButtonActions {
     pub fn any_configured(&self) -> bool {
         self.single != ButtonAction::Disabled
             || self.double != ButtonAction::Disabled
+            || self.triple != ButtonAction::Disabled
             || self.long != ButtonAction::Disabled
     }
 }
@@ -835,6 +845,8 @@ enum ButtonActionsWire {
 struct ButtonActionsCells {
     single: ButtonAction,
     double: ButtonAction,
+    #[serde(default)]
+    triple: ButtonAction,
     long: ButtonAction,
     #[serde(default)]
     hold_repeat: Option<ButtonTrigger>,
@@ -848,6 +860,7 @@ impl From<ButtonActionsWire> for ButtonActions {
             ButtonActionsWire::Cells(cells) => Self {
                 single: cells.single,
                 double: cells.double,
+                triple: cells.triple,
                 long: cells.long,
                 hold_repeat: cells.hold_repeat,
                 ok_context_click: cells.ok_context_click,
@@ -934,6 +947,7 @@ pub fn collect_macro_references(
         for (trigger, action) in [
             (ButtonTrigger::Single, &actions.single),
             (ButtonTrigger::Double, &actions.double),
+            (ButtonTrigger::Triple, &actions.triple),
             (ButtonTrigger::Long, &actions.long),
         ] {
             if let ButtonAction::RunMacro {
@@ -976,7 +990,12 @@ pub fn collect_macro_references(
 pub fn clear_macro_references(mappings: &mut ButtonMappings, macro_id: &str) -> usize {
     let mut cleared = 0;
     for actions in mappings.actions.values_mut() {
-        for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+        for action in [
+            &mut actions.single,
+            &mut actions.double,
+            &mut actions.triple,
+            &mut actions.long,
+        ] {
             let matches = matches!(
                 action,
                 ButtonAction::RunMacro {
@@ -991,12 +1010,7 @@ pub fn clear_macro_references(mappings: &mut ButtonMappings, macro_id: &str) -> 
         }
         // 「按住连续触发」指向的槽位若被清空，连同一并关掉（否则留下指向空槽的开关）。
         if let Some(trigger) = actions.hold_repeat {
-            let slot_is_empty = match trigger {
-                ButtonTrigger::Single => actions.single == ButtonAction::Disabled,
-                ButtonTrigger::Double => actions.double == ButtonAction::Disabled,
-                ButtonTrigger::Long => actions.long == ButtonAction::Disabled,
-            };
-            if slot_is_empty {
+            if actions.trigger(trigger).is_disabled() {
                 actions.hold_repeat = None;
             }
         }
@@ -1061,7 +1075,12 @@ impl ButtonMappings {
     /// 继续按字面快捷键执行。
     pub fn promote_app_switcher_shortcuts(mut self) -> Self {
         for actions in self.actions.values_mut() {
-            for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+            for action in [
+                &mut actions.single,
+                &mut actions.double,
+                &mut actions.triple,
+                &mut actions.long,
+            ] {
                 if let ButtonAction::Shortcut { chord } = action {
                     if chord.is_alt_tab() {
                         *action = ButtonAction::AppSwitcher;
@@ -1090,6 +1109,7 @@ impl ButtonMappings {
                 || !button.legacy_auto_repeat()
                 || actions.single == ButtonAction::Disabled
                 || actions.double != ButtonAction::Disabled
+                || actions.triple != ButtonAction::Disabled
                 || actions.long != ButtonAction::Disabled
                 || !actions.single.allows_repeat()
             {
@@ -1154,7 +1174,12 @@ impl ButtonMappings {
         #[cfg(not(windows))]
         let _ = dropped_scroll;
         for actions in this.actions.values_mut() {
-            for action in [&mut actions.single, &mut actions.double, &mut actions.long] {
+            for action in [
+                &mut actions.single,
+                &mut actions.double,
+                &mut actions.triple,
+                &mut actions.long,
+            ] {
                 match action {
                     ButtonAction::Shortcut { chord } => {
                         *chord = chord.clone().validated()?;
@@ -1182,9 +1207,9 @@ impl ButtonMappings {
             let Some(trigger) = actions.hold_repeat else {
                 continue;
             };
-            if trigger == ButtonTrigger::Double {
+            if matches!(trigger, ButtonTrigger::Double | ButtonTrigger::Triple) {
                 return Err(SendInputError::Backend(
-                    "按住连续触发不支持双击槽位".to_owned(),
+                    "按住连续触发只支持单击或长按槽位".to_owned(),
                 ));
             }
             if button.repeat_interval().is_none() {
@@ -1261,7 +1286,11 @@ pub fn native_key(button: RemoteButton) -> Option<KeyCode> {
         RemoteButton::VolumeUp => KeyCode::VolumeUp,
         RemoteButton::VolumeDown => KeyCode::VolumeDown,
         RemoteButton::Tv => KeyCode::Oem3,
-        RemoteButton::Back | RemoteButton::Power => return None,
+        RemoteButton::Back
+        | RemoteButton::Power
+        | RemoteButton::Youtube
+        | RemoteButton::Netflix
+        | RemoteButton::Input => return None,
     })
 }
 
@@ -1452,6 +1481,31 @@ pub struct SendInputSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_mappings_omit_disabled_triple_and_round_trip_configured_shortcut() {
+        let old_json = r#"{
+            "schemaVersion":4,
+            "actions":{"ok":{"single":{"type":"disabled"},"double":{"type":"disabled"},"long":{"type":"disabled"}}}
+        }"#;
+        let mut mappings: ButtonMappings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(
+            mappings.action_for(RemoteButton::Ok, ButtonTrigger::Triple),
+            ButtonAction::Disabled
+        );
+        assert!(serde_json::to_value(&mappings).unwrap()["actions"]["ok"]
+            .get("triple")
+            .is_none());
+
+        let action = shortcut(&[KeyCode::LeftShift, KeyCode::Enter]);
+        mappings.actions.get_mut(&RemoteButton::Ok).unwrap().triple = action.clone();
+        let encoded = serde_json::to_string(&mappings.normalized().unwrap()).unwrap();
+        let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.action_for(RemoteButton::Ok, ButtonTrigger::Triple),
+            action
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2224,6 +2278,7 @@ mod tests {
                     chord: chord(&[KeyCode::LeftWindows, KeyCode::D]),
                 },
                 double: ButtonAction::Disabled,
+                triple: ButtonAction::Disabled,
                 long: ButtonAction::Shortcut {
                     chord: chord(&[KeyCode::Control, KeyCode::C]),
                 },

@@ -7,6 +7,7 @@ use sayall_core::{
 use sayall_windows::send_input::{
     ButtonMappings, KeyChord, KeyCode, BUTTON_MAPPINGS_SCHEMA_VERSION,
 };
+use sayall_windows::RemoteModel;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -21,13 +22,62 @@ pub struct SettingsStore {
 }
 
 const BUTTON_MAPPING_EXPORT_VERSION: u32 = 1;
+const CHROMECAST_BUTTON_MAPPING_EXPORT_VERSION: u32 = 2;
 const MAX_BUTTON_MAPPING_IMPORT_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ButtonMappingScope {
+    Xiaomi,
+    Chromecast,
+}
+
+impl ButtonMappingScope {
+    pub(crate) fn from_remote_model(model: Option<RemoteModel>) -> Self {
+        if model == Some(RemoteModel::Chromecast) {
+            Self::Chromecast
+        } else {
+            Self::Xiaomi
+        }
+    }
+
+    fn export_version(self) -> u32 {
+        match self {
+            Self::Xiaomi => BUTTON_MAPPING_EXPORT_VERSION,
+            Self::Chromecast => CHROMECAST_BUTTON_MAPPING_EXPORT_VERSION,
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ButtonMappingConfiguration {
     format_version: u32,
     button_mappings: ButtonMappings,
+}
+
+fn normalize_button_mappings(
+    mappings: ButtonMappings,
+    scope: ButtonMappingScope,
+    migrate_legacy: bool,
+) -> Result<ButtonMappings, String> {
+    if scope == ButtonMappingScope::Chromecast
+        && mappings
+            .actions
+            .keys()
+            .any(|button| !button.is_chromecast_mappable())
+    {
+        return Err("配置包含 Chromecast 遥控器没有的按键。".to_owned());
+    }
+    let mappings = if migrate_legacy {
+        mappings
+            .migrate_legacy_hold_repeat()
+            .migrate_preset_focus_profiles()
+    } else {
+        mappings
+    };
+    mappings
+        .normalized()
+        .map_err(|error| format!("按键映射无效：{error}"))
 }
 
 impl SettingsStore {
@@ -405,8 +455,22 @@ impl SettingsStore {
     }
 
     pub fn load_button_mappings(&self) -> Result<ButtonMappings, String> {
+        self.load_button_mappings_for_scope(ButtonMappingScope::Xiaomi)
+    }
+
+    pub(crate) fn load_button_mappings_for_scope(
+        &self,
+        scope: ButtonMappingScope,
+    ) -> Result<ButtonMappings, String> {
         let _guard = lock(&self.access);
-        let path = self.button_mappings_path();
+        self.load_button_mappings_unlocked(scope)
+    }
+
+    fn load_button_mappings_unlocked(
+        &self,
+        scope: ButtonMappingScope,
+    ) -> Result<ButtonMappings, String> {
+        let path = self.scoped_button_mappings_path(scope);
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -432,45 +496,80 @@ impl SettingsStore {
                 ));
             }
         }
-        serde_json::from_str::<ButtonMappings>(&contents)
-            .map_err(|error| format!("解析按键映射失败：{error}"))?
-            // 旧文件（结构版本 < 1）按旧版自动连发行为迁移为显式开关，
-            // 再统一校验并盖章为当前版本。
-            .migrate_legacy_hold_repeat()
-            .migrate_preset_focus_profiles()
-            .normalized()
-            .map_err(|error| format!("按键映射无效：{error}"))
+        let mappings = serde_json::from_str::<ButtonMappings>(&contents)
+            .map_err(|error| format!("解析按键映射失败：{error}"))?;
+        normalize_button_mappings(mappings, scope, true)
     }
 
-    pub fn save_button_mappings(&self, mappings: ButtonMappings) -> Result<ButtonMappings, String> {
+    #[cfg(test)]
+    fn save_button_mappings(&self, mappings: ButtonMappings) -> Result<ButtonMappings, String> {
+        self.save_button_mappings_for_scope(ButtonMappingScope::Xiaomi, mappings, |_| {})
+    }
+
+    pub(crate) fn save_button_mappings_for_scope(
+        &self,
+        scope: ButtonMappingScope,
+        mappings: ButtonMappings,
+        apply: impl FnOnce(&ButtonMappings),
+    ) -> Result<ButtonMappings, String> {
         let _guard = lock(&self.access);
-        let mappings = mappings
-            .normalized()
-            .map_err(|error| format!("按键映射无效：{error}"))?;
-        let path = self.button_mappings_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
-        }
-        let contents = serde_json::to_vec_pretty(&mappings)
-            .map_err(|error| format!("序列化按键映射失败：{error}"))?;
-        fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))?;
+        let mappings = normalize_button_mappings(mappings, scope, false)?;
+        self.write_button_mappings_unlocked(scope, &mappings)?;
+        // Keep disk and runtime publication in the same order even when two
+        // save, reset or import commands complete on different worker threads.
+        apply(&mappings);
         Ok(mappings)
     }
 
-    pub fn export_button_mappings(
+    fn write_button_mappings_unlocked(
         &self,
+        scope: ButtonMappingScope,
+        mappings: &ButtonMappings,
+    ) -> Result<(), String> {
+        let path = self.scoped_button_mappings_path(scope);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建应用设置目录失败：{error}"))?;
+        }
+        let contents = serde_json::to_vec_pretty(mappings)
+            .map_err(|error| format!("序列化按键映射失败：{error}"))?;
+        fs::write(path, contents).map_err(|error| format!("保存按键映射失败：{error}"))
+    }
+
+    pub(crate) fn clear_button_mapping_macro_references(
+        &self,
+        scope: ButtonMappingScope,
+        removed_ids: &[String],
+        apply: impl FnOnce(&ButtonMappings),
+    ) -> Result<usize, String> {
+        let _guard = lock(&self.access);
+        let mut mappings = self.load_button_mappings_unlocked(scope)?;
+        let cleared = removed_ids
+            .iter()
+            .map(|id| sayall_windows::send_input::clear_macro_references(&mut mappings, id))
+            .sum();
+        if cleared > 0 {
+            self.write_button_mappings_unlocked(scope, &mappings)?;
+            apply(&mappings);
+        }
+        Ok(cleared)
+    }
+
+    #[cfg(test)]
+    fn export_button_mappings(&self, path: &Path, mappings: ButtonMappings) -> Result<(), String> {
+        self.export_button_mappings_for_scope(ButtonMappingScope::Xiaomi, path, mappings)
+    }
+
+    pub(crate) fn export_button_mappings_for_scope(
+        &self,
+        scope: ButtonMappingScope,
         path: &Path,
         mappings: ButtonMappings,
     ) -> Result<(), String> {
         // 与加载/导入同一口径：旧结构先迁移再校验盖章，避免把 v0 直接写成
         // v1 却丢掉「旧版自动连发」语义（2026-10-05 评审发现 4）。
-        let mappings = mappings
-            .migrate_legacy_hold_repeat()
-            .migrate_preset_focus_profiles()
-            .normalized()
-            .map_err(|error| format!("按键映射无效：{error}"))?;
+        let mappings = normalize_button_mappings(mappings, scope, true)?;
         let configuration = ButtonMappingConfiguration {
-            format_version: BUTTON_MAPPING_EXPORT_VERSION,
+            format_version: scope.export_version(),
             button_mappings: mappings,
         };
         // serde_json::Value 的对象键按序输出，使同一配置便于比对和版本管理。
@@ -481,7 +580,17 @@ impl SettingsStore {
         fs::write(path, contents).map_err(|error| format!("写入按键映射配置失败：{error}"))
     }
 
-    pub fn import_button_mappings(&self, path: &Path) -> Result<ButtonMappings, String> {
+    #[cfg(test)]
+    fn import_button_mappings(&self, path: &Path) -> Result<ButtonMappings, String> {
+        self.import_button_mappings_for_scope(ButtonMappingScope::Xiaomi, path, |_| {})
+    }
+
+    pub(crate) fn import_button_mappings_for_scope(
+        &self,
+        scope: ButtonMappingScope,
+        path: &Path,
+        apply: impl FnOnce(&ButtonMappings),
+    ) -> Result<ButtonMappings, String> {
         let metadata =
             fs::metadata(path).map_err(|error| format!("读取按键映射配置失败：{error}"))?;
         if metadata.len() > MAX_BUTTON_MAPPING_IMPORT_BYTES {
@@ -490,7 +599,14 @@ impl SettingsStore {
         let contents = fs::read(path).map_err(|error| format!("读取按键映射配置失败：{error}"))?;
         let configuration: ButtonMappingConfiguration = serde_json::from_slice(&contents)
             .map_err(|error| format!("解析按键映射配置失败：{error}"))?;
-        if configuration.format_version != BUTTON_MAPPING_EXPORT_VERSION {
+        if matches!(
+            configuration.format_version,
+            BUTTON_MAPPING_EXPORT_VERSION | CHROMECAST_BUTTON_MAPPING_EXPORT_VERSION
+        ) && configuration.format_version != scope.export_version()
+        {
+            return Err("此按键映射配置属于另一种遥控器。".to_owned());
+        }
+        if configuration.format_version != scope.export_version() {
             return Err(format!(
                 "不支持的按键映射配置版本：{}",
                 configuration.format_version
@@ -498,12 +614,8 @@ impl SettingsStore {
         }
         // 完整解析并规范化通过后才触碰应用配置，实现失败不改变现状。
         // 旧导出（无显式开关）走与本地加载相同的迁移。
-        self.save_button_mappings(
-            configuration
-                .button_mappings
-                .migrate_legacy_hold_repeat()
-                .migrate_preset_focus_profiles(),
-        )
+        let mappings = normalize_button_mappings(configuration.button_mappings, scope, true)?;
+        self.save_button_mappings_for_scope(scope, mappings, apply)
     }
 
     pub fn load_combined_actions(&self) -> Result<MacroLibraryDocument, String> {
@@ -766,6 +878,15 @@ impl SettingsStore {
 
     fn button_mappings_path(&self) -> PathBuf {
         self.path.with_file_name("button-mappings.json")
+    }
+
+    fn scoped_button_mappings_path(&self, scope: ButtonMappingScope) -> PathBuf {
+        match scope {
+            ButtonMappingScope::Xiaomi => self.button_mappings_path(),
+            ButtonMappingScope::Chromecast => {
+                self.path.with_file_name("button-mappings-chromecast.json")
+            }
+        }
     }
 
     fn combined_actions_path(&self) -> PathBuf {
@@ -1449,8 +1570,7 @@ mod tests {
                         keys: vec![KeyCode::Escape],
                     },
                 },
-                hold_repeat: None,
-                ok_context_click: false,
+                ..ButtonActions::default()
             },
         );
         let encoded = serde_json::to_string(&mappings).unwrap();
@@ -1497,8 +1617,7 @@ mod tests {
                 },
                 double: ButtonAction::Disabled,
                 long: ButtonAction::Disabled,
-                hold_repeat: None,
-                ok_context_click: false,
+                ..ButtonActions::default()
             },
         );
 
@@ -1527,6 +1646,86 @@ mod tests {
         assert!(store.import_button_mappings(&export_path).is_err());
         assert_eq!(store.load_button_mappings().unwrap(), mappings);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn chromecast_button_mappings_are_scoped_and_reject_cross_model_import() {
+        use sayall_windows::raw_input::RemoteButton;
+        use sayall_windows::send_input::{ButtonAction, ButtonActions};
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "sayall-cast-mappings-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let store = SettingsStore::new(directory.join("settings.json"));
+        let xiaomi = ButtonMappingScope::Xiaomi;
+        let cast = ButtonMappingScope::Chromecast;
+        let mut legacy = ButtonMappings::default();
+        legacy
+            .actions
+            .insert(RemoteButton::Tv, ButtonActions::default());
+        store.save_button_mappings(legacy.clone()).unwrap();
+        assert_eq!(
+            store.load_button_mappings_for_scope(cast).unwrap(),
+            ButtonMappings::default()
+        );
+
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                triple: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Shift, KeyCode::Enter],
+                    },
+                },
+                ..ButtonActions::default()
+            },
+        );
+        let mut runtime = None;
+        let saved = store
+            .save_button_mappings_for_scope(cast, mappings, |saved| runtime = Some(saved.clone()))
+            .unwrap();
+        assert_eq!(runtime.as_ref(), Some(&saved));
+        assert_eq!(store.load_button_mappings_for_scope(cast).unwrap(), saved);
+        assert_eq!(
+            store.load_button_mappings_for_scope(xiaomi).unwrap(),
+            legacy
+        );
+
+        let export = directory.join("cast-export.json");
+        store
+            .export_button_mappings_for_scope(cast, &export, saved.clone())
+            .unwrap();
+        assert!(store
+            .import_button_mappings_for_scope(xiaomi, &export, |_| panic!(
+                "wrong model was applied"
+            ))
+            .is_err());
+        assert!(store
+            .save_button_mappings_for_scope(cast, legacy.clone(), |_| panic!(
+                "unsupported key was applied"
+            ))
+            .is_err());
+        assert_eq!(store.load_button_mappings_for_scope(cast).unwrap(), saved);
+        assert_eq!(
+            store.load_button_mappings_for_scope(xiaomi).unwrap(),
+            legacy
+        );
+
+        for file in [
+            export,
+            store.scoped_button_mappings_path(cast),
+            store.scoped_button_mappings_path(xiaomi),
+        ] {
+            fs::remove_file(file).unwrap();
+        }
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]

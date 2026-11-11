@@ -44,12 +44,14 @@ import {
   type Rc003CaptureHealth,
   type Rc003TaskStatus,
   type RemoteButton,
+  type RemoteModel,
   type RuntimeSnapshot,
   type VoiceAudioHealth,
   type VoiceInputTool,
   type VokieInstallation,
 } from "../lib/bridge";
 import { captureFailureText, normalizeCaptureHealth } from "../lib/capture-switch";
+import { recognizedRemoteModel } from "../lib/remote-artwork";
 import { t } from "../lib/i18n";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
 import { voiceFailureText } from "../onboarding/voice-failure-text";
@@ -82,10 +84,11 @@ import FullKeyStep from "../onboarding/steps/FullKeyStep.vue";
 import RemoteStep from "../onboarding/steps/RemoteStep.vue";
 import VoiceTestStep from "../onboarding/steps/VoiceTestStep.vue";
 import VoiceToolStep from "../onboarding/steps/VoiceToolStep.vue";
+import { isWeTypeVoiceChord, WETYPE_VOICE_KEYS } from "../lib/wetype-voice";
 import WelcomeStep from "../onboarding/steps/WelcomeStep.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 
-const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+const props = defineProps<{ runtime: RuntimeSnapshot | null; remoteModelHint?: RemoteModel }>();
 const emit = defineEmits<{ completed: [] }>();
 
 const step = ref<OnboardingStep>("welcome");
@@ -206,7 +209,17 @@ const captureLoadFailed = ref(false);
 /** 迟到回调保护：每次进入第④步都换一代，旧读取结果不得覆盖新状态。 */
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
-const captureUnavailable = computed(() => captureSupport.value?.available === false);
+const isChromecast = computed(() => props.runtime?.platform.connection.remoteModel === "chromecast");
+const artworkModel = computed(() => {
+  const selected = devices.value.find((device) =>
+    device.id === (connectingDeviceId.value || connectedDeviceId.value),
+  );
+  const live = recognizedRemoteModel(props.runtime?.platform.connection);
+  if (connectingDeviceId.value && selected && selected.model !== "unknown") return selected.model;
+  if (live !== "unknown") return live;
+  return selected && selected.model !== "unknown" ? selected.model : props.remoteModelHint ?? "unknown";
+});
+const captureUnavailable = computed(() => isChromecast.value || captureSupport.value?.available === false);
 /** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
   if (captureLoadFailed.value) {
@@ -238,6 +251,7 @@ const gateContext = computed<OnboardingContext>(() => {
     audioSnapshot.value?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
   return {
     remote: {
+      model: platform?.connection.remoteModel,
       connectionPhase: platform?.connection.phase ?? "idle",
       bleVoiceReady: platform?.bleVoiceReady ?? false,
       rawInputPhase: platform?.rawInput.phase ?? "stopped",
@@ -253,6 +267,7 @@ const gateContext = computed<OnboardingContext>(() => {
     // 输入工具步骤：工具/授权/运行状态都来自本向导会话内的实时探测。
     voiceTool: {
       tool: stagedTool.value ?? configuredTool.value,
+      weTypeChordReady: isWeTypeVoiceChord(currentHotkey.value),
       doubaoCaptureEnabled: rc003Status.value?.enabled === true,
       vokieInstalled: vokie.value?.installed === true,
       vokieRunning: vokie.value?.running === true,
@@ -292,8 +307,10 @@ const sidePanel = computed(() => {
   const selectedId =
     audioSnapshot.value?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
   const recommended = audioEndpoints.value.filter(isRecommendedVoiceEndpoint);
-  const tool = stagedTool.value ?? configuredTool.value;
+  const configured = stagedTool.value ?? configuredTool.value;
+  const tool = isChromecast.value && configured !== "wechat" ? null : configured;
   return buildSidePanel(step.value, {
+    observeOnly: isChromecast.value,
     connectionPhase: platform?.connection.phase ?? "idle",
     bleVoiceReady: platform?.bleVoiceReady ?? false,
     remoteButtonObserved: remoteButtonObserved.value,
@@ -304,9 +321,11 @@ const sidePanel = computed(() => {
     audioLastError: audioSnapshot.value?.lastError ?? platform?.audio.lastError ?? null,
     scanningAudio: scanningAudio.value,
     tool,
-    hotkeyReady: tool !== null && (tool !== "other" || otherKeys.value !== null),
+    hotkeyReady: isChromecast.value
+      ? tool === "wechat" && isWeTypeVoiceChord(currentHotkey.value)
+      : tool !== null && (tool !== "other" || otherKeys.value !== null),
     captureEnabled: rc003Status.value?.enabled === true,
-    captureAvailable: captureSupport.value?.available !== false,
+    captureAvailable: !captureUnavailable.value,
     vokieRunning: vokie.value?.running === true,
     voicePhase: voicePhase.value,
     voiceTerminalCode: voiceStepTerminalCode.value,
@@ -333,6 +352,7 @@ const BLOCK_COPY: Record<OnboardingBlockCode, string> = {
   "audio.not_selected": "选择带「推荐」标记的语音设备，再继续。",
   "audio.not_ready": "语音设备没准备好；重新选择或刷新设备列表后再试。",
   "tool.not_selected": "先选择一个输入工具，再继续。",
+  "tool.chromecast.wetype_required": "请选择微信输入法，以设置当前遥控器所需的默认语音键。",
   "tool.conflict.vokie_running": "Vokie 正在运行，它会抢先响应右 Alt；退出 Vokie 或改选 Vokie，再继续。",
   "tool.doubao.authorization_required":
     "豆包需要开启「支持更多输入工具」：打开开关并按提示完成系统授权。",
@@ -642,7 +662,7 @@ function stopButtonObservation(): void {
 async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promise<void> {
   if (scanning.value) return;
   scanning.value = true;
-  scanMessage.value = t("正在寻找小米遥控器…");
+  scanMessage.value = t("正在寻找遥控器…");
   const started = performance.now();
   // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ②步自动连接触发）。
   reportStepAction("remote", "scan_requested", "unknown", { detail: mode });
@@ -652,8 +672,8 @@ async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promis
       devices.value.length === 0
         ? t("当前没有已配对设备，请先按照上一步完成设备配对。")
         : devices.value.length === 1
-          ? t("找到 1 个已配对的小米遥控器")
-          : t("找到 {count} 个已配对的小米遥控器", { count: devices.value.length });
+          ? t("找到 1 个已配对的遥控器")
+          : t("找到 {count} 个已配对的遥控器", { count: devices.value.length });
     reportStepAction("remote", "scan_requested", "passed", {
       detail: `${mode}_found_${devices.value.length}`,
       elapsedMs: actionElapsed(started),
@@ -815,6 +835,7 @@ watch(connectedRemoteIdentity, (identity) => {
   const previous = lastConnectedRemoteIdentity;
   lastConnectedRemoteIdentity = identity;
   if (!previous || identity === previous) return;
+  voiceVerified.value = false;
   if (!remoteButtonObserved.value) return;
   remoteButtonObserved.value = false;
   voiceKeyMistake.value = false;
@@ -1047,7 +1068,7 @@ function hotkeyForTool(tool: VoiceInputTool): KeyChord | null {
     case "vokie":
       return { keys: ["right_alt"] };
     case "wechat":
-      return { keys: ["left_control", "left_windows"] };
+      return { keys: [...WETYPE_VOICE_KEYS] };
     case "other": {
       const keys = otherKeys.value ?? [];
       return keys.length ? { keys } : null;
@@ -1080,7 +1101,8 @@ async function prepareVoiceToolStep(): Promise<void> {
     // ⑥步需要"已经选过工具"才成立（核对卡、输入法检查、语音键都按它来）。重启后若
     // 直接落在⑥步而磁盘上从未选过工具（2026-10-13 现场：⑥步显示"你选的输入工具"），
     // 就退回⑤步补选——不能让人在缺前置状态的一页上做验证。
-    if (step.value === "voice_test" && tool === null) {
+    if (step.value === "voice_test" && (tool === null
+      || (isChromecast.value && (tool !== "wechat" || !isWeTypeVoiceChord(hotkey))))) {
       reportStepAction("voice_test", "tool_missing_fallback", "failed", { detail: "to_tool_step" });
       await setStep("voice_tool", "fix");
     }
@@ -1098,6 +1120,7 @@ async function prepareVoiceToolStep(): Promise<void> {
  * 真实验证可用；退出未完成流程 / 重跑向导会回滚（设计稿 §5.4）。
  */
 async function selectTool(tool: VoiceInputTool): Promise<void> {
+  if (isChromecast.value && tool !== "wechat") return;
   if (tool === "other" && otherKeys.value === null) {
     stagedTool.value = "other";
     toolMessage.value = t("先为「其他工具」选一个语音键。");
@@ -1775,9 +1798,10 @@ async function startVoiceTestSession(): Promise<void> {
   voiceFailureMessage.value = "";
   voicePhase.value = "waiting_start";
   voiceSnapshotErrorLogged = false;
-  if (!stagedTool.value) {
+  if (!stagedTool.value || (isChromecast.value && !evaluateGate("voice_tool", gateContext.value).ok)) {
     // 应用重启后直接落在第⑥步：读一次正式配置，供核对卡与排除集使用。
     await prepareVoiceToolStep();
+    if (step.value !== "voice_test") return;
   }
   voiceAttemptCount += 1;
   let snapshot: RuntimeSnapshot;
@@ -2283,6 +2307,7 @@ async function retryVoiceTest(): Promise<void> {
           />
           <FullKeyStep
             v-else-if="step === 'full_key'"
+            :observe-only="isChromecast"
             :enabled="rc003Status?.enabled === true"
             :available="!captureUnavailable"
             :busy="captureBusy"
@@ -2305,12 +2330,13 @@ async function retryVoiceTest(): Promise<void> {
           />
           <VoiceToolStep
             v-else-if="step === 'voice_tool'"
-            :tool="stagedTool"
+            :tool="isChromecast && stagedTool !== 'wechat' ? null : stagedTool"
             :hotkey-label="hotkeyLabel"
             :capture-enabled="rc003Status?.enabled === true"
+            :chromecast="isChromecast"
             :capture-busy="captureBusy"
             :capture-hint="captureHint"
-            :conflict="stagedTool === 'doubao' && vokie?.running === true"
+            :conflict="!isChromecast && stagedTool === 'doubao' && vokie?.running === true"
             :vokie="vokie"
             :vokie-busy="vokieBusy"
             :other-keys="otherKeys"
@@ -2341,6 +2367,7 @@ async function retryVoiceTest(): Promise<void> {
           />
           <ControlsStep
             v-else-if="step === 'controls'"
+            :observe-only="isChromecast"
             :observed="observedList"
             :voice-key-mistake="voiceKeyMistake"
           />
@@ -2393,7 +2420,7 @@ async function retryVoiceTest(): Promise<void> {
         </div>
       </div>
 
-      <StepSide :panel="sidePanel" />
+      <StepSide :panel="sidePanel" :remote-model="artworkModel" />
     </main>
 
     <p v-if="saveMessage" class="onboarding-error">{{ saveMessage }}</p>

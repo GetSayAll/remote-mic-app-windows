@@ -518,6 +518,20 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
+  it("Chromecast 全按键支持说明页展示正确遥控器，允许继续设置听写", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    const snapshot = connectedRuntime();
+    snapshot.platform.connection.remoteModel = "chromecast";
+    const wrapper = await mountWizard(snapshot);
+
+    expect(wrapper.text()).toContain("Chromecast 可在「按键」页配置普通按键。这里可以直接继续设置听写。");
+    expect(wrapper.get(".side-photo").attributes("src")).toBe("/chromecast-remote.svg");
+    expect(wrapper.text()).not.toContain("建议开启");
+    expect(wrapper.find(".onboarding-switch").exists()).toBe(false);
+    expect(wrapper.find(".onboarding-actions .primary-button").attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("在全按键支持步骤打开开关：先弹确认，确认后才写状态", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
     const wrapper = await mountWizard(connectedRuntime());
@@ -624,7 +638,7 @@ describe("Onboarding wizard shell", () => {
     // 2026-10-13 现场定稿文案。
     expect(wrapper.text()).toContain("首次使用：遥控器怎么连电脑");
     expect(wrapper.text()).toContain(
-      "准备好：小米蓝牙语音遥控器 2 或 2 Pro（目前只支持这两种型号），并确保它有电。",
+      "准备好小米 RC001 / RC003 或 Google Chromecast 语音遥控器，并确保它有电。",
     );
     expect(wrapper.text()).toContain(
       "在电脑上打开蓝牙设置（可直接点击下方按钮），打开电脑的蓝牙开关后点击「添加设备」然后选择「蓝牙」选项。",
@@ -974,7 +988,7 @@ describe("Onboarding wizard shell", () => {
     await wrapper.find(".onboarding-chips button").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("正在寻找小米遥控器…");
+    expect(wrapper.text()).toContain("正在寻找遥控器…");
     expect(wrapper.text()).not.toContain("保持遥控器在旁边");
     wrapper.unmount();
   });
@@ -990,8 +1004,8 @@ describe("Onboarding wizard shell", () => {
     expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
     expect(mocks.connectRemote).toHaveBeenCalledWith("dev-1");
     // 自动扫描的结果行与设备卡都要出现（连接过程不再写进度消息，2026-10-13）。
-    expect(wrapper.text()).toContain("找到 1 个已配对的小米遥控器");
-    expect(wrapper.text()).toContain("已配对的小米蓝牙语音遥控器");
+    expect(wrapper.text()).toContain("找到 1 个已配对的遥控器");
+    expect(wrapper.text()).toContain("已配对的遥控器");
     const scan = onboardingEvents("action").filter((p) => p.reason === "scan_requested");
     // 2026-10-13：进入②步的自动扫描（entry）先带出列表，再由自动连接接手。
     expect(scan.map((p) => p.detail)).toEqual(["entry", "entry_found_1"]);
@@ -1009,7 +1023,7 @@ describe("Onboarding wizard shell", () => {
     const wrapper = await mountWizard(runtimeWith());
     // 2026-10-13 现场：进入②步先扫一次把设备列出来（不再等输入通道在位）。
     expect(mocks.scanPairedRemotes).toHaveBeenCalledTimes(1);
-    expect(wrapper.text()).toContain("找到 1 个已配对的小米遥控器");
+    expect(wrapper.text()).toContain("找到 1 个已配对的遥控器");
     // 未连接但输入通道还没在位：先不自动连接。
     expect(mocks.connectRemote).not.toHaveBeenCalled();
 
@@ -1031,7 +1045,7 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
 
     expect(mocks.connectRemote).not.toHaveBeenCalled();
-    expect(wrapper.text()).toContain("找到 2 个已配对的小米遥控器");
+    expect(wrapper.text()).toContain("找到 2 个已配对的遥控器");
     wrapper.unmount();
   });
 
@@ -1074,7 +1088,7 @@ describe("Onboarding wizard shell", () => {
     await flushPromises();
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("已配对的小米蓝牙语音遥控器") && button.text().endsWith("连接"))!
+      .find((button) => button.text().includes("已配对的遥控器") && button.text().endsWith("连接"))!
       .trigger("click");
     await flushPromises();
 
@@ -2474,7 +2488,7 @@ describe("Onboarding per-step diagnostics", () => {
     await flushPromises();
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("已配对的小米蓝牙语音遥控器") && button.text().endsWith("连接"))!
+      .find((button) => button.text().includes("已配对的遥控器") && button.text().endsWith("连接"))!
       .trigger("click");
     await flushPromises();
 

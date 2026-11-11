@@ -121,6 +121,7 @@ export default {
   "把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）": "Move keyboard focus to the foreground app's input field (without switching apps or typing)",
   "聚焦输入框": "Focus Input Field",
   "先选择修饰键": "Select modifiers first",
+  "请在电脑键盘上按下组合键": "Press the shortcut on your computer keyboard",
   "请按下快捷键组合": "Press the shortcut",
   "开启后，通过界面选择修饰键，键盘只需按主键。": "When on, select modifiers here and press only the main key on the keyboard.",
   "安全录入模式": "Safe Recording Mode",

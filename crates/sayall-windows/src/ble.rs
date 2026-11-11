@@ -5,19 +5,20 @@ use crate::wetype_revive::{
 use crate::{
     audio::AudioRuntime,
     disconnect_loop::{DisconnectCause, DisconnectLoopDetector, LoopReport},
+    local_dictation::{Capture as LocalCapture, Stream as LocalStream},
     power::PowerNotifications,
     reconnect::ReconnectBackoff,
     remote_model_from_model_number, remote_model_from_name,
     send_input::{KeyChord, KeyCode},
     send_input_windows::SendInputRuntime,
-    ConnectionPhase, ConnectionSnapshot, PlatformError, RemoteModel, UsageCounters,
-    VoiceAudioHealth,
+    ConnectionPhase, ConnectionSnapshot, LocalDictationStatus, PlatformError, RemoteModel,
+    UsageCounters, VoiceAudioHealth,
 };
 use sayall_core::settings::VoiceInputTool;
 use sayall_core::{AtvvCommand, AtvvVoicePipeline, PipelineOutput, VoiceSessionState};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, Receiver, Sender, SyncSender},
     Arc, Mutex, MutexGuard, OnceLock,
 };
 use std::thread::{self, JoinHandle};
@@ -41,6 +42,10 @@ const SERVICE_UUID: GUID = GUID::from_u128(0xab5e00015a214f05bc7daf01f617b664);
 const TRANSMIT_UUID: GUID = GUID::from_u128(0xab5e00025a214f05bc7daf01f617b664);
 const AUDIO_UUID: GUID = GUID::from_u128(0xab5e00035a214f05bc7daf01f617b664);
 const CONTROL_UUID: GUID = GUID::from_u128(0xab5e00045a214f05bc7daf01f617b664);
+/// Google 键事件服务（与 ATVV 同 UUID 基座）。2026-11-10 HCI 抓包实证：
+/// Chromecast 遥控器对 Windows 主机的普通按键通知（8 字节：键码/释放）
+/// 从这个服务的特征发出，而非 ATVV 服务或 HID。
+const VENDOR_KEY_SERVICE_UUID: GUID = GUID::from_u128(0xd343bfc05a214f05bc7daf01f617b664);
 const DEVICE_INFORMATION_SERVICE_UUID: GUID = GUID::from_u128(0x0000180a00001000800000805f9b34fb);
 const MODEL_NUMBER_UUID: GUID = GUID::from_u128(0x00002a2400001000800000805f9b34fb);
 /// 标准 Battery Service（0x180F）与 Battery Level（0x2A19）。真机证据：RC003
@@ -49,6 +54,7 @@ const MODEL_NUMBER_UUID: GUID = GUID::from_u128(0x00002a2400001000800000805f9b34
 const BATTERY_SERVICE_UUID: GUID = GUID::from_u128(0x0000180f00001000800000805f9b34fb);
 const BATTERY_LEVEL_UUID: GUID = GUID::from_u128(0x00002a1900001000800000805f9b34fb);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_ARM_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// WinRT 异步操作的硬上限（2026-10-21 现场）：旧的半死链路上
 /// `BluetoothLEDevice` 已经拿到、`Name()` 也能读，但随后的 GATT 查询
@@ -84,6 +90,102 @@ const MICROPHONE_EXTEND_INTERVAL: Duration = Duration::from_millis(2500);
 /// 取 8 秒而不是 5 秒：覆盖冷启动后首个音频帧到达较慢的现场，同时仍能在
 /// 用户明显感到“卡住”之前释放键盘。正常会话的首帧在 1 秒内到达。
 const VOICE_AUDIO_STALL_TIMEOUT: Duration = Duration::from_secs(8);
+const CHROMECAST_START_TIMEOUT: Duration = Duration::from_secs(3);
+const CHROMECAST_FIRST_PCM_TIMEOUT: Duration = Duration::from_secs(2);
+const CHROMECAST_UNSUPPORTED_VOICE_BINDING: &str =
+    "请在连接页为 Google 遥控器选择微信输入法和左 Ctrl + 左 Win";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromecastVoiceStage {
+    WaitingForStart,
+    WaitingForPcm,
+    Streaming,
+    CancelledBeforeStart,
+    OpenCommandFailed,
+    LocalCaptureAborted,
+}
+
+impl ChromecastVoiceStage {
+    fn timeout(self) -> Duration {
+        match self {
+            Self::WaitingForStart => CHROMECAST_START_TIMEOUT,
+            Self::WaitingForPcm => CHROMECAST_FIRST_PCM_TIMEOUT,
+            Self::Streaming => VOICE_AUDIO_STALL_TIMEOUT,
+            Self::CancelledBeforeStart | Self::OpenCommandFailed | Self::LocalCaptureAborted => {
+                Duration::ZERO
+            }
+        }
+    }
+
+    fn error_code(self) -> &'static str {
+        match self {
+            Self::WaitingForStart => "start_timeout",
+            Self::WaitingForPcm => "first_pcm_timeout",
+            Self::Streaming => "audio_stall",
+            Self::CancelledBeforeStart => "stopped_before_start",
+            Self::OpenCommandFailed => "mic_open_failed",
+            Self::LocalCaptureAborted => "local_capture_aborted",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::WaitingForStart => "Google 遥控器未开始语音流，已结束本次语音",
+            Self::WaitingForPcm => "Google 遥控器已开始语音流，但未收到可播放音频，已结束本次语音",
+            Self::Streaming => "Google 遥控器音频流中断，已结束本次语音",
+            Self::CancelledBeforeStart => "Google 遥控器已在开始收音前松开语音键",
+            Self::OpenCommandFailed => "未能确认 Google 遥控器已收到开麦命令",
+            Self::LocalCaptureAborted => "Google 遥控器本次本地录音已结束",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChromecastVoiceDeadline {
+    stage: ChromecastVoiceStage,
+    connection_generation: u64,
+    started_at: Instant,
+}
+
+impl ChromecastVoiceDeadline {
+    fn new(stage: ChromecastVoiceStage, connection_generation: u64, now: Instant) -> Self {
+        Self {
+            stage,
+            connection_generation,
+            started_at: now,
+        }
+    }
+
+    fn expires(self) -> Instant {
+        self.started_at + self.stage.timeout()
+    }
+
+    fn is_due(self, generation: u64, now: Instant) -> bool {
+        self.connection_generation == generation && self.expires() <= now
+    }
+
+    fn after_audio(
+        self,
+        state: VoiceSessionState,
+        enqueued_pcm: bool,
+        now: Instant,
+    ) -> Option<Self> {
+        if self.stage == ChromecastVoiceStage::WaitingForStart {
+            return Some(self);
+        }
+        if state != VoiceSessionState::Streaming {
+            return None;
+        }
+        if enqueued_pcm {
+            return Some(Self::new(
+                ChromecastVoiceStage::Streaming,
+                self.connection_generation,
+                now,
+            ));
+        }
+        Some(self)
+    }
+}
 /// 报告层合成释放保险的宽限期（2026-10-23 尾字丢失现场调整）。
 ///
 /// helper 在语音键释放帧上会先保持 200ms（`RELEASE_HOLD_MS`），让应用把
@@ -619,6 +721,7 @@ mod stuck_voice_synth_tests {
 pub struct BleRuntime {
     sender: Sender<WorkerMessage>,
     state: Arc<Mutex<ConnectionSnapshot>>,
+    local_capture: Arc<Mutex<LocalCapture>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     power_notifications: Mutex<Option<PowerNotifications>>,
 }
@@ -638,6 +741,8 @@ impl BleRuntime {
         crate::remote_target::set(None);
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(ConnectionSnapshot::default()));
+        let local_capture = Arc::new(Mutex::new(LocalCapture::default()));
+        let worker_local_capture = Arc::clone(&local_capture);
         let worker_state = Arc::clone(&state);
         let worker_sender = sender.clone();
         let worker_capture = Arc::clone(&transcript_capture);
@@ -655,6 +760,7 @@ impl BleRuntime {
                     voice_input_tool,
                     gain_db,
                     worker_capture,
+                    worker_local_capture,
                 )
             });
 
@@ -664,6 +770,7 @@ impl BleRuntime {
                 Self {
                     sender,
                     state,
+                    local_capture,
                     worker: Mutex::new(Some(worker)),
                     power_notifications: Mutex::new(power_notifications),
                 }
@@ -673,6 +780,7 @@ impl BleRuntime {
                 Self {
                     sender,
                     state,
+                    local_capture,
                     worker: Mutex::new(None),
                     power_notifications: Mutex::new(None),
                 }
@@ -682,6 +790,37 @@ impl BleRuntime {
 
     pub fn snapshot(&self) -> ConnectionSnapshot {
         self.decorate_snapshot(lock(&self.state).clone())
+    }
+
+    pub fn arm_local_dictation(&self) -> Result<u64, PlatformError> {
+        // A successful send requires the caller to receive the token. If the caller
+        // times out first, the worker immediately retracts the unused lease.
+        let (reply, response) = mpsc::sync_channel(0);
+        self.sender
+            .send(WorkerMessage::ArmLocalDictation { reply })
+            .map_err(|_| PlatformError::WorkerUnavailable)?;
+        response
+            .recv_timeout(LOCAL_ARM_REQUEST_TIMEOUT)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => PlatformError::OperationTimedOut,
+                mpsc::RecvTimeoutError::Disconnected => PlatformError::WorkerUnavailable,
+            })?
+    }
+
+    pub fn local_dictation_status(&self, token: u64) -> LocalDictationStatus {
+        lock(&self.local_capture).status(token, Instant::now())
+    }
+
+    pub fn take_local_dictation(&self, token: u64) -> Option<Vec<i16>> {
+        lock(&self.local_capture).take(token, Instant::now())
+    }
+
+    pub fn cancel_local_dictation(&self, token: u64) -> bool {
+        let cancelled = lock(&self.local_capture).cancel(token, Instant::now());
+        if cancelled {
+            let _ = self.sender.send(WorkerMessage::LocalDictationCancelled);
+        }
+        cancelled
     }
 
     pub fn connect(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
@@ -798,6 +937,10 @@ impl Drop for BleRuntime {
 }
 
 pub(crate) enum WorkerMessage {
+    ArmLocalDictation {
+        reply: SyncSender<Result<u64, PlatformError>>,
+    },
+    LocalDictationCancelled,
     Connect {
         device_id: String,
         reply: Sender<Result<ConnectionSnapshot, PlatformError>>,
@@ -825,6 +968,12 @@ pub(crate) enum WorkerMessage {
     BatteryRead {
         connection_generation: u64,
         reading: crate::battery::BatteryReading,
+    },
+    /// Google 厂商服务 transmit（0xAB5E0002）按键通知（仅 Chromecast 订阅）。
+    /// 载荷首字节为键码（0=全部释放），解码后送按键映射引擎。
+    Transmit {
+        connection_generation: u64,
+        bytes: Vec<u8>,
     },
     /// 微信输入法热键休眠自动重试（wetype_check 线程检测到未响应并完成
     /// 配置切换唤醒后请求）：释放旧和弦边沿并重注入——在工作线程内
@@ -896,6 +1045,7 @@ fn worker_loop(
     voice_input_tool: Arc<Mutex<Option<VoiceInputTool>>>,
     gain_db: Arc<Mutex<f32>>,
     transcript_capture: Arc<crate::transcript_capture::TranscriptCaptureRuntime>,
+    local_capture: Arc<Mutex<LocalCapture>>,
 ) {
     // 进程级资源基线（2026-09-16）：与后续 episode_start / system_resume 对比，
     // 区分"资源由本进程累积"与"进程一启动系统即已被占满"。
@@ -931,6 +1081,12 @@ fn worker_loop(
     // 最近一帧 ATVV 音频的到达时刻（2026-10-21）：STOP 丢失时用它判定
     // 链路已静默，主动收尾并释放按住说话快捷键。只在 Streaming 期间有意义。
     let mut last_voice_audio_at: Option<Instant> = None;
+    let mut chromecast_voice_deadline: Option<ChromecastVoiceDeadline> = None;
+    // The route is worker-owned and remains pinned even after the shared lease is
+    // cancelled. Only the physical STOP or rotating the GATT subscription clears it.
+    // ATVV v1 audio/STOP are unnumbered, so packets within one subscription still
+    // rely on the delivery order of that notification stream.
+    let mut local_route: Option<(u64, u64)> = None;
     // 提前重连的状态（2026-10-13，issue #206）：上次连接尝试结束的时刻，
     // 供安静窗判定；以及被安静窗抑制的触发累计数（折叠日志；成功提前或成功连上即清零，
     // 保证"首条"日志按 episode 计，不被上一轮的大数字吞掉）。
@@ -952,14 +1108,106 @@ fn worker_loop(
     let mut disconnect_loop = DisconnectLoopDetector::new();
 
     loop {
-        let voice_stall_deadline = if pipeline.state() == VoiceSessionState::Streaming {
+        // Check before receiving a message, so a queue full of malformed audio cannot
+        // indefinitely postpone the first valid PCM deadline.
+        let now = Instant::now();
+        local_route = local_route.filter(|(connection, _)| *connection == connection_generation);
+        let local_deadline = {
+            let mut capture = lock(&local_capture);
+            capture.expire(now);
+            if let Some((_, token)) = local_route {
+                if matches!(
+                    capture.status(token, now),
+                    LocalDictationStatus::Cancelled | LocalDictationStatus::Expired
+                ) {
+                    chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                        ChromecastVoiceStage::LocalCaptureAborted,
+                        connection_generation,
+                        now,
+                    ));
+                }
+            }
+            capture.deadline()
+        };
+        if let Some(voice_deadline) = chromecast_voice_deadline {
+            if voice_deadline.connection_generation != connection_generation {
+                chromecast_voice_deadline = None;
+            } else if voice_deadline.is_due(connection_generation, now) {
+                chromecast_voice_deadline = None;
+                lock(&local_capture).invalidate();
+                let was_local = local_route.take().is_some();
+                if matches!(
+                    voice_deadline.stage,
+                    ChromecastVoiceStage::CancelledBeforeStart
+                        | ChromecastVoiceStage::LocalCaptureAborted
+                ) {
+                    gatt_note(
+                        format!("voice_session feature=chromecast phase=completed terminal_result=cancelled reason={}", voice_deadline.stage.error_code()),
+                    );
+                } else {
+                    gatt_note(format!(
+                        "voice_session feature=chromecast action=abort phase=completed terminal_result=failed error_domain=atvv error_code={} retryable=true",
+                        voice_deadline.stage.error_code()
+                    ));
+                }
+                if !was_local {
+                    transcript_capture.cancel(voice_deadline.stage.error_code());
+                    transcript_capture.cancel_audio();
+                    transcript_pending_started = false;
+                }
+                voice_session_epoch.fetch_add(1, Ordering::SeqCst);
+                voice_level.log_and_reset("unknown", voice_deadline.stage.error_code());
+                active_voice_samples = 0;
+                voice_stream_started_at = None;
+                last_voice_audio_at = None;
+                extend_deadline = None;
+                capabilities_deadline = None;
+                // Rotate the notification generation and unsubscribe the timed-out session.
+                // The remote protocol does not tell us whether the user is still holding
+                // the button. Recover the connection without reopening the microphone.
+                if let Err(error) = invalidate_connection(
+                    &mut session,
+                    &mut pipeline,
+                    &audio,
+                    &send_input,
+                    &mut held_hotkey,
+                    &mut connection_generation,
+                    &usage,
+                ) {
+                    keep_reconnecting_after_cleanup_failure(
+                        &state,
+                        &mut preferred_device_id,
+                        &mut backoff,
+                        &mut reconnect_deadline,
+                        &error,
+                    );
+                } else if preferred_device_id.is_some() && !system_suspended {
+                    schedule_reconnect(
+                        &state,
+                        &mut backoff,
+                        &mut reconnect_deadline,
+                        voice_deadline.stage.message(),
+                    );
+                }
+                continue;
+            }
+        }
+        let voice_stall_deadline = if chromecast_voice_deadline.is_none()
+            && pipeline.state() == VoiceSessionState::Streaming
+        {
             last_voice_audio_at.map(|last| last + VOICE_AUDIO_STALL_TIMEOUT)
         } else {
             None
         };
         let deadline = nearest_deadline(
-            nearest_deadline(capabilities_deadline, reconnect_deadline),
-            nearest_deadline(extend_deadline, voice_stall_deadline),
+            local_deadline,
+            nearest_deadline(
+                nearest_deadline(capabilities_deadline, reconnect_deadline),
+                nearest_deadline(
+                    nearest_deadline(extend_deadline, voice_stall_deadline),
+                    chromecast_voice_deadline.map(ChromecastVoiceDeadline::expires),
+                ),
+            ),
         );
         let message = match deadline {
             Some(deadline) => {
@@ -967,6 +1215,12 @@ fn worker_loop(
                     Ok(message) => message,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         let now = Instant::now();
+                        if local_deadline.is_some_and(|deadline| deadline <= now)
+                            || chromecast_voice_deadline
+                                .is_some_and(|deadline| deadline.is_due(connection_generation, now))
+                        {
+                            continue;
+                        }
                         if capabilities_deadline.is_some_and(|deadline| deadline <= now) {
                             capabilities_deadline = None;
                             if let Err(error) = invalidate_connection(
@@ -1119,6 +1373,10 @@ fn worker_loop(
                                             Err(error) => {
                                                 lock(&state).last_error =
                                                     Some(format!("发送 MIC_EXTEND 失败：{error}"));
+                                                if let Some((_, token)) = local_route {
+                                                    lock(&local_capture)
+                                                        .cancel(token, Instant::now());
+                                                }
                                             }
                                         }
                                     }
@@ -1136,7 +1394,62 @@ fn worker_loop(
             },
         };
 
+        // Revoke any unconsumed audio before a lifecycle handler can block on GATT.
+        // Stale callbacks from a previous subscription must leave the new lease alone.
+        let invalidate_local = match &message {
+            WorkerMessage::Connect { .. }
+            | WorkerMessage::Disconnect { .. }
+            | WorkerMessage::Restore { .. }
+            | WorkerMessage::SystemSuspended
+            | WorkerMessage::Shutdown { .. } => true,
+            WorkerMessage::ConnectionChanged {
+                connection_generation: generation,
+                status,
+            } => {
+                *generation == connection_generation
+                    && *status == BluetoothConnectionStatus::Disconnected
+            }
+            WorkerMessage::CallbackError {
+                connection_generation: generation,
+                ..
+            } => *generation == connection_generation,
+            _ => false,
+        };
+        if invalidate_local {
+            lock(&local_capture).invalidate();
+        }
+
         match message {
+            WorkerMessage::ArmLocalDictation { reply } => {
+                let cast_phase = {
+                    let snapshot = lock(&state);
+                    (snapshot.remote_model == RemoteModel::Chromecast).then_some(snapshot.phase)
+                };
+                let result =
+                    if system_suspended || session.is_none() || pipeline.capabilities().is_none() {
+                        Err(PlatformError::LocalDictationNotReady)
+                    } else if matches!(
+                        cast_phase,
+                        Some(ConnectionPhase::Streaming | ConnectionPhase::Draining)
+                    ) {
+                        Err(PlatformError::LocalDictationBusy)
+                    } else if cast_phase != Some(ConnectionPhase::Ready) {
+                        Err(PlatformError::LocalDictationNotReady)
+                    } else if pipeline.state() != VoiceSessionState::Idle
+                        || chromecast_voice_deadline.is_some()
+                        || local_route.is_some()
+                    {
+                        Err(PlatformError::LocalDictationBusy)
+                    } else {
+                        lock(&local_capture)
+                            .arm(connection_generation, Instant::now())
+                            .ok_or(PlatformError::LocalDictationBusy)
+                    };
+                if let Err(mpsc::SendError(Ok(token))) = reply.send(result) {
+                    lock(&local_capture).cancel(token, Instant::now());
+                }
+            }
+            WorkerMessage::LocalDictationCancelled => {}
             WorkerMessage::Connect { device_id, reply } => {
                 // 换遥控器：先把上一支**显式断开**（2026-10-13 现场要求：同时有多支遥控器时，
                 // 连接另一支之前应先把之前那支断开——同屏只保持一条遥控器链路，旧链路的状态、
@@ -1160,7 +1473,7 @@ fn worker_loop(
                         Ok(()) => {
                             let snapshot = ConnectionSnapshot::default();
                             *lock(&state) = snapshot.clone();
-                            apply_input_connection_phase(snapshot.phase);
+                            apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
                             gatt_note(
                                 "ble_switch action=disconnect_previous terminal_result=passed"
                                     .to_owned(),
@@ -1247,11 +1560,12 @@ fn worker_loop(
                     &mut connection_generation,
                     &usage,
                 );
+                crate::remote_target::set(None);
                 match result {
                     Ok(()) => {
                         let snapshot = ConnectionSnapshot::default();
                         *lock(&state) = snapshot.clone();
-                        apply_input_connection_phase(snapshot.phase);
+                        apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
                         let _ = reply.send(Ok(snapshot));
                     }
                     Err(error) => {
@@ -1292,7 +1606,7 @@ fn worker_loop(
                     }
                 };
                 *lock(&state) = snapshot.clone();
-                apply_input_connection_phase(snapshot.phase);
+                apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
                 let _ = reply.send(Ok(snapshot));
             }
             WorkerMessage::WakeReconnect => {
@@ -1337,7 +1651,8 @@ fn worker_loop(
                 // 未变（未被新会话替换）时执行。
                 // Validate before taking ownership: a stale retry must never
                 // discard the chord needed to release the current session.
-                if pipeline.state() != VoiceSessionState::Streaming
+                if local_route.is_some()
+                    || pipeline.state() != VoiceSessionState::Streaming
                     || voice_session_epoch.load(Ordering::SeqCst) != epoch
                 {
                     gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
@@ -1403,6 +1718,26 @@ fn worker_loop(
                 bytes,
             } => {
                 if message_generation == connection_generation {
+                    let cast_is_waiting_for_start =
+                        chromecast_voice_deadline.is_some_and(|deadline| {
+                            deadline.stage == ChromecastVoiceStage::WaitingForStart
+                        });
+                    if cast_is_waiting_for_start
+                        && pipeline.state() == VoiceSessionState::Idle
+                        && bytes.first() == Some(&0x00)
+                    {
+                        // A short press can release before START. Invalidate the subscription
+                        // before reading another message so a late START cannot open the IME.
+                        chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                            ChromecastVoiceStage::CancelledBeforeStart,
+                            connection_generation,
+                            Instant::now(),
+                        ));
+                        if let Some(session) = session.as_mut() {
+                            session.microphone_opened = false;
+                        }
+                        continue;
+                    }
                     let was_streaming = pipeline.state() == VoiceSessionState::Streaming;
                     // 会话号要在处理 STOP 之前取：收尾会把它清掉。
                     let level_session = pipeline
@@ -1427,6 +1762,10 @@ fn worker_loop(
                         &transcript_capture,
                         &mut transcript_pending_started,
                         &mut voice_level,
+                        &mut chromecast_voice_deadline,
+                        &local_capture,
+                        &mut local_route,
+                        connection_generation,
                         &bytes,
                     );
                     // 正常收尾（StreamStopped 等）：本轮电平在此落盘。
@@ -1442,6 +1781,7 @@ fn worker_loop(
                         lock(&state).reconnect_attempt = 0;
                     }
                     if phase == ConnectionPhase::Failed {
+                        lock(&local_capture).invalidate();
                         let error = lock(&state)
                             .last_error
                             .clone()
@@ -1475,11 +1815,22 @@ fn worker_loop(
                     }
                 }
             }
+            WorkerMessage::Transmit {
+                connection_generation: message_generation,
+                bytes,
+            } => {
+                if message_generation == connection_generation
+                    && lock(&state).remote_model == RemoteModel::Chromecast
+                {
+                    handle_transmit_keys(&session, &bytes, connection_generation);
+                }
+            }
             WorkerMessage::Audio {
                 connection_generation: message_generation,
                 bytes,
             } => {
                 if message_generation == connection_generation {
+                    let previous_sample_count = active_voice_samples;
                     handle_audio(
                         &mut session,
                         &mut pipeline,
@@ -1495,7 +1846,24 @@ fn worker_loop(
                         &usage,
                         &transcript_capture,
                         &mut voice_level,
+                        &local_capture,
+                        local_route,
                     );
+                    if let Some(deadline) = chromecast_voice_deadline {
+                        let enqueued_pcm = active_voice_samples > previous_sample_count;
+                        let now = Instant::now();
+                        chromecast_voice_deadline =
+                            deadline.after_audio(pipeline.state(), enqueued_pcm, now);
+                        if enqueued_pcm && deadline.stage == ChromecastVoiceStage::WaitingForPcm {
+                            let elapsed_ms = now
+                                .saturating_duration_since(deadline.started_at)
+                                .as_millis();
+                            gatt_note(format!(
+                                "voice_session feature=chromecast phase=observed reason={} elapsed_ms={elapsed_ms}",
+                                if local_route.is_some() { "first_pcm_captured" } else { "first_pcm_enqueued" }
+                            ));
+                        }
+                    }
                 }
             }
             WorkerMessage::ConnectionChanged {
@@ -1545,7 +1913,7 @@ fn worker_loop(
                     } else {
                         let mut snapshot = lock(&state);
                         snapshot.phase = ConnectionPhase::Disconnected;
-                        apply_input_connection_phase(snapshot.phase);
+                        apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
                         snapshot.voice_state = VoiceSessionState::Idle;
                         snapshot.last_error = Some("小米语音遥控器蓝牙连接已断开".to_owned());
                     }
@@ -1606,7 +1974,7 @@ fn worker_loop(
                         );
                     } else {
                         *lock(&state) = failed_snapshot(error);
-                        apply_input_connection_phase(ConnectionPhase::Failed);
+                        apply_input_connection_phase(ConnectionPhase::Failed, RemoteModel::Unknown);
                     }
                 }
             }
@@ -1669,7 +2037,7 @@ fn worker_loop(
                     last_error: Some("Windows 已进入睡眠，小米语音遥控器资源已释放".to_owned()),
                     ..ConnectionSnapshot::default()
                 };
-                apply_input_connection_phase(ConnectionPhase::Suspended);
+                apply_input_connection_phase(ConnectionPhase::Suspended, previous.remote_model);
             }
             WorkerMessage::SystemResumed => {
                 // 无条件记录本次唤醒（含"未配对到 suspend"的情形，如应用在
@@ -1695,10 +2063,13 @@ fn worker_loop(
                         last_error: Some("Windows 已恢复，正在重新连接小米语音遥控器".to_owned()),
                         ..ConnectionSnapshot::default()
                     };
-                    apply_input_connection_phase(ConnectionPhase::Reconnecting);
+                    apply_input_connection_phase(
+                        ConnectionPhase::Reconnecting,
+                        previous.remote_model,
+                    );
                 } else {
                     *lock(&state) = ConnectionSnapshot::default();
-                    apply_input_connection_phase(ConnectionPhase::Idle);
+                    apply_input_connection_phase(ConnectionPhase::Idle, RemoteModel::Unknown);
                 }
             }
             WorkerMessage::Shutdown { ack } => {
@@ -1707,6 +2078,7 @@ fn worker_loop(
                 usage.finish_voice_session();
                 let _ = audio.interrupt_session();
                 let _ = close_session(&mut session);
+                crate::remote_target::set(None);
                 pipeline.interrupt();
                 // 回执放在清理之后：退出路径据此确认 `ble_session_cleanup` 已落盘。
                 if let Some(ack) = ack {
@@ -1716,6 +2088,7 @@ fn worker_loop(
             }
         }
     }
+    lock(&local_capture).invalidate();
 }
 
 /// 断连循环的结构化取证行（2026-10-20）：同一轮循环只落一条。
@@ -1752,19 +2125,39 @@ fn gate_remote_connected(phase: ConnectionPhase) -> bool {
 /// 同步连接相位到普通按键门控与语音 F5 保护。语音保护只覆盖可能收到
 /// 遥控器原生 F5、但 ATVV 会话尚未就绪的短暂建链窗口；稳定在线后继续由
 /// GATT 0x04 前置信号精确武装，失败/挂起/主动断开时不占用实体键盘 F5。
-fn apply_input_connection_phase(phase: ConnectionPhase) {
-    crate::key_gate::set_remote_connected(gate_remote_connected(phase));
-    crate::key_suppressor::set_link_guard_active(voice_link_guard_active(phase));
+fn apply_input_connection_phase(phase: ConnectionPhase, model: RemoteModel) {
+    // The global gate is for Xiaomi. Cast actions are driven by identity-checked
+    // Raw Input and must never enable global phrase-panel or switcher swallowing.
+    crate::key_gate::set_remote_connected(
+        model != RemoteModel::Chromecast && gate_remote_connected(phase),
+    );
+    if model == RemoteModel::Chromecast {
+        crate::key_suppressor::clear_ble_guards();
+    } else {
+        crate::key_suppressor::set_link_guard_active(voice_link_guard_active(phase, model));
+    }
 }
 
-fn voice_link_guard_active(phase: ConnectionPhase) -> bool {
-    matches!(
-        phase,
-        ConnectionPhase::Connecting
-            | ConnectionPhase::Discovering
-            | ConnectionPhase::AwaitingCapabilities
-            | ConnectionPhase::Reconnecting
-    )
+fn remote_uses_xiaomi_f5(model: RemoteModel) -> bool {
+    matches!(model, RemoteModel::Rc001 | RemoteModel::Rc003)
+}
+
+fn chromecast_voice_binding_supported(
+    tool: Option<VoiceInputTool>,
+    hotkey: Option<&KeyChord>,
+) -> bool {
+    tool == Some(VoiceInputTool::Wechat) && hotkey.is_some_and(is_wetype_voice_hotkey)
+}
+
+fn voice_link_guard_active(phase: ConnectionPhase, model: RemoteModel) -> bool {
+    remote_uses_xiaomi_f5(model)
+        && matches!(
+            phase,
+            ConnectionPhase::Connecting
+                | ConnectionPhase::Discovering
+                | ConnectionPhase::AwaitingCapabilities
+                | ConnectionPhase::Reconnecting
+        )
 }
 
 fn nearest_deadline(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
@@ -1843,11 +2236,10 @@ fn attempt_connection(
         reconnect_attempt,
         ..ConnectionSnapshot::default()
     };
-    apply_input_connection_phase(if reconnecting {
-        ConnectionPhase::Reconnecting
-    } else {
-        ConnectionPhase::Connecting
-    });
+    {
+        let snapshot = lock(state);
+        apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
+    }
 
     let connected = match BleSession::connect(
         device_id,
@@ -1876,7 +2268,7 @@ fn attempt_connection(
         ..ConnectionSnapshot::default()
     };
     *lock(state) = snapshot.clone();
-    apply_input_connection_phase(snapshot.phase);
+    apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
     *session = Some(connected);
     *capabilities_deadline = Some(Instant::now() + CAPABILITIES_TIMEOUT);
     gatt_note(format!(
@@ -1989,11 +2381,35 @@ fn invalidate_connection(
     usage: &UsageCounters,
 ) -> Result<(), PlatformError> {
     *connection_generation = connection_generation.wrapping_add(1);
+    if let Some(connected) = session.as_ref() {
+        *lock(&connected.f5_callback_active) = false;
+        if connected.model == RemoteModel::Chromecast {
+            crate::remote_target::set_chromecast(None);
+        }
+    }
     release_voice_hold_hotkey(send_input, held_hotkey);
     usage.finish_voice_session();
     let mut cleanup_errors = Vec::new();
     if let Err(error) = audio.interrupt_session() {
         cleanup_errors.push(format!("音频中断：{error}"));
+    }
+    // ATVV 0.4 CLOSE is unnumbered; ATVV 1.0 requires a confirmed stream ID.
+    if let (Some(connected), Some(capabilities)) = (session.as_mut(), pipeline.capabilities()) {
+        if connected.model == RemoteModel::Chromecast && connected.microphone_opened {
+            if let Some(session_id) = pipeline
+                .session_id()
+                .or((capabilities.version < 0x0100).then_some(0))
+            {
+                if let Err(error) =
+                    connected.request_microphone_close(capabilities.version, session_id)
+                {
+                    gatt_note(format!(
+                        "voice_session feature=chromecast action=mic_close phase=completed terminal_result=failed error_domain=bluetooth error_code={} retryable=false reason=closing_connection",
+                        ble_error_code(&error)
+                    ));
+                }
+            }
+        }
     }
     if let Err(error) = close_session(session) {
         cleanup_errors.push(error.to_string());
@@ -2038,7 +2454,7 @@ fn keep_reconnecting_after_cleanup_failure(
     } else {
         *reconnect_deadline = None;
         *lock(state) = failed_snapshot(user_facing_connection_error(error, false));
-        apply_input_connection_phase(ConnectionPhase::Failed);
+        apply_input_connection_phase(ConnectionPhase::Failed, RemoteModel::Unknown);
     }
 }
 
@@ -2132,7 +2548,7 @@ fn schedule_reconnect(
     *reconnect_deadline = Some(Instant::now() + delay);
     let mut snapshot = lock(state);
     snapshot.phase = ConnectionPhase::Reconnecting;
-    apply_input_connection_phase(snapshot.phase);
+    apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
     snapshot.capabilities = None;
     snapshot.voice_state = VoiceSessionState::Idle;
     snapshot.generation = 0;
@@ -2368,6 +2784,48 @@ fn voice_timestamp_ms() -> i64 {
     chrono::Local::now().timestamp_millis()
 }
 
+/// Google 厂商服务 transmit（0xAB5E0002）键事件通知 → 按键映射引擎。
+///
+/// 2026-11-10 HCI 抓包结论（Testing/WindowsChromecast.md）：该遥控器对
+/// Windows 主机**从不发送 HID 输入报告**，普通按键全部走这条 8 字节通知
+/// （首字节键码，0=释放当前按住）。这里只做解码与转发，按住状态由引擎内
+/// `ButtonStateMerger` 维护（Vendor 单来源仲裁，与 HID/键盘来源互斥）。
+/// 目标地址/代次校验与 Raw Input 路径同一判据，换机或换代后的事件被丢弃。
+fn handle_transmit_keys(session: &Option<BleSession>, bytes: &[u8], connection_generation: u64) {
+    let Some(session) = session.as_ref() else {
+        return;
+    };
+    let code = bytes.first().copied().unwrap_or(0);
+    let Some(key) = crate::raw_input::decode_chromecast_vendor_key(bytes) else {
+        if !bytes.is_empty() {
+            gatt_note(format!(
+                "raw_input feature=chromecast action=vendor_key phase=completed terminal_result=skipped reason=unknown_code code=0x{code:02X} connection_generation={connection_generation}"
+            ));
+        }
+        return;
+    };
+    let (target, target_generation) = crate::remote_target::current();
+    let forwarded = match target {
+        crate::remote_target::Target::Chromecast(Some(address)) if address == session.address => {
+            crate::button_mapping::send_chromecast_input(
+                address,
+                target_generation,
+                crate::raw_input::ChromecastInput::Vendor(key),
+            );
+            true
+        }
+        _ => false,
+    };
+    let button = match key {
+        crate::raw_input::ChromecastVendorKey::Press(button) => button.storage_key(),
+        crate::raw_input::ChromecastVendorKey::ReleaseAll => "release_all",
+    };
+    gatt_note(format!(
+        "raw_input feature=chromecast action=vendor_key phase=completed terminal_result={} code=0x{code:02X} button={button} connection_generation={connection_generation} target_generation={target_generation}",
+        if forwarded { "passed" } else { "skipped" },
+    ));
+}
+
 fn handle_control(
     session: &mut Option<BleSession>,
     pipeline: &mut AtvvVoicePipeline,
@@ -2387,8 +2845,18 @@ fn handle_control(
     transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
     transcript_pending_started: &mut bool,
     voice_level: &mut VoiceLevelMeter,
+    chromecast_voice_deadline: &mut Option<ChromecastVoiceDeadline>,
+    local_capture: &Mutex<LocalCapture>,
+    local_route: &mut Option<(u64, u64)>,
+    connection_generation: u64,
     bytes: &[u8],
 ) {
+    let remote_model = lock(state).remote_model;
+    let is_chromecast = remote_model == RemoteModel::Chromecast;
+    if is_chromecast && bytes.first() == Some(&0x08) && chromecast_voice_deadline.is_some() {
+        // The request is already in flight. A duplicate cannot reset the deadline.
+        return;
+    }
     if bytes.first() == Some(&0x00) && pipeline.state() == VoiceSessionState::Idle {
         return;
     }
@@ -2396,6 +2864,11 @@ fn handle_control(
     // MIC_CLOSE），再让新会话走正常开始路径。否则 pipeline 会以 AlreadyActive
     // 拒绝新开始，用户看到的就是“语音键彻底没反应”。
     if is_stream_start(bytes) && pipeline.state() != VoiceSessionState::Idle {
+        if is_chromecast {
+            // STOP has no reliable session identifier. Keep the active session rather
+            // than let an overlapping START associate that STOP with a new recording.
+            return;
+        }
         let stale_session = pipeline.session_id();
         let samples = *active_voice_samples;
         gatt_note(format!(
@@ -2417,14 +2890,18 @@ fn handle_control(
         );
         *last_voice_audio_at = None;
     }
+    pipeline.set_streaming_packets(is_chromecast);
     let output = match pipeline.handle_control(bytes) {
         Ok(output) => output,
         Err(error) => {
+            if let Some((_, token)) = *local_route {
+                lock(local_capture).cancel(token, Instant::now());
+            }
             let mut snapshot = lock(state);
             snapshot.last_error = Some(error.to_string());
             if snapshot.phase == ConnectionPhase::AwaitingCapabilities {
                 snapshot.phase = ConnectionPhase::Failed;
-                apply_input_connection_phase(ConnectionPhase::Failed);
+                apply_input_connection_phase(ConnectionPhase::Failed, RemoteModel::Unknown);
                 snapshot.voice_state = VoiceSessionState::Idle;
             }
             return;
@@ -2433,16 +2910,31 @@ fn handle_control(
 
     match output {
         PipelineOutput::Ready(capabilities) => {
+            if let Some((_, token)) = *local_route {
+                // A capabilities update during a claimed utterance changes the
+                // decoder contract. Reconnect without handing off partial audio.
+                lock(local_capture).cancel(token, Instant::now());
+                return;
+            }
+            if lock(state).remote_model == RemoteModel::Chromecast {
+                // A model switch must disable Xiaomi keyboard suppression immediately,
+                // before the Raw Input binding audit catches up with the BLE target.
+                crate::key_gate::set_listener_active(false);
+            }
             // 会话真的建立了：把「应用正在用的那支遥控器」发布出去（2026-10-13）。
             // 两台同型号遥控器同时在线时，Raw Input 绑定与增强捕获助手都靠它消歧；
             // 发布在 Ready 而不是连接握手更早的时刻——此时的地址确实已经在用。
             if let Some(session) = session.as_ref() {
-                crate::remote_target::set(Some(session.address));
+                if is_chromecast {
+                    crate::remote_target::set_chromecast(Some(session.address));
+                } else {
+                    crate::remote_target::set(Some(session.address));
+                }
                 session.log_connection_parameters("ready");
             }
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Ready;
-            apply_input_connection_phase(snapshot.phase);
+            apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
             snapshot.capabilities = Some(capabilities);
             snapshot.voice_state = VoiceSessionState::Idle;
             // 2026-10-13 现场：②步"下面写着已连接、上面两行都没标出来"这类归因，一眼要看
@@ -2461,29 +2953,76 @@ fn handle_control(
             let Some(capabilities) = pipeline.capabilities() else {
                 return;
             };
+            if is_chromecast && local_route.is_none() {
+                *local_route = lock(local_capture)
+                    .reserve(connection_generation, Instant::now())
+                    .map(|token| (connection_generation, token));
+            }
+            let is_local = local_route.is_some();
+            if is_chromecast
+                && !is_local
+                && !chromecast_voice_binding_supported(
+                    *lock(voice_input_tool),
+                    lock(voice_hold_hotkey).as_ref(),
+                )
+            {
+                lock(state).last_error = Some(CHROMECAST_UNSUPPORTED_VOICE_BINDING.to_owned());
+                gatt_note(
+                    "voice_session feature=chromecast action=mic_open phase=completed terminal_result=failed error_domain=input_tool error_code=unsupported_voice_binding retryable=false".to_owned(),
+                );
+                return;
+            }
             // 语音键开始：应用切换器（Alt+Tab）会话必须释放 Alt，否则按住说话
             // 快捷键会带着按住的 Alt 进入输入法（对齐 Mac：语音开始取消切换器）。
-            crate::button_mapping::note_voice_session_started();
-            // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
-            // HID F5 代替——普通键盘 F5 也会被误计。
-            usage.begin_voice_session(crate::foreground::foreground_application_name());
-            // 回眸基线：MIC_OPEN 比 StreamStarted 早，趁注入前先把目标输入框文字取下来。
-            // 同一次会话重复收到 MIC_OPEN 时不要重置刚取到的基线。
-            if !*transcript_pending_started {
-                transcript_capture.begin_pending(voice_timestamp_ms());
-                *transcript_pending_started = true;
+            if !is_local {
+                crate::button_mapping::note_voice_session_started();
+                // 个人中心统计：以 MIC_OPEN 请求作为语音键按下的可观测时刻。不能用
+                // HID F5 代替——普通键盘 F5 也会被误计。
+                usage.begin_voice_session(crate::foreground::foreground_application_name());
+                // 回眸基线：MIC_OPEN 比 StreamStarted 早，趁注入前先把目标输入框文字取下来。
+                // 同一次会话重复收到 MIC_OPEN 时不要重置刚取到的基线。
+                if !*transcript_pending_started {
+                    transcript_capture.begin_pending(voice_timestamp_ms());
+                    *transcript_pending_started = true;
+                }
             }
             if let Some(session) = session {
-                if let Err(error) = session
+                match session
                     .request_microphone_open(capabilities.version, capabilities.selected_codec)
                 {
-                    // MIC_OPEN 写入走 GATT，可能返回 Unreachable/AccessDenied 等
-                    // 状态码；用户文案同样按语义分流（P0-2）。
-                    lock(state).last_error = Some(user_facing_connection_error(&error, true));
-                    // 收不到 STREAM_START 就不会有 STREAM_STOP；这里清掉本轮
-                    // pending 标记，否则下一次按键会误以为基线已经取过。
-                    transcript_capture.cancel("microphone_open_failed");
-                    *transcript_pending_started = false;
+                    Ok(()) if is_chromecast => {
+                        *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                            ChromecastVoiceStage::WaitingForStart,
+                            session.connection_generation,
+                            Instant::now(),
+                        ));
+                        gatt_note(
+                            "voice_session feature=chromecast action=mic_open phase=submitted reason=waiting_for_start".to_owned(),
+                        );
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        // MIC_OPEN 写入走 GATT，可能返回 Unreachable/AccessDenied 等
+                        // 状态码；用户文案同样按语义分流（P0-2）。
+                        lock(state).last_error = Some(user_facing_connection_error(&error, true));
+                        // 收不到 STREAM_START 就不会有 STREAM_STOP；这里清掉本轮
+                        // pending 标记，否则下一次按键会误以为基线已经取过。
+                        if !is_local {
+                            transcript_capture.cancel("microphone_open_failed");
+                            *transcript_pending_started = false;
+                            usage.finish_voice_session();
+                        }
+                        if is_chromecast {
+                            // A write timeout cannot prove that the peer missed the command.
+                            // Fence the subscription before a late START can reach the IME.
+                            session.microphone_opened = true;
+                            *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                                ChromecastVoiceStage::OpenCommandFailed,
+                                session.connection_generation,
+                                Instant::now(),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -2491,6 +3030,77 @@ fn handle_control(
             session_id,
             generation,
         } => {
+            if is_chromecast && local_route.is_none() {
+                *local_route = lock(local_capture)
+                    .reserve(connection_generation, Instant::now())
+                    .map(|token| (connection_generation, token));
+            }
+            if let Some((connection, token)) = *local_route {
+                let now = Instant::now();
+                let stream = LocalStream {
+                    connection,
+                    generation,
+                    session_id,
+                };
+                if let Some(session) = session {
+                    session.microphone_opened = true;
+                }
+                if !lock(local_capture).start(token, stream, now) {
+                    // A cancellation racing START must still suppress the regular voice path.
+                    *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                        ChromecastVoiceStage::LocalCaptureAborted,
+                        connection,
+                        now,
+                    ));
+                    return;
+                }
+                *active_voice_samples = 0;
+                voice_session_epoch.fetch_add(1, Ordering::SeqCst);
+                *extend_deadline = Some(now + MICROPHONE_EXTEND_INTERVAL);
+                *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                    ChromecastVoiceStage::WaitingForPcm,
+                    connection,
+                    now,
+                ));
+                {
+                    let mut snapshot = lock(state);
+                    snapshot.phase = ConnectionPhase::Streaming;
+                    apply_input_connection_phase(snapshot.phase, remote_model);
+                    snapshot.voice_state = VoiceSessionState::Streaming;
+                    snapshot.generation = generation;
+                    snapshot.last_error = None;
+                }
+                gatt_note("local_dictation source=chromecast phase=capturing".to_owned());
+                return;
+            }
+            *chromecast_voice_deadline = None;
+            // Recheck immediately before side effects. Use this same tool/chord snapshot
+            // for activation and injection; a concurrent settings change cannot substitute
+            // a different key (for example Enter) after the allowlist check.
+            let attempt_tool = *lock(voice_input_tool);
+            let attempt_hotkey = lock(voice_hold_hotkey).clone();
+            if is_chromecast
+                && !chromecast_voice_binding_supported(attempt_tool, attempt_hotkey.as_ref())
+            {
+                transcript_capture.cancel("unsupported_voice_binding");
+                *transcript_pending_started = false;
+                gatt_note(
+                    "voice_session feature=chromecast action=stream_start phase=completed terminal_result=failed error_domain=input_tool error_code=unsupported_voice_binding retryable=false".to_owned(),
+                );
+                abort_voice_session(
+                    session,
+                    pipeline,
+                    state,
+                    audio,
+                    send_input,
+                    held_hotkey,
+                    active_voice_samples,
+                    Some(session_id),
+                    CHROMECAST_UNSUPPORTED_VOICE_BINDING.to_owned(),
+                    usage,
+                );
+                return;
+            }
             // 报告层语音路径可能不经过 MIC_OPEN：这里再发一次取消（幂等）。
             crate::button_mapping::note_voice_session_started();
             // RC003 的报告层语音路径实测直接发 0x04 STREAM_START，不经过
@@ -2533,14 +3143,16 @@ fn handle_control(
             // 注意：必须武装 key_suppressor（lib.rs 实际启动的抑制器）；
             // 2026-09-04 曾因误接未启动的 voice_key_suppressor 模块导致 F5
             // 泄漏进和弦、微信输入法拒绝触发（evidence/p 复盘）。
-            crate::key_suppressor::set_session_active(true);
+            crate::key_suppressor::set_session_active(remote_uses_xiaomi_f5(remote_model));
             // F5 解粘保险（2026-09-05 21:08 实证链路）：断连重连场景下
             // 首个 F5 D 在 0x04 之前泄漏进 OS（重连需 ~3s，武装不可能
             // 提前），其 UP 沿若丢失则 OS 键态 F5 永久按下——后续和弦
             // 全部变成 F5+Ctrl+Win 三键被拒。注入一个 F5 UP 清理：
             // 干净场景（本抑制器全吞）下该 UP 也会被吞（配对规则），
             // 仅在确有泄漏时放行到 OS——恰好只在需要时生效。
-            send_input.release_stuck_f5();
+            if remote_uses_xiaomi_f5(remote_model) {
+                send_input.release_stuck_f5();
+            }
             std::thread::sleep(Duration::from_millis(20));
             // 按住说话快捷键：两条互斥路径，由报告层合成门禁二选一（判据显式，
             // 不允许叠加——双写互扰 2026-09-29 run8 真机实证）：
@@ -2557,9 +3169,7 @@ fn handle_control(
             // 切到目标窗口"）：按下这一瞬的路径、合成门禁、以及三个"新鲜度"年龄
             // （距选工具 / 距快捷键变更 / 距上次会话切换）合并成一行；配合
             // `voice_verify`（输入法是否真的开麦）即可在复现窗口一次定位。
-            let synth_gate = crate::key_gate::voice_synth_active();
-            let attempt_tool = *lock(voice_input_tool);
-            let attempt_hotkey = lock(voice_hold_hotkey).clone();
+            let synth_gate = !is_chromecast && crate::key_gate::voice_synth_active();
             let synth_target = attempt_hotkey
                 .as_ref()
                 .and_then(crate::rc003_bridge::voice_synth_target);
@@ -2592,11 +3202,14 @@ fn handle_control(
             // 识别就会落到内置麦克风阵列或「立体声混音」上——按键链路、报告层合成、
             // 录音时长全都正常，只有识别结果对不上（2026-10-27 现场，用户改设备后
             // 立刻恢复）。这行日志就是"下次一眼定位"的那条证据。
-            if let Some((default_capture, is_cable_output)) =
-                crate::audio::capture_input_diagnosis()
-            {
+            if let Some((_, is_cable_output)) = crate::audio::capture_input_diagnosis() {
                 gatt_note(format!(
-                    "voice_capture_input default=\"{default_capture}\" is_cable_output={is_cable_output}"
+                    "voice_capture_input default_kind={} is_cable_output={is_cable_output}",
+                    if is_cable_output {
+                        "virtual_cable"
+                    } else {
+                        "other"
+                    },
                 ));
             }
 
@@ -2618,7 +3231,7 @@ fn handle_control(
                 gatt_note(format!(
                     "chord_press result=skipped reason=report_layer_synth_active session={session_id} note=OS 已在报告层收到合成快捷键，注入路径停用"
                 ));
-                if let Some(tool) = *lock(voice_input_tool) {
+                if let Some(tool) = attempt_tool {
                     match crate::ime::ensure_session_ime(
                         tool,
                         crate::ime::ImeSwitchScope::VoicePress,
@@ -2637,7 +3250,7 @@ fn handle_control(
                     }
                 }
                 spawn_voice_effect_check(session_id, attempt_tool, effect_before, effect_press_at);
-            } else if let Some(chord) = lock(voice_hold_hotkey).clone() {
+            } else if let Some(chord) = attempt_hotkey {
                 let wetype_hotkey = is_wetype_voice_hotkey(&chord);
                 let mic_baseline = wetype_hotkey.then(wetype_mic_observation).flatten();
                 // 存活标记基线已在两条注入路径之前统一取样（见上方 marker_baseline，
@@ -2648,10 +3261,30 @@ fn handle_control(
                 // （2026-10-01：不再按和弦猜——选豆包却把和弦配成 Ctrl+Win 时，
                 // 旧实现会把输入法切成微信）。失败仅记录提示，按原行为注入
                 // （不比现状更差）；Vokie / 其他工具返回 NotRequired，不切输入法。
-                if let Some(tool) = *lock(voice_input_tool) {
+                if let Some(tool) = attempt_tool {
                     if let Err(error) =
                         crate::ime::ensure_session_ime(tool, crate::ime::ImeSwitchScope::VoicePress)
                     {
+                        if is_chromecast {
+                            transcript_capture.cancel("ime_activation_failed");
+                            transcript_capture.cancel_audio();
+                            gatt_note(
+                                "voice_session feature=chromecast action=stream_start phase=completed terminal_result=failed error_domain=input_tool error_code=ime_activation_failed retryable=true".to_owned(),
+                            );
+                            abort_voice_session(
+                                session,
+                                pipeline,
+                                state,
+                                audio,
+                                send_input,
+                                held_hotkey,
+                                active_voice_samples,
+                                Some(session_id),
+                                error,
+                                usage,
+                            );
+                            return;
+                        }
                         lock(state).last_error = Some(error);
                     }
                 }
@@ -2683,7 +3316,7 @@ fn handle_control(
                     crate::send_input::HOLD_CHORD_EVENT_GAP.as_millis(),
                 ));
                 *held_hotkey = Some(chord);
-                if wetype_hotkey {
+                if wetype_hotkey && !is_chromecast {
                     // WeType 热键休眠检测与自动恢复（见 spawn_wetype_check）。
                     // 纪元在 StreamStarted 顶部已递增并捕获（见上），连同引用
                     // 传入，防旧阶梯跨会话误伤新会话的和弦。
@@ -2710,14 +3343,15 @@ fn handle_control(
                 // "目标窗口的输入法会话"。现在的分工：阶梯负责按住期间的紧急重放；救回负责
                 // 会话结束后的对齐（第 1 档只焦点往返，第 2 档才强制切一次），两者由合并裁决
                 // 与"动作前再裁决"隔离，不会互相拆台。
-                let heal =
-                    match attempt_tool.filter(|tool| crate::ime::ime_target_for(*tool).is_some()) {
-                        Some(tool) => Some(crate::wetype_revive::ImeHealContext {
-                            state: std::sync::Arc::clone(state),
-                            tool,
-                        }),
-                        None => None,
-                    };
+                let heal = match attempt_tool
+                    .filter(|tool| !is_chromecast && crate::ime::ime_target_for(*tool).is_some())
+                {
+                    Some(tool) => Some(crate::wetype_revive::ImeHealContext {
+                        state: std::sync::Arc::clone(state),
+                        tool,
+                    }),
+                    None => None,
+                };
                 crate::wetype_revive::spawn_mic_verify(
                     u64::from(session_id),
                     crate::ime::tool_label(attempt_tool),
@@ -2749,13 +3383,73 @@ fn handle_control(
             }
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Streaming;
-            apply_input_connection_phase(ConnectionPhase::Streaming);
+            apply_input_connection_phase(ConnectionPhase::Streaming, remote_model);
             snapshot.voice_state = VoiceSessionState::Streaming;
             snapshot.generation = generation;
             snapshot.last_error = None;
+            if is_chromecast {
+                if let Some(session) = session.as_ref() {
+                    *chromecast_voice_deadline = Some(ChromecastVoiceDeadline::new(
+                        ChromecastVoiceStage::WaitingForPcm,
+                        session.connection_generation,
+                        Instant::now(),
+                    ));
+                    gatt_note(
+                        "voice_session feature=chromecast action=stream_start phase=observed reason=waiting_for_pcm".to_owned(),
+                    );
+                }
+            }
         }
-        PipelineOutput::StreamStopped { generation, .. } => {
+        PipelineOutput::StreamStopped {
+            generation,
+            session_id,
+            discarded_partial_bytes,
+        } => {
+            *chromecast_voice_deadline = None;
             *last_voice_audio_at = None;
+            if let Some((connection, token)) = local_route.take() {
+                if let Some(session) = session {
+                    session.microphone_opened = false;
+                }
+                *extend_deadline = None;
+                *active_voice_samples = 0;
+                let drained = pipeline.complete_drain(generation);
+                if drained.is_err() {
+                    pipeline.interrupt();
+                }
+                {
+                    let mut snapshot = lock(state);
+                    snapshot.phase = ConnectionPhase::Ready;
+                    apply_input_connection_phase(snapshot.phase, remote_model);
+                    snapshot.voice_state = VoiceSessionState::Idle;
+                    snapshot.last_error = drained.as_ref().err().map(ToString::to_string);
+                }
+                let now = Instant::now();
+                let ready = {
+                    let mut capture = lock(local_capture);
+                    if drained.is_ok() && discarded_partial_bytes == 0 {
+                        capture.stop(
+                            token,
+                            LocalStream {
+                                connection,
+                                generation,
+                                session_id,
+                            },
+                            now,
+                        )
+                    } else {
+                        capture.cancel(token, now);
+                        false
+                    }
+                };
+                let (result, reason) = if ready {
+                    ("passed", "stream_stopped")
+                } else {
+                    ("failed", "audio_discarded")
+                };
+                gatt_note(format!("local_dictation source=chromecast phase=completed terminal_result={result} reason={reason}"));
+                return;
+            }
             // 回眸：先记结束时刻，文字稳定等待与音频排空互不影响。
             let transcript_ended_at = voice_timestamp_ms();
             transcript_capture.finish_session(transcript_ended_at);
@@ -2772,7 +3466,7 @@ fn handle_control(
             {
                 let mut snapshot = lock(state);
                 snapshot.phase = ConnectionPhase::Draining;
-                apply_input_connection_phase(ConnectionPhase::Draining);
+                apply_input_connection_phase(ConnectionPhase::Draining, remote_model);
                 snapshot.voice_state = VoiceSessionState::Draining;
             }
             if let Err(error) = audio.finish_session(generation) {
@@ -2814,18 +3508,20 @@ fn handle_control(
             {
                 let mut snapshot = lock(state);
                 snapshot.phase = ConnectionPhase::Ready;
-                apply_input_connection_phase(snapshot.phase);
+                apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
                 snapshot.voice_state = VoiceSessionState::Idle;
             }
             // 报告层合成的右 Alt 保险（2026-10-23）：遥控器偶发不发/丢失
             // 语音键的 HID 释放报告，合成键会一直处于按下（豆包语音条不消失）。
             // 给真实报告一个宽限期后检查 OS 键态，确认仍按下才补发抬起。
-            spawn_voice_synth_guard(
-                Arc::clone(send_input),
-                Arc::clone(voice_session_epoch),
-                generation,
-                *lock(voice_input_tool),
-            );
+            if remote_uses_xiaomi_f5(remote_model) {
+                spawn_voice_synth_guard(
+                    Arc::clone(send_input),
+                    Arc::clone(voice_session_epoch),
+                    generation,
+                    *lock(voice_input_tool),
+                );
+            }
         }
         PipelineOutput::DecoderSynchronized { .. }
         | PipelineOutput::UnknownControl { .. }
@@ -2910,8 +3606,43 @@ fn handle_audio(
     usage: &UsageCounters,
     transcript_capture: &crate::transcript_capture::TranscriptCaptureRuntime,
     voice_level: &mut VoiceLevelMeter,
+    local_capture: &Mutex<LocalCapture>,
+    local_route: Option<(u64, u64)>,
 ) {
     if pipeline.state() != VoiceSessionState::Streaming {
+        return;
+    }
+    if let Some((connection, token)) = local_route {
+        pipeline.set_gain_db(*lock(gain_db));
+        let Some(session_id) = pipeline.session_id() else {
+            return;
+        };
+        match pipeline.handle_audio(bytes) {
+            Ok(PipelineOutput::Samples {
+                generation,
+                samples,
+            }) => {
+                // Chromecast's decoder already normalizes both codecs to 16 kHz mono.
+                let stream = LocalStream {
+                    connection,
+                    generation,
+                    session_id,
+                };
+                let count =
+                    lock(local_capture).append(token, stream, &samples, Instant::now()) as u64;
+                if count > 0 {
+                    *active_voice_samples = active_voice_samples.saturating_add(count);
+                    let mut snapshot = lock(state);
+                    snapshot.decoded_samples = snapshot.decoded_samples.saturating_add(count);
+                    snapshot.generation = generation;
+                }
+            }
+            Err(error) => {
+                lock(local_capture).cancel(token, Instant::now());
+                lock(state).last_error = Some(error.to_string());
+            }
+            Ok(_) => {}
+        }
         return;
     }
     // 收到任何音频字节都算链路仍然活着（即使解码失败，也不该误判为静默）。
@@ -3016,7 +3747,7 @@ fn abort_voice_session(
     } else {
         ConnectionPhase::Failed
     };
-    apply_input_connection_phase(snapshot.phase);
+    apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
     snapshot.voice_state = VoiceSessionState::Idle;
     snapshot.last_error = Some(error);
 }
@@ -3059,6 +3790,7 @@ fn close_session(session: &mut Option<BleSession>) -> Result<(), PlatformError> 
 
 struct BleSession {
     connection_generation: u64,
+    f5_callback_active: Arc<Mutex<bool>>,
     battery_monitor: Option<crate::battery::BatteryMonitor>,
     name: String,
     model: RemoteModel,
@@ -3074,6 +3806,16 @@ struct BleSession {
     audio_token: i64,
     control_token: i64,
     connection_token: i64,
+    /// 厂商按键特征的订阅令牌（全部候选逐一订阅；小米为空）。
+    vendor_key_tokens: Vec<i64>,
+    /// 厂商键事件服务对象：必须与特征、令牌一起持有（与电池订阅三件套同
+    /// 理由）——GattDeviceService 被释放后，特征的 ValueChanged 通知路由
+    /// 随之失效，出现"订阅成功但永无回调"。fallback 走 ATVV 服务时为
+    /// None（该服务由会话本体持有并关闭）。
+    vendor_key_service: Option<GattDeviceService>,
+    /// 被订阅的全部按键通知特征（Windows 属性缓存与遥控器空中表在键服务
+    /// 区错位，须全订阅覆盖真实句柄）。cleanup 退订需要同一对象。
+    vendor_key_characteristics: Vec<GattCharacteristic>,
     params_token: Option<i64>,
     /// GATT 电量订阅（0x180F/0x2A19，可选增强）：订阅成功时持有三件套并在
     /// cleanup 成对释放；失败或设备无 BAS 时为 None，由 60s 缓存轮询兜底。
@@ -3108,6 +3850,9 @@ struct PendingBleConnection {
     control: Option<GattCharacteristic>,
     audio_token: Option<i64>,
     control_token: Option<i64>,
+    vendor_key_tokens: Vec<i64>,
+    vendor_key_service: Option<GattDeviceService>,
+    vendor_key_characteristics: Vec<GattCharacteristic>,
     connection_token: Option<i64>,
     params_token: Option<i64>,
     params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
@@ -3125,6 +3870,9 @@ impl PendingBleConnection {
             control: None,
             audio_token: None,
             control_token: None,
+            vendor_key_service: None,
+            vendor_key_tokens: Vec::new(),
+            vendor_key_characteristics: Vec::new(),
             connection_token: None,
             params_token: None,
             params_request: None,
@@ -3153,9 +3901,25 @@ impl PendingBleConnection {
             .expect("pending control characteristic is owned")
     }
 
-    fn finish(mut self, name: String, model: RemoteModel) -> BleSession {
+    fn vendor_keys(&self) -> &[GattCharacteristic] {
+        &self.vendor_key_characteristics
+    }
+
+    fn transmit(&self) -> &GattCharacteristic {
+        self.transmit
+            .as_ref()
+            .expect("pending transmit characteristic is owned")
+    }
+
+    fn finish(
+        mut self,
+        name: String,
+        model: RemoteModel,
+        f5_callback_active: Arc<Mutex<bool>>,
+    ) -> BleSession {
         BleSession {
             connection_generation: self.connection_generation,
+            f5_callback_active,
             battery_monitor: None,
             name,
             model,
@@ -3190,6 +3954,9 @@ impl PendingBleConnection {
                 .connection_token
                 .take()
                 .expect("pending connection subscription is owned"),
+            vendor_key_tokens: std::mem::take(&mut self.vendor_key_tokens),
+            vendor_key_service: self.vendor_key_service.take(),
+            vendor_key_characteristics: std::mem::take(&mut self.vendor_key_characteristics),
             params_token: self.params_token.take(),
             params_request: self.params_request.take(),
             microphone_opened: false,
@@ -3453,12 +4220,22 @@ impl BleSession {
         // 更容易错过遥控器刚醒来的短窗口。型号改为 ATVV 会话完整建立后再
         // best-effort 读取（见本函数末尾）。
         let model = inferred_model;
+        if model == RemoteModel::Chromecast {
+            crate::remote_target::set_chromecast(None);
+            if pending.device().BluetoothAddress().map_err(windows_error)? != address {
+                return Err(PlatformError::Protocol(
+                    "Google 遥控器的蓝牙连接身份与已选设备不一致".to_owned(),
+                ));
+            }
+        } else if remote_uses_xiaomi_f5(model) {
+            crate::remote_target::set(Some(address));
+        }
         {
             let mut snapshot = lock(state);
             snapshot.phase = ConnectionPhase::Discovering;
-            apply_input_connection_phase(snapshot.phase);
             snapshot.remote_name = Some(name.clone());
             snapshot.remote_model = model;
+            apply_input_connection_phase(snapshot.phase, snapshot.remote_model);
             // 界面靠这个令牌把"已连接"标到扫描列表里正确的那一行（2026-10-13 现场：
             // 两支遥控器同名，且连接可能是启动时恢复的、界面并没有"我点过连接"的记录）。
             snapshot.remote_token = Some(crate::device_token(device_id));
@@ -3499,9 +4276,11 @@ impl BleSession {
                     sender.clone(),
                     WorkerChannel::Audio,
                     connection_generation,
+                    None,
                 )
             },
         )?);
+        let f5_callback_active = Arc::new(Mutex::new(false));
         pending.control_token = Some(connect_stage(
             reconnecting,
             reconnect_attempt,
@@ -3512,10 +4291,12 @@ impl BleSession {
                     sender.clone(),
                     WorkerChannel::Control,
                     connection_generation,
+                    Some(Arc::clone(&f5_callback_active)),
                 )
             },
         )?);
         let battery_sender = sender.clone();
+        let transmit_sender = sender.clone();
         let connection_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
                 move |device, _| {
@@ -3542,7 +4323,46 @@ impl BleSession {
             },
         )?);
 
-        let mut connected = pending.finish(name, model);
+        // Google 遥控器的普通按键在 Google 键事件服务的特征通知上（2026-11-10
+        // HCI 抓包实证，见 Testing/WindowsChromecast.md）。Windows 属性缓存与
+        // 遥控器空中表在键服务区句柄错位（单选会订到不通知的句柄），因此把
+        // 服务内全部 Notify/Indicate 候选逐一订阅。小米不订阅，行为不变。
+        // 订阅失败按连接阶段失败处理——按键功能是 Chromecast 的核心能力。
+        if model == RemoteModel::Chromecast {
+            let (vendor_key_service, vendor_key_characteristics) = connect_stage(
+                reconnecting,
+                reconnect_attempt,
+                "vendor_key_characteristics",
+                || find_vendor_key_characteristics(pending.device(), pending.service()),
+            )?;
+            pending.vendor_key_service = vendor_key_service;
+            pending.vendor_key_characteristics = vendor_key_characteristics;
+            connect_stage(
+                reconnecting,
+                reconnect_attempt,
+                "subscribe_vendor_keys",
+                || {
+                    let mut tokens = Vec::new();
+                    for characteristic in pending.vendor_keys() {
+                        tokens.push(subscribe(
+                            characteristic,
+                            transmit_sender.clone(),
+                            WorkerChannel::Transmit,
+                            connection_generation,
+                            None,
+                        )?);
+                    }
+                    gatt_note(format!(
+                        "vendor_key_subscriptions total={} connection_generation={connection_generation}",
+                        tokens.len()
+                    ));
+                    pending.vendor_key_tokens = tokens;
+                    Ok(())
+                },
+            )?;
+        }
+
+        let mut connected = pending.finish(name, model, f5_callback_active);
         connect_stage(
             reconnecting,
             reconnect_attempt,
@@ -3589,6 +4409,7 @@ impl BleSession {
                 "ble_model phase=skipped reason=link_not_connected status={link_status:?} retryable=false connection_generation={connection_generation}"
             ));
         }
+        *lock(&connected.f5_callback_active) = remote_uses_xiaomi_f5(connected.model);
         Ok(connected)
     }
 
@@ -3654,6 +4475,7 @@ impl BleSession {
             sender.clone(),
             WorkerChannel::Battery,
             connection_generation,
+            None,
         ) {
             Ok(token) => token,
             Err(error) => {
@@ -3712,6 +4534,7 @@ impl BleSession {
     }
 
     fn close(&mut self) -> Result<(), PlatformError> {
+        *lock(&self.f5_callback_active) = false;
         if self.closed {
             return Ok(());
         }
@@ -3758,6 +4581,23 @@ impl BleSession {
             if self.control.RemoveValueChanged(self.control_token).is_err() {
                 best_effort_failures += 1;
             }
+            let vendor_keys_subscribed = !self.vendor_key_tokens.is_empty();
+            for (token, characteristic) in self
+                .vendor_key_tokens
+                .drain(..)
+                .zip(self.vendor_key_characteristics.iter())
+            {
+                if characteristic.RemoveValueChanged(token).is_err() {
+                    best_effort_failures += 1;
+                }
+            }
+            // 三件套收尾：特征退订后关闭键事件服务对象（与电池服务同模式）。
+            // fallback 走 ATVV 服务时为 None，由会话本体的 service.Close 负责。
+            if let Some(service) = self.vendor_key_service.take() {
+                if service.Close().is_err() {
+                    best_effort_failures += 1;
+                }
+            }
             if self
                 .device
                 .RemoveConnectionStatusChanged(self.connection_token)
@@ -3778,6 +4618,13 @@ impl BleSession {
                 }
                 if disable_notifications(&self.control).is_err() {
                     best_effort_failures += 1;
+                }
+                if vendor_keys_subscribed {
+                    for characteristic in &self.vendor_key_characteristics {
+                        if disable_notifications(characteristic).is_err() {
+                            best_effort_failures += 1;
+                        }
+                    }
                 }
             }
             if let Some(request) = self.params_request.take() {
@@ -3892,6 +4739,9 @@ impl Drop for BleSession {
 enum WorkerChannel {
     Audio,
     Control,
+    /// Google 厂商服务 transmit（0xAB5E0002）键事件通知：仅 Chromecast
+    /// 订阅（HCI 抓包实证：普通按键全部走这条通道，HID 输入报告不发）。
+    Transmit,
     /// GATT Battery Service 0x2A19 电量通知：回调内解析为百分比后复用
     /// BatteryRead 消息（纪元 + phase 校验与缓存轮询路径完全一致）。
     Battery,
@@ -3983,9 +4833,16 @@ fn gatt_log(kind: &str, bytes: &[u8]) {
     }
     let timestamp = utc_timestamp();
     let metadata = DIAGNOSTIC_LOG_METADATA.get();
+    // Decoder synchronization carries a predictor derived from the audio signal.
+    // Retain the opcode and length for protocol diagnosis without recording it.
+    let preview_len = if kind == "C" && bytes.first() == Some(&0x0A) {
+        1
+    } else {
+        24
+    };
     let preview: String = bytes
         .iter()
-        .take(24)
+        .take(preview_len)
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -4300,6 +5157,7 @@ fn subscribe(
     sender: Sender<WorkerMessage>,
     channel: WorkerChannel,
     connection_generation: u64,
+    f5_callback_active: Option<Arc<Mutex<bool>>>,
 ) -> Result<i64, PlatformError> {
     let callback_sender = sender.clone();
     let handler = TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(
@@ -4316,6 +5174,7 @@ fn subscribe(
                             match channel {
                                 WorkerChannel::Audio => "A",
                                 WorkerChannel::Control => "C",
+                                WorkerChannel::Transmit => "K",
                                 WorkerChannel::Battery => unreachable!(),
                             },
                             &bytes,
@@ -4329,8 +5188,12 @@ fn subscribe(
                     // 实证：F5 D 泄漏 3ms 后和弦注入 → 三键拒绝 → 首按
                     // 失败）。HID F5 正常比 0x04 晚 60-90ms 到达，落在
                     // 250ms 宽限内被即时吞下。
-                    if matches!(channel, WorkerChannel::Control) {
-                        crate::key_suppressor::arm_grace();
+                    if let Some(active) = f5_callback_active.as_ref() {
+                        // Serialize the fast pre-arm with revocation on disconnect.
+                        // Old callbacks can no longer arm grace after a device switch.
+                        if *lock(active) {
+                            crate::key_suppressor::arm_grace();
+                        }
                     }
                     let message = match channel {
                         WorkerChannel::Audio => WorkerMessage::Audio {
@@ -4338,6 +5201,10 @@ fn subscribe(
                             bytes,
                         },
                         WorkerChannel::Control => WorkerMessage::Control {
+                            connection_generation,
+                            bytes,
+                        },
+                        WorkerChannel::Transmit => WorkerMessage::Transmit {
                             connection_generation,
                             bytes,
                         },
@@ -4513,6 +5380,102 @@ fn find_characteristic(
         return Err(PlatformError::VoiceCharacteristicMissing(label));
     }
     characteristics.GetAt(0).map_err(windows_error)
+}
+
+/// 找普通按键的通知特征（返回全部候选，逐一订阅）。
+///
+/// 2026-11-10 现场实证（HCI 抓包 + CCCD 写入对账）：该遥控器的按键通知
+/// 不在 ATVV 服务（transmit 0xAB5E0002 只写），而在 Google 键事件服务
+/// {D343BFC0-…} 的特征上（空中句柄 0x29，8 字节载荷：首字节键码、0=
+/// 释放，键码与 legacy report-1 位索引同表）。**且 Windows 的 GATT 属性
+/// 缓存与遥控器空中表在键服务区错位**：按缓存表挑中的单个特征（CCCD
+/// 0x37）不是实际通知的句柄（0x29），`Uncached` 查询也被缓存短路（重连
+/// 零发现流量）。因此不做单选——把键事件服务（缺席时回退 ATVV 服务）
+/// 内**所有** Notify/Indicate 特征（排除 audio/control/transmit）全部
+/// 订阅：任何一路命中真实句柄即恢复投递；解码层按载荷形状自证。全部
+/// 候选连同服务对象一起持有，cleanup 成对退订。零候选视为设备异常。
+fn find_vendor_key_characteristics(
+    device: &BluetoothLEDevice,
+    atvv_service: &GattDeviceService,
+) -> Result<(Option<GattDeviceService>, Vec<GattCharacteristic>), PlatformError> {
+    let key_service = (|| -> Option<GattDeviceService> {
+        let operation = device
+            .GetGattServicesForUuidWithCacheModeAsync(
+                VENDOR_KEY_SERVICE_UUID,
+                BluetoothCacheMode::Uncached,
+            )
+            .ok()?;
+        let result = wait_async(
+            operation,
+            GATT_DISCOVERY_TIMEOUT,
+            "gatt_find_vendor_key_service",
+        )
+        .ok()?;
+        if result.Status().ok()? != GattCommunicationStatus::Success {
+            return None;
+        }
+        let services = result.Services().ok()?;
+        if services.Size().ok()? != 1 {
+            return None;
+        }
+        services.GetAt(0).ok()
+    })();
+    let source = match &key_service {
+        Some(service) => {
+            gatt_note("vendor_key_characteristic source=vendor_key_service".to_owned());
+            service
+        }
+        None => {
+            gatt_note("vendor_key_characteristic source=atvv_service_fallback".to_owned());
+            atvv_service
+        }
+    };
+    let operation = source
+        .GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Uncached)
+        .map_err(windows_error)?;
+    let result = wait_async(
+        operation,
+        GATT_DISCOVERY_TIMEOUT,
+        "gatt_find_vendor_key_characteristic",
+    )?;
+    require_success(
+        result.Status().map_err(windows_error)?,
+        "发现按键通知特征列表",
+    )?;
+    let characteristics = result.Characteristics().map_err(windows_error)?;
+    let count = characteristics.Size().map_err(windows_error)?;
+    let mut candidates: Vec<GattCharacteristic> = Vec::new();
+    for index in 0..count {
+        let characteristic = characteristics.GetAt(index).map_err(windows_error)?;
+        let uuid = characteristic.Uuid().map_err(windows_error)?;
+        if uuid == AUDIO_UUID || uuid == CONTROL_UUID || uuid == TRANSMIT_UUID {
+            continue;
+        }
+        let properties = characteristic
+            .CharacteristicProperties()
+            .map_err(windows_error)?;
+        if !has_property(properties, GattCharacteristicProperties::Notify)
+            && !has_property(properties, GattCharacteristicProperties::Indicate)
+        {
+            continue;
+        }
+        let prefix = format!("{uuid:?}");
+        let prefix = prefix.trim_start_matches('{').get(..8).unwrap_or(&prefix);
+        gatt_note(format!(
+            "vendor_key_characteristic candidate uuid_prefix={prefix}"
+        ));
+        candidates.push(characteristic);
+    }
+    gatt_note(format!(
+        "vendor_key_characteristic candidates={} service_characteristics={count}",
+        candidates.len()
+    ));
+    if candidates.is_empty() {
+        return Err(PlatformError::Gatt(
+            "厂商服务里没有可订阅的按键通知特征".to_owned(),
+        ));
+    }
+    Ok((key_service, candidates))
 }
 
 /// 是否需要读取 2A24 型号（纯判定，便于单测）。
@@ -5121,7 +6084,7 @@ mod tests {
             ConnectionPhase::Reconnecting,
         ] {
             assert!(
-                voice_link_guard_active(phase),
+                voice_link_guard_active(phase, RemoteModel::Rc003),
                 "expected guard for {phase:?}"
             );
         }
@@ -5135,10 +6098,91 @@ mod tests {
             ConnectionPhase::Failed,
         ] {
             assert!(
-                !voice_link_guard_active(phase),
+                !voice_link_guard_active(phase, RemoteModel::Rc003),
                 "unexpected guard for {phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn chromecast_never_arms_xiaomi_f5_during_link_establishment() {
+        for phase in [
+            ConnectionPhase::Connecting,
+            ConnectionPhase::Discovering,
+            ConnectionPhase::AwaitingCapabilities,
+            ConnectionPhase::Reconnecting,
+        ] {
+            assert!(!voice_link_guard_active(phase, RemoteModel::Chromecast));
+            assert!(!voice_link_guard_active(phase, RemoteModel::Unknown));
+            assert!(voice_link_guard_active(phase, RemoteModel::Rc001));
+            assert!(voice_link_guard_active(phase, RemoteModel::Rc003));
+        }
+    }
+
+    #[test]
+    fn chromecast_pending_stop_and_timeouts_only_apply_to_live_generation() {
+        let now = Instant::now();
+        for stage in [
+            ChromecastVoiceStage::WaitingForStart,
+            ChromecastVoiceStage::WaitingForPcm,
+            ChromecastVoiceStage::Streaming,
+            ChromecastVoiceStage::CancelledBeforeStart,
+            ChromecastVoiceStage::OpenCommandFailed,
+        ] {
+            let deadline = ChromecastVoiceDeadline::new(stage, 8, now);
+            if stage.timeout() != Duration::ZERO {
+                assert!(!deadline.is_due(8, now));
+            }
+            assert!(deadline.is_due(8, now + stage.timeout()));
+            assert!(!deadline.is_due(9, now + stage.timeout()));
+        }
+    }
+
+    #[test]
+    fn chromecast_requires_enqueued_pcm_to_clear_first_audio_timeout() {
+        let now = Instant::now();
+        let first = ChromecastVoiceDeadline::new(ChromecastVoiceStage::WaitingForPcm, 8, now);
+        let later = now + Duration::from_millis(500);
+        let rejected = first
+            .after_audio(VoiceSessionState::Streaming, false, later)
+            .unwrap();
+        assert_eq!(rejected.stage, ChromecastVoiceStage::WaitingForPcm);
+        assert_eq!(rejected.expires(), first.expires());
+        let accepted = first
+            .after_audio(VoiceSessionState::Streaming, true, later)
+            .unwrap();
+        assert_eq!(accepted.stage, ChromecastVoiceStage::Streaming);
+        assert_eq!(accepted.expires(), later + VOICE_AUDIO_STALL_TIMEOUT);
+        assert!(first
+            .after_audio(VoiceSessionState::Idle, false, later)
+            .is_none());
+    }
+
+    #[test]
+    fn chromecast_rejects_unapproved_input_tools_and_voice_hotkeys() {
+        let safe = KeyChord {
+            keys: vec![KeyCode::LeftControl, KeyCode::LeftWindows],
+        };
+        let enter = KeyChord {
+            keys: vec![KeyCode::Enter],
+        };
+        assert!(chromecast_voice_binding_supported(
+            Some(VoiceInputTool::Wechat),
+            Some(&safe)
+        ));
+        assert!(!chromecast_voice_binding_supported(
+            Some(VoiceInputTool::Wechat),
+            Some(&enter)
+        ));
+        assert!(!chromecast_voice_binding_supported(
+            Some(VoiceInputTool::Wechat),
+            None
+        ));
+        assert!(!chromecast_voice_binding_supported(
+            Some(VoiceInputTool::Doubao),
+            Some(&safe)
+        ));
+        assert!(!chromecast_voice_binding_supported(None, Some(&safe)));
     }
 
     #[test]

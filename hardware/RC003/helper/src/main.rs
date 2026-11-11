@@ -355,6 +355,13 @@ mod imp {
         0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F,
         0x0080, 0x0081,
     ];
+    /// Chromecast 消费页报告类的 usage 白名单（CAST-13，ADR 0004）。
+    /// 与 agent（rc003_agent.js 的 CAST_TARGET_USAGES）和主程序
+    /// （raw_input::chromecast_button_for_consumer_usage）三处必须同步。
+    const CAST_TARGET_USAGES: [u16; 15] = [
+        0x019E, 0x0042, 0x0043, 0x0044, 0x0045, 0x0041, 0x0224, 0x0223, 0x00E9, 0x00EA, 0x00E2,
+        0x0077, 0x0078, 0x0089, 0x0189,
+    ];
     /// 无主程序桥接的手工诊断模式维持历史三键范围，避免意外扩大清键面。
     const DEFAULT_TARGET_USAGES: [u16; 3] = [0x00F1, 0x0080, 0x0081];
 
@@ -3651,10 +3658,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     struct BridgeCaptureTargets {
         generation: u64,
         usages: Vec<u16>,
+        /// Chromecast 消费页目标集（CAST-13）。`T` 行的可选第三段；空 = 不接管
+        /// 谷歌键（只走键盘报告目标，行为与旧版完全一致）。
+        cast_usages: Vec<u16>,
     }
 
     enum BridgeOutbound {
         Edges(Vec<u16>),
+        /// Chromecast 消费页边沿（CAST-13，`device:"cast"`）。与 `Edges` 同为
+        /// 绝对状态语义（单键按下 / 空集=全部释放），但走独立的 `C` 行，主程序
+        /// 按型号分发到 Chromecast 映射引擎，不与键盘来源混流。
+        CastEdges(Vec<u16>),
         Ownership(BridgeCaptureTargets),
         /// agent 已应用语音键合成配置的确认（绝对状态；`None` = 关闭）。
         ///
@@ -3721,6 +3735,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 转发一份绝对状态（空 = 全部释放）。
         fn push_edges(&self, usages: Vec<u16>) {
             let _ = self.tx.send(BridgeOutbound::Edges(usages));
+        }
+
+        /// 转发 Chromecast 消费页边沿（绝对状态；空 = 全部释放）。
+        fn push_cast_edges(&self, usages: Vec<u16>) {
+            let _ = self.tx.send(BridgeOutbound::CastEdges(usages));
         }
 
         fn push_ownership(&self, targets: BridgeCaptureTargets) {
@@ -4465,7 +4484,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if usages.iter().any(|usage| !TARGET_USAGES.contains(usage)) {
             return None;
         }
-        Some(BridgeCaptureTargets { generation, usages })
+        // CAST-13：可选第三段（cast 目标集）。缺席 = "-"（不接管谷歌键），
+        // 兼容旧版主程序的两段 `T` 行。白名单独立校验。
+        let cast_payload = parts.next().unwrap_or("-");
+        let cast_usages = if cast_payload == "-" {
+            Vec::new()
+        } else {
+            parse_usage_list(cast_payload).ok()?
+        };
+        if cast_usages
+            .iter()
+            .any(|usage| !CAST_TARGET_USAGES.contains(usage))
+        {
+            return None;
+        }
+        Some(BridgeCaptureTargets {
+            generation,
+            usages,
+            cast_usages,
+        })
     }
 
     /// 解析主程序的语音合成状态行：`S <usage 十六进制>`（开启）或 `S -`（关闭）。
@@ -4873,6 +4910,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ) {
         let mut conn: Option<AppBridgeStream> = None;
         let mut last_known: Vec<u16> = Vec::new();
+        let mut last_cast_known: Vec<u16> = Vec::new();
         let mut last_recovering = false;
         let mut last_attempt: Option<Instant> = None;
         let mut last_ping = Instant::now();
@@ -4916,6 +4954,25 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                     stats.edges_forwarded.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(_) => conn = None,
+                            }
+                        }
+                    }
+                    // CAST-13：`C <ms> <payload>` 与 E 行同构，但语义是消费页
+                    // 单键绝对状态；断线重连同构补发最后状态。
+                    BridgeOutbound::CastEdges(usages) => {
+                        last_cast_known = usages;
+                        if let Some(stream) = conn.as_mut() {
+                            if bridge_write_line(
+                                stream,
+                                &format!(
+                                    "C {} {}",
+                                    now_ms(),
+                                    format_edge_payload(&last_cast_known)
+                                ),
+                            )
+                            .is_err()
+                            {
+                                conn = None;
                             }
                         }
                     }
@@ -5033,6 +5090,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             // 但一份绝对状态就能完全对齐（这是绝对语义的价值）。
                             if let Some(stream) = conn.as_mut() {
                                 let _ = bridge_send_edges(stream, &last_known);
+                                // CAST-13：cast 绝对状态同构补发。
+                                let _ = bridge_write_line(
+                                    stream,
+                                    &format!(
+                                        "C {} {}",
+                                        now_ms(),
+                                        format_edge_payload(&last_cast_known)
+                                    ),
+                                );
                                 if last_recovering {
                                     let _ = bridge_write_line(stream, "R 1");
                                 }
@@ -5761,7 +5827,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     .into_iter()
                     .filter_map(|usage| u16::try_from(usage).ok())
                     .collect::<Vec<_>>();
-                let ack = BridgeCaptureTargets { generation, usages };
+                // CAST-13：ack 带扁平 castReport 字段（agent 侧已加）。
+                let cast_usages = extract_num_array(line, "castReport")
+                    .into_iter()
+                    .filter_map(|usage| u16::try_from(usage).ok())
+                    .collect::<Vec<_>>();
+                let ack = BridgeCaptureTargets {
+                    generation,
+                    usages,
+                    cast_usages,
+                };
                 let usage_count = ack.usages.len();
                 session.target_ack = Some(ack);
                 // 此前 ack 到达完全无日志，2026-09-28 排查"启动静默"时只能靠
@@ -5841,7 +5916,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         .iter()
                         .filter_map(|usage| u16::try_from(*usage).ok())
                         .collect();
-                    bridge.push_edges(usages);
+                    // CAST-13：device=="cast" 的边沿走独立通道（C 行），与键盘
+                    // 报告边沿（E 行）分轨，主程序按型号分发。
+                    let is_cast = extract_str(line, "device").as_deref() == Some("cast");
+                    if is_cast {
+                        bridge.push_cast_edges(usages);
+                    } else {
+                        bridge.push_edges(usages);
+                    }
                 }
             }
             "log" => {
@@ -7650,12 +7732,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 !observe
             ),
             format!("{{\"type\":\"restore\",\"token\":\"{token}\",\"on\":{restore}}}\n"),
-            format!(
-                "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
-                targets.generation,
-                usages_json(&targets.usages),
-                usages_json(&clear)
-            ),
+            // CAST-13：cast 目标集非空时在同一命令里带 castReport/castClear
+            // （agent 对 targets 的主集合是必填校验，拆两条命令会被整体拒绝）。
+            // cast 清空集合 = 目标 ∪ 白名单内的哨兵键（谷歌键哨兵同样可观测）。
+            if targets.cast_usages.is_empty() {
+                format!(
+                    "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+                    targets.generation,
+                    usages_json(&targets.usages),
+                    usages_json(&clear)
+                )
+            } else {
+                let mut cast_clear = targets.cast_usages.clone();
+                for usage in canary {
+                    if CAST_TARGET_USAGES.contains(usage) && !cast_clear.contains(usage) {
+                        cast_clear.push(*usage);
+                    }
+                }
+                format!(
+                    "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}],\"castReport\":[{}],\"castClear\":[{}]}}\n",
+                    targets.generation,
+                    usages_json(&targets.usages),
+                    usages_json(&clear),
+                    usages_json(&targets.cast_usages),
+                    usages_json(&cast_clear)
+                )
+            },
         ];
         let mut has_synth_line = false;
         if let Some((from, to)) = synth {
@@ -8018,6 +8120,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 .unwrap_or_else(|| BridgeCaptureTargets {
                                     generation: 0,
                                     usages: DEFAULT_TARGET_USAGES.to_vec(),
+                                    // 手工诊断模式不接管谷歌键（保守默认）。
+                                    cast_usages: Vec::new(),
                                 });
                             // 合成配置：有桥时以桥为唯一事实源（含"桥明确关闭"，
                             // 产品语义 = app 的「按住说话快捷键」是唯一设置入口）；
@@ -10042,7 +10146,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-10-23.release-hold";
+    const AGENT_BUILD: &str = "2026-11-10.cast-report-class";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -11223,6 +11327,64 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
+    /// CAST-13：`T` 行可选 cast 段与 `O` 行观测的解析/拒绝判定。
+    #[cfg(test)]
+    mod bridge_cast_target_tests {
+        use super::*;
+
+        #[test]
+        fn two_segment_t_line_keeps_legacy_behavior() {
+            // 旧版主程序的两段 T 行：cast 集为空（不接管谷歌键）。
+            let parsed = parse_bridge_target_line("T 7 0x00F1", "T").expect("两段行可解析");
+            assert_eq!(parsed.generation, 7);
+            assert_eq!(parsed.usages, vec![0x00F1]);
+            assert!(parsed.cast_usages.is_empty());
+        }
+
+        #[test]
+        fn three_segment_t_line_parses_cast_set() {
+            let parsed =
+                parse_bridge_target_line("T 9 0x00F1 0x0041,0x00E9", "T").expect("三段行可解析");
+            assert_eq!(parsed.usages, vec![0x00F1]);
+            assert_eq!(parsed.cast_usages, vec![0x0041, 0x00E9]);
+            // dash 显式空集与缺席等价。
+            let dash = parse_bridge_target_line("T 9 - 0x0041", "T").expect("dash 主集可解析");
+            assert!(dash.usages.is_empty());
+            assert_eq!(dash.cast_usages, vec![0x0041]);
+        }
+
+        #[test]
+        fn cast_segment_outside_whitelist_is_rejected() {
+            // 0x0221（AC Search）在谷歌白名单外：整行拒绝，不降级。
+            assert!(parse_bridge_target_line("T 9 0x00F1 0x0221", "T").is_none());
+            // 键盘白名单键混进 cast 段同样拒绝（两表不通用）。
+            assert!(parse_bridge_target_line("T 9 0x00F1 0x0028", "T").is_none());
+        }
+
+        #[test]
+        fn cast_targets_ride_the_single_targets_command() {
+            // send_session_config 只在 cast 非空时把 castReport/castClear 拼进
+            // 同一条 targets 命令（拆两条会被 agent 的必填校验整体拒绝）。
+            // 这里用纯字符串断言钉住编码形状。
+            let target = BridgeCaptureTargets {
+                generation: 3,
+                usages: vec![0x00F1],
+                cast_usages: vec![0x0041],
+            };
+            // 与 send_session_config 相同的格式串逻辑（保持测试与实现同构）。
+            let line = format!(
+                "{{\"type\":\"targets\",\"token\":\"t\",\"generation\":{},\"report\":[{}],\"clear\":[{}],\"castReport\":[{}],\"castClear\":[{}]}}\n",
+                target.generation,
+                target.usages.iter().map(|u| format!("{u}")).collect::<Vec<_>>().join(","),
+                target.usages.iter().map(|u| format!("{u}")).collect::<Vec<_>>().join(","),
+                target.cast_usages.iter().map(|u| format!("{u}")).collect::<Vec<_>>().join(","),
+                target.cast_usages.iter().map(|u| format!("{u}")).collect::<Vec<_>>().join(",")
+            );
+            assert!(line.contains("\"castReport\":[65]"));
+            assert!(line.contains("\"castClear\":[65]"));
+        }
+    }
+
     #[cfg(test)]
     mod shared_log_tests {
         use super::*;
@@ -11333,6 +11495,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             BridgeCaptureTargets {
                 generation: gen,
                 usages: usages.to_vec(),
+                cast_usages: Vec::new(),
+            }
+        }
+
+        fn mk_cast(gen: u64, usages: &[u16], cast: &[u16]) -> BridgeCaptureTargets {
+            BridgeCaptureTargets {
+                generation: gen,
+                usages: usages.to_vec(),
+                cast_usages: cast.to_vec(),
             }
         }
 

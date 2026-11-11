@@ -8,6 +8,7 @@ import connection from "./en/connection";
 import onboarding from "./en/onboarding";
 import permissions from "./en/permissions";
 import reflections from "./en/reflections";
+import draftRules from "./en/draft-rules";
 import lib from "./en/lib";
 import membership from "./en/membership";
 import commonPhrases from "./en/common-phrases";
@@ -29,6 +30,7 @@ export const en: Record<string, string> = {
   ...onboarding,
   ...permissions,
   ...reflections,
+  ...draftRules,
   ...lib,
   ...membership,
   ...commonPhrases,

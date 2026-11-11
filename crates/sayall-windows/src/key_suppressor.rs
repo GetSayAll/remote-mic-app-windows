@@ -409,17 +409,24 @@ mod windows_impl {
             // 钩子在宿主进程：会话开始请求一次链头 bump（与迁移前等价；
             // 宿主未就绪时为 no-op）。
             crate::key_host::bump_suppressor_hook();
-        } else {
-            SESSION_ACTIVE.store(false, Ordering::Relaxed);
+        } else if SESSION_ACTIVE.swap(false, Ordering::Relaxed) {
             ARMED_UNTIL_MS.store(now_ms() + ARM_GRACE_MS, Ordering::Relaxed);
         }
+    }
+
+    /// A device outside the Xiaomi F5 path cannot inherit its connection guard
+    /// or grace. Preserve DOWN/UP bookkeeping for a key already handled.
+    pub fn clear_ble_guards() {
+        LINK_GUARD_ACTIVE.store(false, Ordering::Relaxed);
+        SESSION_ACTIVE.store(false, Ordering::Relaxed);
+        ARMED_UNTIL_MS.store(0, Ordering::Relaxed);
     }
 }
 
 #[cfg(windows)]
 pub use windows_impl::{
-    arm_grace, observe_remote_voice_f5, set_link_guard_active, set_remote_hid_activity_notify,
-    set_session_active, VoiceKeySuppressor,
+    arm_grace, clear_ble_guards, observe_remote_voice_f5, set_link_guard_active,
+    set_remote_hid_activity_notify, set_session_active, VoiceKeySuppressor,
 };
 
 #[cfg(windows)]

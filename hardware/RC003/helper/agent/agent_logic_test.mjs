@@ -457,6 +457,90 @@ check('鉴权退避按失败次数渐进：2/4/8/15s 封顶',
 check('新连接重置 everRenewed（不让上一代续约影响鉴权判定）',
   ctx.everRenewed === false);
 
+/* ---------------------------- CAST-13：Chromecast 消费页报告类（3 字节） */
+
+await freshStubConnection();
+ctx.handleCommand('{"type":"renew"}');
+
+/** 3 字节消费页报告：[0x02, usage_lo, usage_hi]。 */
+function castReport(usage) {
+  return Uint8Array.from([0x02, usage & 0xff, (usage >> 8) & 0xff]);
+}
+
+function pressCast(usage) {
+  const ptr = fakePtr(castReport(usage));
+  const self = {};
+  const a = fakeArgs(ptr);
+  a[9] = num(3);                                          // OutputBufferLength = 3
+  handlers.onEnter.call(self, a);
+  return { ptr, self };
+}
+
+{
+  const { ptr, self } = pressCast(0x0041);                // OK（消费页 0x0041）
+  check('cast：白名单键计数并记按下，未下发目标前一字节不清',
+    ctx.stat.cast_target_hits === 1 && ctx.castPressed[0x41] === true
+      && ptr.buf[1] === 0x41 && ptr.buf[2] === 0x00,
+    `hits=${ctx.stat.cast_target_hits} buf1=0x${ptr.buf[1].toString(16)}`);
+  check('cast：边沿计数 +1', ctx.stat.cast_edges_sent === 1);
+  check('cast：不走键盘报告路径（hit=false）', self.hit === false);
+}
+
+{
+  const before = ctx.stat.cast_target_hits;
+  const { ptr } = pressCast(0x0221);                      // AC Search：白名单外
+  check('cast：白名单外 usage 不动不报',
+    ctx.stat.cast_target_hits === before && ptr.buf[1] === 0x21);
+}
+
+{
+  const beforeEdge = ctx.stat.cast_edges_sent;
+  pressCast(0);                                           // 释放帧
+  check('cast：释放帧清按下状态并发批量释放边沿',
+    ctx.castPressed[0x41] === undefined && ctx.stat.cast_edges_sent === beforeEdge + 1,
+    `pressed=${JSON.stringify(ctx.castPressed)}`);
+  const before2 = ctx.stat.cast_edges_sent;
+  pressCast(0);                                           // 孤立释放
+  check('cast：孤立释放是空操作', ctx.stat.cast_edges_sent === before2);
+}
+
+ctx.handleCommand(JSON.stringify({
+  type: 'targets', generation: 5,
+  report: [0x00f1], clear: [0x00f1],
+  castReport: [0x0041, 0x00e2], castClear: [0x0041, 0x00e2],
+}));
+check('cast：targets 附带 castReport/castClear 被接受',
+  ctx.castReportUsages.length === 2 && ctx.castClearUsages.length === 2);
+
+{
+  const before = ctx.stat.cast_clears_ok;
+  const { ptr } = pressCast(0x0041);                      // OK：已映射 ⇒ 清零
+  check('cast：已映射键 usage 两字节原地清零、report_id 保留',
+    ptr.buf[0] === 0x02 && ptr.buf[1] === 0 && ptr.buf[2] === 0,
+    `buf=${Array.from(ptr.buf).map((b) => b.toString(16)).join(',')}`);
+  check('cast：cast_clears_ok +1', ctx.stat.cast_clears_ok === before + 1);
+}
+
+ctx.handleCommand(JSON.stringify({
+  type: 'targets', generation: 6,
+  report: [0x00f1], clear: [0x00f1],
+  castReport: [0x0221], castClear: [0x0221],             // 白名单外 ⇒ 拒
+}));
+check('cast：白名单外 cast 目标被拒且不改动现状', ctx.castReportUsages.length === 2);
+
+ctx.handleCommand(JSON.stringify({
+  type: 'targets', generation: 7,
+  report: [0x00f1], clear: [0x00f1],
+  castReport: [0x0041], castClear: [],                   // clear 缺 report ⇒ 拒
+}));
+check('cast：castClear 必须覆盖 castReport', ctx.castReportUsages.length === 2);
+
+{
+  /* 键盘报告回归：9 字节路径不受 cast 分支影响。 */
+  const { ptr, self } = press(0x00f1);
+  check('回归：键盘报告路径照常清零', ptr.buf[3] === 0 && self.cleared === true);
+}
+
 const failed = results.filter((r) => !r.ok);
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '  -- ' + r.detail : ''}`);

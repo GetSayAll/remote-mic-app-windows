@@ -73,11 +73,13 @@ import {
   subscribeButtonEdges,
   subscribeButtonGestures,
   subscribeShortcutCaptureEdges,
+  testButtonMapping,
   type ButtonAction,
   type ButtonActions,
   type ButtonEdge,
   type ButtonMappingSnapshot,
   type ButtonMappings,
+  type ButtonMappingModel,
   type ButtonTrigger,
   type CaptureSupport,
   type CommonPhraseAccess,
@@ -99,12 +101,14 @@ import {
   type RuntimeSnapshot,
   type ShortcutCaptureEdge,
 } from "../lib/bridge";
+import { recognizedRemoteModel, remoteArtwork } from "../lib/remote-artwork";
 import type { NavigationRequest } from "../navigation";
 import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
 
 const props = withDefaults(
   defineProps<{
     runtime: RuntimeSnapshot | null;
+    remoteModelHint?: RemoteModel;
     initialEditor?: { button: RemoteButton; trigger: ButtonTrigger } | null;
   }>(),
   { initialEditor: null },
@@ -131,7 +135,6 @@ const CANVAS_HEIGHT = 570;
 const REMOTE_WIDTH = 250;
 const REMOTE_HEIGHT = 508;
 const CARD_HEIGHT = 72;
-const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
 
 const canvasEl = ref<HTMLElement | null>(null);
 const canvasWidth = ref(CANVAS_MIN_WIDTH);
@@ -148,7 +151,7 @@ interface Placement {
 }
 
 /** 按键卡片布局表：对齐 Mac RemoteMappingLayout.buttonPlacements。 */
-const PLACEMENTS: Placement[] = [
+const XIAOMI_PLACEMENTS: Placement[] = [
   { button: "power", side: "left", anchor: [0.386, 0.099], targetY: 0.08 },
   { button: "up", side: "left", anchor: [0.502, 0.179], targetY: 0.23 },
   { button: "left", side: "left", anchor: [0.362, 0.246], targetY: 0.38 },
@@ -162,18 +165,75 @@ const PLACEMENTS: Placement[] = [
   { button: "volume_down", side: "right", anchor: [0.604, 0.48], targetY: 0.795 },
   { button: "tv", side: "right", anchor: [0.604, 0.569], targetY: 0.94 },
 ];
-const VOICE_PLACEMENT: Placement = {
+const XIAOMI_VOICE_PLACEMENT: Placement = {
   button: "ok", // 语音卡不对应 RemoteButton；占位仅用于定位。
   side: "right",
   anchor: [0.63, 0.099],
   targetY: 0.07,
 };
-const TRIGGERS: ButtonTrigger[] = ["single", "double", "long"];
-
-/** 当前连接的遥控器型号（未连接时 unknown，按 RC003 保守处理）。 */
-const remoteModel = computed<RemoteModel>(
-  () => props.runtime?.platform.connection.remoteModel ?? "unknown",
+const lastLocalModel = ref<RemoteModel>("unknown");
+const liveRemoteModel = computed(() => recognizedRemoteModel(props.runtime?.platform.connection));
+watch(liveRemoteModel, (model) => {
+  if (model !== "unknown") lastLocalModel.value = model;
+}, { immediate: true });
+const remoteModel = computed<RemoteModel>(() => liveRemoteModel.value !== "unknown"
+  ? liveRemoteModel.value
+  : props.remoteModelHint && props.remoteModelHint !== "unknown"
+    ? props.remoteModelHint
+    : lastLocalModel.value);
+const isChromecast = computed(() => remoteModel.value === "chromecast");
+const mappingModel = computed<ButtonMappingModel | undefined>(() =>
+  isChromecast.value ? "chromecast" : undefined,
 );
+const triggers = computed<ButtonTrigger[]>(() => isChromecast.value
+  ? ["single", "double", "triple", "long"]
+  : ["single", "double", "long"]);
+const artwork = computed(() => remoteArtwork(remoteModel.value));
+const canvasHeight = computed(() => isChromecast.value ? 660 : CANVAS_HEIGHT);
+const remoteTop = computed(() => (canvasHeight.value - REMOTE_HEIGHT) / 2);
+const PLACEMENTS = computed<Placement[]>(() => isChromecast.value ? [
+  { button: "up", side: "left", anchor: [0.5, 0.12], targetY: 0.06 },
+  { button: "left", side: "left", anchor: [0.37, 0.18], targetY: 0.19 },
+  { button: "down", side: "left", anchor: [0.5, 0.245], targetY: 0.32 },
+  { button: "back", side: "left", anchor: [0.4, 0.34], targetY: 0.45 },
+  { button: "home", side: "left", anchor: [0.4, 0.46], targetY: 0.58 },
+  { button: "youtube", side: "left", anchor: [0.4, 0.59], targetY: 0.71 },
+  { button: "power", side: "left", anchor: [0.4, 0.75], targetY: 0.84 },
+  { button: "right", side: "right", anchor: [0.63, 0.18], targetY: 0.06 },
+  { button: "ok", side: "right", anchor: [0.5, 0.18], targetY: 0.185 },
+  { button: "volume_up", side: "right", anchor: [0.794, 0.36], targetY: 0.435 },
+  { button: "volume_down", side: "right", anchor: [0.794, 0.43], targetY: 0.56 },
+  { button: "volume_mute", side: "right", anchor: [0.6, 0.46], targetY: 0.685 },
+  { button: "netflix", side: "right", anchor: [0.6, 0.59], targetY: 0.81 },
+  { button: "input", side: "right", anchor: [0.6, 0.75], targetY: 0.935 },
+] : XIAOMI_PLACEMENTS);
+const VOICE_PLACEMENT = computed<Placement>(() => isChromecast.value
+  ? { button: "ok", side: "right", anchor: [0.6, 0.34], targetY: 0.31 }
+  : XIAOMI_VOICE_PLACEMENT);
+
+// Coordinates match the 250 × 508 Chromecast artwork. Each direction lights
+// its own segment of the ring, while the center lights only the OK disc.
+const CAST_DPAD_WEDGE = "M92 59 A47 47 0 0 1 158 59 L143 74 A25 25 0 0 0 107 74 Z";
+const CAST_DPAD = [
+  { button: "up", angle: 0 },
+  { button: "right", angle: 90 },
+  { button: "down", angle: 180 },
+  { button: "left", angle: 270 },
+] as const;
+const CAST_ROUND_KEYS = [
+  { button: "ok", x: 125, y: 92, radius: 24 },
+  { button: "back", x: 100, y: 173, radius: 18 },
+  { button: "home", x: 100, y: 234, radius: 18 },
+  { button: "volume_mute", x: 150, y: 234, radius: 18 },
+  { button: "power", x: 100, y: 381, radius: 12 },
+  { button: "input", x: 150, y: 381, radius: 12 },
+] as const;
+const CAST_RECT_KEYS = [
+  { button: "volume_up", x: 193, y: 167, width: 9, height: 32, radius: 4 },
+  { button: "volume_down", x: 193, y: 201, width: 9, height: 31, radius: 4 },
+  { button: "youtube", x: 80, y: 284, width: 40, height: 32, radius: 16 },
+  { button: "netflix", x: 130, y: 284, width: 40, height: 32, radius: 16 },
+] as const;
 
 /**
  * 头部设备胶囊（2026-10-01）：优先显示已识别的型号（RC001 = 小米蓝牙语音遥控器 2、
@@ -203,7 +263,7 @@ function operationErrorText(
 function anchorPoint(placement: Placement): { x: number; y: number } {
   return {
     x: remoteLeft.value + REMOTE_WIDTH * placement.anchor[0],
-    y: REMOTE_TOP + REMOTE_HEIGHT * placement.anchor[1],
+    y: remoteTop.value + REMOTE_HEIGHT * placement.anchor[1],
   };
 }
 
@@ -216,14 +276,22 @@ function photoAnchorPoint(placement: Placement): { x: number; y: number } {
 }
 
 function cardTop(placement: Placement): number {
-  return placement.targetY * CANVAS_HEIGHT - CARD_HEIGHT / 2;
+  return placement.targetY * canvasHeight.value - CARD_HEIGHT / 2;
+}
+
+function cardStyle(placement: Placement) {
+  return {
+    left: `${placement.side === "left" ? 0 : canvasWidth.value - cardWidth.value}px`,
+    top: `${cardTop(placement)}px`,
+    width: `${cardWidth.value}px`,
+  };
 }
 
 /** 卡片朝向遥控器一侧的边缘中点（箭头/连线的落点基准）。 */
 function cardEdgePoint(placement: Placement): { x: number; y: number } {
   return {
     x: placement.side === "left" ? cardWidth.value : canvasWidth.value - cardWidth.value,
-    y: placement.targetY * CANVAS_HEIGHT,
+    y: placement.targetY * canvasHeight.value,
   };
 }
 
@@ -259,6 +327,9 @@ function arrowPolygon(placement: Placement): string {
 /** 按键图标：SVG path 组（24x24 视窗），形状对齐 Mac RemoteMappingCanvas
  * 的 SF Symbols（power/chevron/circle.circle/uturn/speaker/house/line.3/tv）。 */
 const buttonIcons: Record<RemoteButton, string[]> = {
+  youtube: ["M5 5h14v14H5z", "M10 8l6 4-6 4z"],
+  netflix: ["M6 20V4l12 16V4"],
+  input: ["M3 5h18v14H3z", "M7 12h10", "M13 8l4 4-4 4"],
   power: ["M12 3v8", "M7.2 6.4a7 7 0 1 0 9.6 0"],
   up: ["M6 14.5l6-6 6 6"],
   down: ["M6 9.5l6 6 6-6"],
@@ -313,9 +384,13 @@ function writeSwitchCache(enabled: boolean, lockSelection: boolean): void {
 }
 
 const switchCache = readSwitchCache();
-const mappings = ref<ButtonMappings>({ enabled: switchCache?.enabled ?? true, actions: {} });
+const mappings = ref<ButtonMappings>({
+  enabled: isChromecast.value ? true : switchCache?.enabled ?? true,
+  actions: {},
+});
 /** 映射是否已从设置读回：「启用自定义按键功能」开关就绪前用占位符顶位（防滑入）。 */
 const mappingsLoaded = ref(false);
+const mappingLoadFailed = ref(false);
 const savedSnapshot = ref<ButtonMappings>({ enabled: true, actions: {} });
 /** 已安装的预设应用（打开应用动作可选列表）。 */
 const presetApps = ref<PresetAppInfo[]>([]);
@@ -331,6 +406,8 @@ const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | nul
 const editorPanel = ref<HTMLElement | null>(null);
 const lockSelection = ref(switchCache?.lockSelection ?? true);
 const activeButtons = ref<Set<RemoteButton>>(new Set());
+const castPressPulses = ref<Set<RemoteButton>>(new Set());
+const castPressTimers = new Map<RemoteButton, number>();
 const lastFired = ref<FiredGesture | null>(null);
 const firedFlash = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const mappingSnapshot = ref<ButtonMappingSnapshot | null>(null);
@@ -384,7 +461,7 @@ async function persistLockSelection(): Promise<void> {
     if (value === lockSelectionPersisted) return; // 加载回填 / 失败回退的重入：无需落盘
     try {
       lockSelectionPersisted = await saveLockMappingSelection(value);
-      writeSwitchCache(mappings.value.enabled, lockSelectionPersisted);
+      if (!isChromecast.value) writeSwitchCache(mappings.value.enabled, lockSelectionPersisted);
     } catch (error) {
       // 只有用户没有再改时才回退开关，避免覆盖更新的选择。
       if (lockSelection.value === value) {
@@ -432,6 +509,26 @@ function endFiredFlash(button: RemoteButton): void {
   }, remaining);
 }
 
+function isButtonLit(button: RemoteButton): boolean {
+  return activeButtons.value.has(button) || (isChromecast.value && castPressPulses.value.has(button));
+}
+
+function pulseCastPress(button: RemoteButton): void {
+  const previous = castPressTimers.get(button);
+  if (previous !== undefined) window.clearTimeout(previous);
+  castPressPulses.value.add(button);
+  castPressTimers.set(button, window.setTimeout(() => {
+    castPressTimers.delete(button);
+    castPressPulses.value.delete(button);
+  }, FLASH_MIN_MS));
+}
+
+function clearCastPresses(): void {
+  for (const timer of castPressTimers.values()) window.clearTimeout(timer);
+  castPressTimers.clear();
+  castPressPulses.value.clear();
+}
+
 function releasePageResources(): void {
   window.removeEventListener("keydown", handleCaptureKeydown, true);
   window.removeEventListener("keyup", handleCaptureKeyup, true);
@@ -449,6 +546,7 @@ function releasePageResources(): void {
   snapshotTimer = null;
   if (flashTimer !== null) window.clearTimeout(flashTimer);
   flashTimer = null;
+  clearCastPresses();
   resizeObserver?.disconnect();
   resizeObserver = null;
 }
@@ -465,13 +563,15 @@ const dirty = computed(
 const enabled = computed({
   get: () => mappings.value.enabled,
   set: (value: boolean) => {
+    if (!mappingsLoaded.value) return;
     mappings.value = { ...mappings.value, enabled: value };
     void persist(t("总开关已更新"));
   },
 });
 
 const voiceActive = computed(
-  () => props.runtime?.platform.connection.voiceState === "streaming",
+  () => props.runtime?.platform.connection.voiceState === "streaming"
+    && (!isChromecast.value || castConnected.value),
 );
 
 function actionsOf(button: RemoteButton): ButtonActions {
@@ -485,7 +585,7 @@ function actionsOf(button: RemoteButton): ButtonActions {
 }
 
 function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
-  return actionsOf(button)[trigger];
+  return actionsOf(button)[trigger] ?? { type: "disabled" };
 }
 
 /** 卡片格子的悬停标题：随界面语言实时生成（含全角冒号的原文作为字典 key）。 */
@@ -587,8 +687,8 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
   }
   for (const actions of Object.values(mappings.value.actions)) {
     // 三列动作（不含「按住连续触发」槽位字段——它不是动作）。
-    for (const action of [actions.single, actions.double, actions.long]) {
-      if (action.type === "open_app" && !presetAppIds.value.has(action.target)) {
+    for (const action of [actions.single, actions.double, actions.triple, actions.long]) {
+      if (action?.type === "open_app" && !presetAppIds.value.has(action.target)) {
         const base = action.target.split(/[\\/]/).pop() ?? action.target;
         const name = base.replace(/\.(exe|lnk)$/i, "") || action.target;
         if (!seen.has(action.target)) {
@@ -659,14 +759,36 @@ async function selectApp(app: CustomAppPick): Promise<void> {
   }
 }
 
+
 function selectButton(button: RemoteButton): void {
+  if (isChromecast.value) {
+    openEditor(button, "single");
+    return;
+  }
   // 三键在「全按键支持」关闭时置灰禁用：合成事件绕过原生 disabled，这里再守一道。
   if (captureGated(button)) return;
   selectedButton.value = button;
 }
 
+function castHotspotAttributes(button: RemoteButton) {
+  return {
+    class: "cast-key-hotspot",
+    role: "button" as const,
+    tabindex: mappingsLoaded.value ? 0 : -1,
+    "aria-label": buttonLabels[button],
+    "aria-disabled": !mappingsLoaded.value || undefined,
+    onClick: () => selectButton(button),
+    onKeydown: (event: KeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      selectButton(button);
+    },
+  };
+}
+
 function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
-  if (captureGated(button)) return;
+  if (!mappingsLoaded.value || captureGated(button) || !triggers.value.includes(trigger)) return;
   selectedButton.value = button;
   editingTarget.value = { button, trigger };
   if (capturingShortcut.value) void finishShortcutCapture();
@@ -683,7 +805,7 @@ async function openExample(): Promise<void> {
 
 function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
-  if (!target) return;
+  if (!target || !mappingsLoaded.value) return;
   const next: ButtonMappings = {
     ...mappings.value,
     actions: { ...mappings.value.actions },
@@ -927,15 +1049,16 @@ const repeatPageReason = computed<string | null>(() => {
 });
 
 /** 当前编辑按键是否配置了双击（「重复单击动作」悬停据此切换口径）。 */
-const doubleConfiguredOnEditingButton = computed(() => {
+const multiPressConfiguredOnEditingButton = computed(() => {
   const target = editingTarget.value;
-  return !!target && actionsOf(target.button).double.type !== "disabled";
+  return !!target && (actionOf(target.button, "double").type !== "disabled"
+    || actionOf(target.button, "triple").type !== "disabled");
 });
 
 /** 「重复单击动作」的悬停说明（不可选时为原因；配双击时按压住确认口径）。 */
 const repeatSingleTitle = computed(() => {
   if (repeatSingleReason.value) return repeatSingleReason.value;
-  return doubleConfiguredOnEditingButton.value
+  return multiPressConfiguredOnEditingButton.value
     ? t("按住超过约 0.3 秒开始，单击动作会不断重复，直到松手")
     : t("按住不放，单击动作会不断重复，直到松手");
 });
@@ -1083,6 +1206,7 @@ const captureBridgeFailedText = computed(() =>
  */
 const capabilityNote = computed<string | null>(() => {
   if (!editingTarget.value) return null;
+  if (isChromecast.value) return t("部分按键可能同时触发 Windows 的原有操作。");
   const button = editingTarget.value.button;
   // 2026-09-28 Andy 定稿：开启态按「三键 / 其他按键」分两句；关闭态三键
   // 一句话（与开关悬停提示同源），home/tv 与同键映射的关闭态说明保留原口径。
@@ -1129,35 +1253,89 @@ const captureSwitchTitle = computed(() =>
       : t("开启后支持使用返回 / 音量+ / 音量−，其他按键将同步优化"),
 );
 
-let saveQueue: Promise<void> = Promise.resolve();
+const mappingWrites = new Map<ButtonMappingModel | undefined, Promise<void>>();
 let saveRequest = 0;
+let mappingGeneration = 0;
+
+function writeMappings<T>(scope: ButtonMappingModel | undefined, write: () => Promise<T>): Promise<T> {
+  const previous = mappingWrites.get(scope) ?? Promise.resolve();
+  const current = previous.then(write);
+  mappingWrites.set(scope, current.then(() => undefined, () => undefined));
+  return current;
+}
+
+async function loadMappings(): Promise<void> {
+  const scope = mappingModel.value;
+  const generation = mappingGeneration;
+  mappingLoadFailed.value = false;
+  try {
+    await mappingWrites.get(scope);
+    if (unmounted || generation !== mappingGeneration) return;
+    const loaded = await getButtonMappings(scope);
+    if (unmounted || generation !== mappingGeneration) return;
+    mappings.value = loaded;
+    savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
+    mappingsLoaded.value = true;
+    if (scope === undefined) writeSwitchCache(loaded.enabled, lockSelection.value);
+  } catch (error) {
+    if (!unmounted && generation === mappingGeneration) {
+      mappingLoadFailed.value = true;
+      console.error("load button mappings failed", error);
+      reportFrontendEvent({
+        event: "button_mapping_load",
+        phase: "completed",
+        result: "failed",
+        reason: "settings_read_failed",
+      });
+    }
+  }
+}
+
+watch(mappingModel, () => {
+  mappingGeneration += 1;
+  saveRequest += 1;
+  busy.value = false;
+  editingTarget.value = null;
+  selectedButton.value = null;
+  activeButtons.value = new Set();
+  clearCastPresses();
+  firedFlash.value = null;
+  appPickerOpen.value = false;
+  mappings.value = { enabled: true, actions: {} };
+  mappingsLoaded.value = false;
+  statusMessage.value = null;
+  if (capturingShortcut.value) void finishShortcutCapture();
+  void loadMappings();
+}, { flush: "sync" });
+
 async function persist(message?: string): Promise<void> {
+  if (!mappingsLoaded.value) return;
   const request = ++saveRequest;
+  const scope = mappingModel.value;
+  const generation = mappingGeneration;
   const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
-  const task = saveQueue.then(async () => {
-    try {
-      const saved = await saveButtonMappings(payload);
-      savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
-      writeSwitchCache(saved.enabled, lockSelection.value);
-      if (request === saveRequest) {
-        mappings.value = saved;
-        if (message) statusMessage.value = message;
-      }
-    } catch (error) {
-      if (request === saveRequest) {
-        statusMessage.value = operationErrorText(
-          "save button mappings failed",
-          error,
-          "没能保存按键映射，请重试。",
-        );
-      }
+  try {
+    const saved = await writeMappings(scope, () => saveButtonMappings(payload, scope));
+    if (generation !== mappingGeneration) return;
+    savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
+    if (scope === undefined) writeSwitchCache(saved.enabled, lockSelection.value);
+    if (request === saveRequest) {
+      mappings.value = saved;
+      if (message) statusMessage.value = message;
     }
-  });
-  saveQueue = task;
-  await task;
-  if (request === saveRequest) busy.value = false;
+  } catch (error) {
+    if (request === saveRequest) {
+      statusMessage.value = operationErrorText(
+        "save button mappings failed",
+        error,
+        "没能保存按键映射，请重试。",
+      );
+    }
+  } finally {
+    if (request === saveRequest) busy.value = false;
+  }
 }
 
 // 页面底部的快照错误只显示固定一句用户语言；原始错误留在控制台/后端日志。
@@ -1169,21 +1347,24 @@ watch(
 );
 
 async function restoreDefaults(): Promise<void> {
+  const scope = mappingModel.value;
+  const generation = mappingGeneration;
   busy.value = true;
   statusMessage.value = null;
   try {
-    const saved = await resetButtonMappings();
+    const saved = await writeMappings(scope, () => resetButtonMappings(scope));
+    if (generation !== mappingGeneration) return;
     mappings.value = saved;
     savedSnapshot.value = JSON.parse(JSON.stringify(saved)) as ButtonMappings;
     statusMessage.value = t("已恢复默认（全部按键保持原始行为）");
   } catch (error) {
-    statusMessage.value = operationErrorText(
+    if (generation === mappingGeneration) statusMessage.value = operationErrorText(
       "restore default button mappings failed",
       error,
       "没能恢复默认设置，请重试。",
     );
   } finally {
-    busy.value = false;
+    if (generation === mappingGeneration) busy.value = false;
   }
 }
 
@@ -1192,41 +1373,75 @@ async function saveConfiguration(): Promise<void> {
 }
 
 async function exportConfiguration(): Promise<void> {
+  const generation = mappingGeneration;
   busy.value = true;
   statusMessage.value = null;
   try {
-    const exported = await exportButtonMappingConfiguration();
-    if (exported) statusMessage.value = t("按键映射配置已导出");
+    const exported = await exportButtonMappingConfiguration(mappingModel.value);
+    if (exported && generation === mappingGeneration) statusMessage.value = t("按键映射配置已导出");
   } catch (error) {
-    statusMessage.value = operationErrorText(
+    if (generation === mappingGeneration) statusMessage.value = operationErrorText(
       "export button mappings failed",
       error,
       "没能导出配置，请重试。",
     );
   } finally {
-    busy.value = false;
+    if (generation === mappingGeneration) busy.value = false;
   }
 }
 
 async function importConfiguration(): Promise<void> {
+  const scope = mappingModel.value;
+  const generation = mappingGeneration;
   busy.value = true;
   statusMessage.value = null;
   try {
-    const imported = await importButtonMappingConfiguration();
-    if (!imported) return;
+    const imported = await writeMappings(scope, () => importButtonMappingConfiguration(scope));
+    if (!imported || generation !== mappingGeneration) return;
     mappings.value = imported;
     savedSnapshot.value = JSON.parse(JSON.stringify(imported)) as ButtonMappings;
     editingTarget.value = null;
-    mappingSnapshot.value = await getButtonMappingSnapshot();
-    statusMessage.value = t("按键映射配置已导入并生效");
+    const snapshot = await getButtonMappingSnapshot();
+    if (generation === mappingGeneration) {
+      mappingSnapshot.value = snapshot;
+      statusMessage.value = t("按键映射配置已导入并生效");
+    }
   } catch (error) {
-    statusMessage.value = operationErrorText(
+    if (generation === mappingGeneration) statusMessage.value = operationErrorText(
       "import button mappings failed",
       error,
       "没能导入配置，请重试。",
     );
   } finally {
-    busy.value = false;
+    if (generation === mappingGeneration) busy.value = false;
+  }
+}
+
+const canTestChromecastMapping = computed(() => isChromecast.value
+  && liveRemoteModel.value === "chromecast"
+  && connectionReady.value
+  && !busy.value
+  && !dirty.value
+  && selectedAction.value?.type !== "disabled");
+
+async function testChromecastMapping(): Promise<void> {
+  const target = editingTarget.value;
+  if (!target || !canTestChromecastMapping.value) return;
+  const generation = mappingGeneration;
+  busy.value = true;
+  statusMessage.value = null;
+  try {
+    const result = await testButtonMapping(target.button, target.trigger, "chromecast");
+    if (generation !== mappingGeneration) return;
+    statusMessage.value = result.lastError
+      ? operationErrorText("test Chromecast mapping failed", new Error(result.lastError), "没能测试按键映射，请重试。")
+      : t("已运行按键测试，请检查前台应用中的效果。");
+  } catch (error) {
+    if (generation === mappingGeneration) {
+      statusMessage.value = operationErrorText("test Chromecast mapping failed", error, "没能测试按键映射，请重试。");
+    }
+  } finally {
+    if (generation === mappingGeneration) busy.value = false;
   }
 }
 
@@ -1427,6 +1642,31 @@ const connectionReady = computed(() => {
   const phase = connectionInfo.value?.phase;
   return phase === "ready" || phase === "streaming";
 });
+const castConnected = computed(() => liveRemoteModel.value === "chromecast"
+  && (connectionReady.value || connectionInfo.value?.phase === "draining"));
+watch(
+  () => castConnected.value ? connectionInfo.value?.remoteToken ?? "chromecast" : null,
+  () => {
+    if (!isChromecast.value) return;
+    activeButtons.value = new Set();
+    clearCastPresses();
+    if (flashTimer !== null) window.clearTimeout(flashTimer);
+    flashTimer = null;
+    firedFlash.value = null;
+  },
+  { flush: "sync" },
+);
+
+function reconcilePhysicalButtons(): void {
+  if (isChromecast.value && (!castConnected.value || rawInput.value?.phase !== "ready")) {
+    activeButtons.value = new Set();
+    clearCastPresses();
+    return;
+  }
+  if (rawInput.value?.activeButtons) {
+    activeButtons.value = new Set(rawInput.value.activeButtons);
+  }
+}
 /** 圆点配色沿用改造前设备胶囊里的同一套映射（streaming=active / ready=success / 其余 pending）。 */
 const connectionTone = computed(() =>
   connectionInfo.value?.phase === "streaming"
@@ -1594,7 +1834,7 @@ const rc003CaptureFailureRaw = ref<string | null>(null);
  * 开关也不会显示成开启。
  */
 const captureSupport = ref<CaptureSupport | null>(null);
-const captureUnsupported = computed(() => captureSupport.value?.available === false);
+const captureUnsupported = computed(() => isChromecast.value || captureSupport.value?.available === false);
 
 /**
  * 开关三态（2026-10-10 Andy 定稿）：关闭 / 开启 / 正在操作；本机不可用时置灰。
@@ -1669,6 +1909,7 @@ const captureRevokedNote = computed(() =>
  * 「开启后恢复正常」不成立（issue #206）。
  */
 function captureGated(button: RemoteButton): boolean {
+  if (isChromecast.value) return false;
   const isThreeKey =
     button === "back" || button === "volume_up" || button === "volume_down";
   if (!isThreeKey) return false;
@@ -1868,6 +2109,14 @@ onMounted(async () => {
   // 即真实宽度，后续窗口变化仍由 ResizeObserver 接管。
   if (canvasEl.value) {
     canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, canvasEl.value.clientWidth);
+    // Geometry must continue to track maximize even while native IPC is
+    // pending or unavailable. Cards and SVG share this width throughout.
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(([entry]) => {
+        if (entry) canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, entry.contentRect.width);
+      });
+      resizeObserver.observe(canvasEl.value);
+    }
   }
   window.addEventListener("keydown", handleCaptureKeydown, true);
   window.addEventListener("keyup", handleCaptureKeyup, true);
@@ -1880,9 +2129,9 @@ onMounted(async () => {
   // 布局，之前却挤在同一条链上：`listPresetApps` 实测 379 ms（要探测已安装应用），
   // 而 `getCombinedActions` 还额外 `await` 在映射赋值之前——于是"开关和配置内容都要
   // 等上一两秒"（2026-10-28 用户反馈）。现在它们就绪后各自补齐。
-  const [loaded, snapshot, persistedLockSelection] = await Promise.all([
-    getButtonMappings(),
-    getButtonMappingSnapshot(),
+  const [, snapshot, persistedLockSelection] = await Promise.all([
+    loadMappings(),
+    getButtonMappingSnapshot().catch(() => null),
     // 「锁定当前按键」偏好：读取失败回落默认（开启）并留一条前端事件，不阻断页面。
     getLockMappingSelection().catch(() => {
       reportFrontendEvent({
@@ -1897,8 +2146,6 @@ onMounted(async () => {
   if (unmounted) {
     return;
   }
-  mappings.value = loaded;
-  savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
   // 两个开关的「就绪」与真值在同一渲染批次生效：本批次才创建开关本体，创建即带
   // 正确 checked，不产生属性变更，因此没有"状态回来后开→关"的滑动过渡。
@@ -1911,7 +2158,7 @@ onMounted(async () => {
   lockSelection.value = persistedLockSelection;
   lockSelectionReady.value = true;
   // 权威值回写缓存：下次首帧直接用它渲染，不必再等 IPC。
-  writeSwitchCache(loaded.enabled, persistedLockSelection);
+  if (mappingsLoaded.value && !isChromecast.value) writeSwitchCache(mappings.value.enabled, persistedLockSelection);
 
   // 以下三项都不阻塞首帧，就绪后各自补齐（页面已卸载则丢弃）。
   void listPresetApps()
@@ -1940,14 +2187,14 @@ onMounted(async () => {
     })
     .catch(() => undefined);
 
-  if (rawInput.value?.activeButtons) {
-    activeButtons.value = new Set(rawInput.value.activeButtons);
-  }
+  reconcilePhysicalButtons();
 
   const stopEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
+    if (unmounted || (isChromecast.value && !castConnected.value)) return;
     const arrival = performance.now();
     const next = new Set(activeButtons.value);
     if (edge.isPressed) {
+      if (isChromecast.value && !next.has(edge.button)) pulseCastPress(edge.button);
       next.add(edge.button);
     } else {
       next.delete(edge.button);
@@ -1987,6 +2234,7 @@ onMounted(async () => {
   // 约 400ms，看起来像卡片没跟着连线熄灭。闪烁现在跟随这一次按压，只有极短按
   // （<150ms）才补足到最短可见时间；按住连发每拍重新起算。
   const stopGestures = await subscribeButtonGestures((gesture: FiredGesture) => {
+    if (unmounted || (isChromecast.value && !castConnected.value)) return;
     lastFired.value = gesture;
     firedFlash.value = { button: gesture.button, trigger: gesture.trigger };
     flashStartedAt = performance.now();
@@ -2015,25 +2263,14 @@ onMounted(async () => {
   await rc003ReconcileStarted;
 
   snapshotTimer = window.setInterval(async () => {
-    mappingSnapshot.value = await getButtonMappingSnapshot();
+    await getButtonMappingSnapshot()
+      .then((snapshot) => { if (!unmounted) mappingSnapshot.value = snapshot; })
+      .catch(() => undefined);
     await reconcileRc003Task();
     // 按住集合对账：快照是并集真值（覆盖漏事件漂移）。
-    if (rawInput.value?.activeButtons) {
-      activeButtons.value = new Set(rawInput.value.activeButtons);
-    }
+    reconcilePhysicalButtons();
   }, 1_000);
 
-  // 流式画布：观测容器宽（不足最小画布 800px 时保持 800 由 CSS 缩放兜底）。
-  // 首次宽度已在 onMounted 同步段测过（见函数开头），此处只订阅后续变化。
-  // jsdom 测试环境无 ResizeObserver，跳过观测。
-  if (canvasEl.value && typeof ResizeObserver !== "undefined") {
-    resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        canvasWidth.value = Math.max(CANVAS_MIN_WIDTH, Math.round(entry.contentRect.width));
-      }
-    });
-    resizeObserver.observe(canvasEl.value);
-  }
   resourcesReady = true;
   reportFrontendEvent({
     event: "buttons_page_resource_setup",
@@ -2095,6 +2332,7 @@ onUnmounted(() => {
                「开启后支持使用…」，开启态指向「关闭后…将不可映射」；本机不可用
                （ARM64，issue #206）时固定为不可用口径。 -->
           <label
+            v-if="!isChromecast"
             class="toggle-row"
             :title="captureSwitchTitle"
           >
@@ -2128,7 +2366,7 @@ onUnmounted(() => {
             </span>
           </label>
           <!-- 本机不可用（ARM64，issue #206）：开关旁一句短说明，说结果不说机制。 -->
-          <span v-if="captureUnsupported" class="capture-unavailable-note">
+          <span v-if="captureUnsupported && !isChromecast" class="capture-unavailable-note">
             {{ captureUnsupportedNote }}
           </span>
         </div>
@@ -2142,11 +2380,21 @@ onUnmounted(() => {
           }"
         >
           {{
+            isChromecast
+              ? t("点击遥控器图或卡片可编辑单击，点击各格子可编辑对应手势。部分按键可能同时触发 Windows 的原有操作。")
+              :
             captureFailure ??
             captureRevokedNote ??
             captureInactiveNote ??
             t("点击按键进行自定义配置")
           }}
+        </p>
+        <div v-if="mappingLoadFailed" class="mapping-load-error" role="alert">
+          <span>{{ t("没能读取按键映射，请重试。") }}</span>
+          <button class="secondary-button" type="button" @click="loadMappings">{{ t("重试") }}</button>
+        </div>
+        <p v-if="isChromecast && connectionReady && (rawInput?.phase !== 'ready' || !rawInput?.matchedDeviceCount)" class="muted">
+          {{ t("语音已连接，Windows 还没有提供普通按键通道。可以先保存配置，收到实体按键后才会执行。") }}
         </p>
       </div>
       <div class="mapping-header-controls">
@@ -2178,22 +2426,23 @@ onUnmounted(() => {
          （title 悬停看文案），开启失败走底部提示条——独立行的 v-if 插入 /
          移除会引起整页回流（抖动），胶囊底色与状态光晕还会染到标题区。 -->
 
-    <div ref="canvasEl" class="mapping-canvas" :style="{ height: `${CANVAS_HEIGHT}px` }">
+    <div ref="canvasEl" class="mapping-canvas" :class="{ 'chromecast-canvas': isChromecast }"
+      :style="{ height: `${canvasHeight}px`, '--mapping-canvas-height': `${canvasHeight}px` }">
       <svg
         class="mapping-connections"
         :width="canvasWidth"
-        :height="CANVAS_HEIGHT"
+        :height="canvasHeight"
         aria-hidden="true"
       >
         <template v-for="placement in PLACEMENTS" :key="placement.button">
           <path
             :d="connectionPath(placement)"
-            :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
+            :class="{ selected: selectedButton === placement.button, active: isButtonLit(placement.button) }"
             fill="none"
           />
           <polygon
             :points="arrowPolygon(placement)"
-            :class="{ selected: selectedButton === placement.button, active: activeButtons.has(placement.button) }"
+            :class="{ selected: selectedButton === placement.button, active: isButtonLit(placement.button) }"
           />
         </template>
         <path
@@ -2204,41 +2453,78 @@ onUnmounted(() => {
         <polygon :points="arrowPolygon(VOICE_PLACEMENT)" :class="{ active: voiceActive }" />
       </svg>
 
-      <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${REMOTE_TOP}px` }">
-        <img src="/RC003-remote-photo@2x.webp" :alt="t('小米蓝牙语音遥控器 2 Pro 示意图')" draggable="false" />
-        <span
-          v-for="placement in PLACEMENTS"
-          :key="placement.button"
-          class="anchor-dot"
-          :class="{ visible: activeButtons.has(placement.button) }"
-          :style="{
-            left: `${photoAnchorPoint(placement).x - 4}px`,
-            top: `${photoAnchorPoint(placement).y - 4}px`,
-          }"
-        ></span>
-        <span
-          class="anchor-dot voice"
-          :class="{ visible: voiceActive }"
-          :style="{
-            left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 4}px`,
-            top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 4}px`,
-          }"
-        ></span>
+      <figure class="remote-photo" :style="{ left: `${remoteLeft}px`, top: `${remoteTop}px` }">
+        <img :src="artwork.src" :alt="artwork.alt" draggable="false" />
+        <svg v-if="isChromecast" class="cast-button-lights" viewBox="0 0 250 508" role="group" :aria-label="artwork.alt">
+          <path
+            v-for="key in CAST_DPAD"
+            :key="key.button"
+            v-bind="castHotspotAttributes(key.button)"
+            :data-remote-button="key.button"
+            :class="{ lit: isButtonLit(key.button) }"
+            :d="CAST_DPAD_WEDGE"
+            :transform="`rotate(${key.angle} 125 92)`"
+          />
+          <circle
+            v-for="key in CAST_ROUND_KEYS"
+            :key="key.button"
+            v-bind="castHotspotAttributes(key.button)"
+            :data-remote-button="key.button"
+            :class="{ lit: isButtonLit(key.button) }"
+            :cx="key.x"
+            :cy="key.y"
+            :r="key.radius"
+          />
+          <rect
+            v-for="key in CAST_RECT_KEYS"
+            :key="key.button"
+            v-bind="castHotspotAttributes(key.button)"
+            :data-remote-button="key.button"
+            :class="{ lit: isButtonLit(key.button) }"
+            :x="key.x"
+            :y="key.y"
+            :width="key.width"
+            :height="key.height"
+            :rx="key.radius"
+          />
+          <circle data-remote-button="voice" :class="{ lit: voiceActive }" aria-hidden="true" cx="150" cy="173" r="18" />
+        </svg>
+        <template v-else>
+          <span
+            v-for="placement in PLACEMENTS"
+            :key="placement.button"
+            class="anchor-dot"
+            :class="{ visible: activeButtons.has(placement.button) }"
+            :style="{
+              left: `${photoAnchorPoint(placement).x - 4}px`,
+              top: `${photoAnchorPoint(placement).y - 4}px`,
+            }"
+          ></span>
+          <span
+            class="anchor-dot voice"
+            :class="{ visible: voiceActive }"
+            :style="{
+              left: `${photoAnchorPoint(VOICE_PLACEMENT).x - 4}px`,
+              top: `${photoAnchorPoint(VOICE_PLACEMENT).y - 4}px`,
+            }"
+          ></span>
+        </template>
       </figure>
 
       <article
         v-for="placement in PLACEMENTS"
         :key="placement.button"
         class="mapping-card"
+        :data-remote-button="placement.button"
         :class="{
           left: placement.side === 'left',
           right: placement.side === 'right',
           selected: selectedButton === placement.button,
-          active: activeButtons.has(placement.button),
+          active: isButtonLit(placement.button),
           flashed: firedFlash?.button === placement.button,
           'is-locked': captureGated(placement.button),
         }"
-        :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
+        :style="cardStyle(placement)"
         :title="captureGated(placement.button) ? triKeyGatedTitle : undefined"
         :aria-disabled="captureGated(placement.button) || undefined"
         @click="selectButton(placement.button)"
@@ -2259,7 +2545,7 @@ onUnmounted(() => {
         </div>
         <div class="mapping-cells">
           <button
-            v-for="trigger in TRIGGERS"
+            v-for="trigger in triggers"
             :key="trigger"
             type="button"
             class="mapping-cell"
@@ -2269,7 +2555,7 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="captureGated(placement.button)"
+            :disabled="!mappingsLoaded || captureGated(placement.button)"
             :title="
               captureGated(placement.button)
                 ? triKeyGatedTitle
@@ -2285,8 +2571,9 @@ onUnmounted(() => {
 
       <article
         class="mapping-card voice-card right"
+        data-remote-button="voice"
         :class="{ active: voiceActive }"
-        :style="{ top: `${cardTop(VOICE_PLACEMENT)}px`, width: `${cardWidth}px` }"
+        :style="cardStyle(VOICE_PLACEMENT)"
       >
         <div class="mapping-card-title">
           <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -2315,6 +2602,9 @@ onUnmounted(() => {
           <p class="muted">{{ t("当前：{summary}", { summary: actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }) }}</p>
         </div>
         <div class="button-row">
+          <button v-if="isChromecast" class="secondary-button" type="button" :disabled="!canTestChromecastMapping" @click="testChromecastMapping">
+            {{ t("测试当前映射") }}
+          </button>
           <!-- 全按键支持开关已移至页面头部（与「启用自定义按键功能」并排，
                2026-09-27），编辑面板只保留按键级操作。 -->
           <button
@@ -2375,7 +2665,7 @@ onUnmounted(() => {
               {{ t("聚焦输入框") }}
             </button>
             <span v-if="capturingShortcut" class="capture-display">
-              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? t("先选择修饰键") : t("请按下快捷键组合")) }}
+              {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? t("先选择修饰键") : t("请在电脑键盘上按下组合键")) }}
             </span>
           </div>
           <label
@@ -2704,16 +2994,16 @@ onUnmounted(() => {
       </label>
       <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
       <div class="button-row">
-        <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
+        <button class="secondary-button" type="button" :disabled="busy || !mappingsLoaded" @click="saveConfiguration">
           {{ t("保存配置") }}
         </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
+        <button class="secondary-button" type="button" :disabled="busy || !mappingsLoaded" @click="importConfiguration">
           {{ t("导入配置…") }}
         </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
+        <button class="secondary-button" type="button" :disabled="busy || !mappingsLoaded" @click="exportConfiguration">
           {{ t("导出配置…") }}
         </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
+        <button class="secondary-button" type="button" :disabled="busy || !mappingsLoaded" @click="restoreDefaults">
           {{ t("恢复默认") }}
         </button>
       </div>
@@ -2727,6 +3017,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.chromecast-canvas .mapping-cells { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }

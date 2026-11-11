@@ -1,0 +1,20 @@
+#!/bin/zsh
+set -u
+
+/usr/sbin/chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/vRemoteDriver.driver"
+/usr/bin/find "/Library/Audio/Plug-Ins/HAL/vRemoteDriver.driver" -type d -exec /bin/chmod 755 {} \;
+/usr/bin/find "/Library/Audio/Plug-Ins/HAL/vRemoteDriver.driver" -type f -exec /bin/chmod 644 {} \;
+/bin/chmod 755 "/Library/Audio/Plug-Ins/HAL/vRemoteDriver.driver/Contents/MacOS/BlackHole"
+
+/usr/bin/killall -9 coreaudiod 2>/dev/null || true
+/usr/bin/pkill -TERM -x vRemote 2>/dev/null || true
+
+console_user=$(/usr/bin/stat -f '%Su' /dev/console)
+if [[ -n "$console_user" && "$console_user" != "root" ]]; then
+  console_uid=$(/usr/bin/id -u "$console_user")
+  /bin/launchctl asuser "$console_uid" \
+    /usr/bin/sudo -u "$console_user" \
+    /usr/bin/open -n "/Applications/vRemote.app" >/dev/null 2>&1 || true
+fi
+
+exit 0
