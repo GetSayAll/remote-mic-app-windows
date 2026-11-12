@@ -25,6 +25,7 @@
 //! 交付组合语义/连发）。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -97,6 +98,92 @@ pub(crate) fn preset_focus_profile(target: &str) -> crate::focus::AppFocusProfil
             strategy: crate::focus::FocusStrategy::AutoComposer,
             ..Default::default()
         },
+    }
+}
+
+/// 每次「只打开」请求递增；后台前台保障任务据此判断自己是否已被更新的一次
+/// 打开取代，避免旧任务在用户已经切走后继续抢焦点。
+static OPEN_ONLY_FOREGROUND_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 「只打开应用」策略的冷启动前台保障：先有界等；仍未到前台时**只激活已存在的
+/// 可见窗口**，绝不重新启动应用。
+///
+/// 不依赖私有键位方案宿主是否可用——公开构建也必须执行这段等待，否则冷启动
+/// `launched_without_foreground` 后窗口会停在后台（2026-11-12 飞书现场）。
+///
+/// 重试必须是“激活”而不是“启动”：用户可能已经把刚打开的窗口关掉，再次调用
+/// `launch_app` 会把应用重新拉起，表现为“关掉后又自己打开”（2026-11-12 现场）。
+///
+/// `canceled` 每次循环前检查：产生更新的一次打开后，旧任务不再激活任何窗口。
+fn ensure_open_only_foreground(
+    target: &str,
+    rounds: u32,
+    mut canceled: impl FnMut() -> bool,
+    mut wait: impl FnMut(&str, std::time::Duration) -> bool,
+    mut activate_existing: impl FnMut(&str) -> bool,
+) -> bool {
+    // 先做一次零等待检查：正常托盘恢复/已在前台时直接返回，不引入额外延迟。
+    if wait(target, std::time::Duration::ZERO) {
+        crate::ble::gatt_note(
+            "open_app_profile_foreground phase=completed target_result=passed".to_owned(),
+        );
+        return true;
+    }
+    // 冷启动时不要先干等固定超时：每 500ms 检查一次，只要出现可见窗口就立刻
+    // 激活；没有可见窗口（应用还没出现，或用户已经关掉）就只继续观察，绝不启动。
+    for _ in 0..rounds {
+        if canceled() {
+            crate::ble::gatt_note(
+                "open_app_profile_foreground phase=completed target_result=superseded".to_owned(),
+            );
+            return false;
+        }
+        if activate_existing(target) {
+            crate::ble::gatt_note(
+                "open_app_profile_foreground phase=retry_activate target_result=passed".to_owned(),
+            );
+        }
+        if canceled() {
+            crate::ble::gatt_note(
+                "open_app_profile_foreground phase=completed target_result=superseded".to_owned(),
+            );
+            return false;
+        }
+        if wait(target, std::time::Duration::from_millis(500)) {
+            crate::ble::gatt_note(
+                "open_app_profile_foreground phase=completed target_result=passed".to_owned(),
+            );
+            return true;
+        }
+    }
+    crate::ble::gatt_note(
+        "open_app_profile_foreground phase=completed target_result=skipped".to_owned(),
+    );
+    false
+}
+
+/// 在后台执行「只打开」前台保障。最长 4 秒的等待不能占住引擎线程，否则后续
+/// 按键会排队（2026-11-12 评审）。每次调用递增 generation，旧任务在下一轮
+/// 检查时退出，不会在新一次打开之后继续抢焦点。
+fn schedule_open_only_foreground(target: &str) {
+    let generation = OPEN_ONLY_FOREGROUND_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let target = target.to_owned();
+    let spawned = std::thread::Builder::new()
+        .name("sayall-open-only-fg".to_owned())
+        .spawn(move || {
+            ensure_open_only_foreground(
+                &target,
+                8,
+                || OPEN_ONLY_FOREGROUND_GENERATION.load(Ordering::Relaxed) != generation,
+                |target, timeout| crate::app_launcher::wait_for_target_foreground(target, timeout),
+                |target| crate::app_launcher::activate_existing_window(target),
+            );
+        });
+    if spawned.is_err() {
+        crate::ble::gatt_note(
+            "open_app_profile_foreground phase=completed target_result=skipped reason=thread_unavailable"
+                .to_owned(),
+        );
     }
 }
 
@@ -362,27 +449,14 @@ impl MappingInjector for SendInputInjector {
                 // 会让新窗口停在后面，单靠等待永远等不到；已运行应用的第二次
                 // activate_or_launch 会走「恢复已有窗口并置前」，与 AppShortcut
                 // 分支同一路径，能把目标真正拿到前台。
-                if crate::button_profiles::is_button_profile_host_available() {
-                    let mut foreground = crate::app_launcher::wait_for_target_foreground(
-                        target,
-                        std::time::Duration::from_millis(3000),
-                    );
-                    if !foreground {
-                        crate::ble::gatt_note(
-                            "open_app_profile_foreground phase=retry reason=target_not_foreground"
-                                .to_owned(),
-                        );
-                        let _ = self.launch_app(target);
-                        foreground = crate::app_launcher::wait_for_target_foreground(
-                            target,
-                            std::time::Duration::from_millis(2500),
-                        );
-                    }
-                    crate::ble::gatt_note(format!(
-                        "open_app_profile_foreground phase=completed target_result={}",
-                        if foreground { "passed" } else { "skipped" }
-                    ));
-                }
+                //
+                // 这段等待**不能**按「私有键位方案宿主是否可用」门控：公开构建
+                // 不注入私有宿主，门控会让冷启动首按完全跳过等待/重试。2026-11-12
+                // 飞书现场：菜单键冷启动 `launched_without_foreground` 后无任何
+                // `focus_wait_foreground`/重试日志，窗口停在后台。
+                // 等待与激活放到后台，避免最长 4 秒阻塞引擎线程；每次打开递增
+                // generation，旧任务在用户发起下一次打开后退出。
+                schedule_open_only_foreground(target);
                 Ok(())
             }
             crate::focus::FocusStrategy::AutoComposer => {
@@ -3638,6 +3712,106 @@ mod tests {
             &["notepad".to_owned()]
         );
         drop(gate);
+    }
+
+    /// 「只打开」的冷启动前台保障不得依赖私有键位方案宿主：公开构建里宿主
+    /// 不可用，仍必须先等、再按应用入口重试一次（2026-11-12 飞书现场）。
+    #[test]
+    fn open_only_foreground_retries_without_private_button_profile_host() {
+        use std::cell::Cell;
+        let waits = Cell::new(0);
+        let activations = Cell::new(0);
+        let observed = ensure_open_only_foreground(
+            "target",
+            2,
+            || false,
+            |_, _| {
+                waits.set(waits.get() + 1);
+                waits.get() >= 2
+            },
+            |_| {
+                activations.set(activations.get() + 1);
+                true
+            },
+        );
+        assert!(observed);
+        assert_eq!(waits.get(), 2);
+        assert_eq!(activations.get(), 1);
+        assert!(
+            !crate::button_profiles::is_button_profile_host_available(),
+            "公开构建默认没有私有宿主，测试必须覆盖这个前提"
+        );
+    }
+
+    /// 正常托盘恢复/已在前台时不得先做可见窗口激活或等待，直接返回。
+    #[test]
+    fn open_only_foreground_returns_immediately_when_already_foreground() {
+        use std::cell::Cell;
+        let waits = Cell::new(0);
+        let activations = Cell::new(0);
+        let observed = ensure_open_only_foreground(
+            "target",
+            8,
+            || false,
+            |_, _| {
+                waits.set(waits.get() + 1);
+                true
+            },
+            |_| {
+                activations.set(activations.get() + 1);
+                true
+            },
+        );
+        assert!(observed);
+        assert_eq!(waits.get(), 1);
+        assert_eq!(activations.get(), 0);
+    }
+
+    /// 用户把刚打开的窗口关掉后，补偿路径只能尝试激活“已存在的可见窗口”；
+    /// 没有可见窗口时必须保持关闭，不能再次启动应用。
+    #[test]
+    fn open_only_foreground_never_relaunches_a_closed_target() {
+        use std::cell::Cell;
+        let activations = Cell::new(0);
+        let observed = ensure_open_only_foreground(
+            "target",
+            2,
+            || false,
+            |_, _| false,
+            |_| {
+                activations.set(activations.get() + 1);
+                false
+            },
+        );
+        assert!(!observed);
+        // 每轮只尝试激活一次，绝不启动。
+        assert_eq!(activations.get(), 2);
+    }
+
+    /// 新的打开请求产生后，旧的前台保障任务必须在下一轮检查时退出：
+    /// 否则后台线程会在用户已经切到别的应用后继续抢焦点。
+    #[test]
+    fn open_only_foreground_stops_when_superseded_by_a_newer_open() {
+        use std::cell::Cell;
+        let waits = Cell::new(0);
+        let activations = Cell::new(0);
+        let observed = ensure_open_only_foreground(
+            "target",
+            8,
+            || waits.get() >= 2,
+            |_, _| {
+                waits.set(waits.get() + 1);
+                false
+            },
+            |_| {
+                activations.set(activations.get() + 1);
+                false
+            },
+        );
+        assert!(!observed);
+        // 零等待检查 + 一轮 500ms 等待后，第二轮开始前发现已被取代。
+        assert_eq!(waits.get(), 2);
+        assert_eq!(activations.get(), 1);
     }
 
     /// 自定义应用没有聚焦档案时保持「只打开」，不擅自抢焦点。
