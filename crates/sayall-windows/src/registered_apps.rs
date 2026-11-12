@@ -555,7 +555,22 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                         )
                     },
                 );
-                let visibility = by_identity.merge(by_path);
+                // 启动器式注册项：解析路径可能是根目录 `Feishu.exe`，真正持有窗口的
+                // 是同目录 `app\Feishu.exe`。只查 AUMID + 精确路径会得到 (0,0)，
+                // 随后 `activate_install_directory_family` 会把隐藏主窗口直接显示出来
+                // （2026-11-12 飞书菜单键现场：source=install_directory + took_show_path=true）。
+                let by_family = executable_path.as_deref().map_or(
+                    crate::app_launcher::WindowVisibility::EMPTY,
+                    |path| {
+                        crate::app_launcher::window_visibility(
+                            crate::app_launcher::WindowSelector::InstallDirectoryFamily {
+                                resolved_path: path,
+                                app_user_model_id: &app_user_model_id,
+                            },
+                        )
+                    },
+                );
+                let visibility = by_identity.merge(by_path).merge(by_family);
                 let (visible, hidden) = (visibility.visible, visibility.hidden);
                 let main_hidden = hidden > 0 && visibility.hidden_max_area > visibility.visible_max_area;
                 if (visible == 0 || main_hidden) && hidden > 0 {
@@ -703,7 +718,9 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
             // 应用会由单实例处理把主窗口显示出来）。先有界复核应用是否自己把窗口显示出来，
             // 是则不再走会被判"点不动"的直接显示路径。
             if let Some(hwnd) = deferred_hidden_window {
-                let self_shown = crate::app_launcher::readback_hidden_window_shown(Some(hwnd));
+                // 600ms 足够覆盖单实例转发；后续 `ensure_open_only_foreground`
+                // 会继续观察并激活可见窗口，这里不干等满 1.2s。
+                let self_shown = crate::app_launcher::readback_hidden_window_shown_brief(Some(hwnd));
                 crate::gatt_note(format!(
                     "registered_app_launch phase=app_self_shown terminal_result={}",
                     if self_shown { "passed" } else { "failed" },
@@ -713,19 +730,31 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                 }
             }
 
-            let foreground_observed = pid.is_some_and(|pid| {
-                observe_registered_foreground(
-                    pid,
-                    &app_user_model_id,
-                    executable_path.as_deref(),
-                    method == "shell_fallback",
-                )
-            });
-            crate::gatt_note(format!(
-                "registered_app_launch phase=foreground_readback method={method} pid_available={} target_result={}",
-                pid.is_some(),
-                if foreground_observed { "foreground_observed" } else { "foreground_denied" }
-            ));
+            let foreground_observed = if deferred_hidden_window.is_some() {
+                // 窗口已确认是「应用自己收在托盘」的隐藏主窗口，且契约/ShellExecute
+                // 已经请求应用自己显示；这里绝不能再走 activate_* 的隐藏候选兜底，
+                // 否则会把应用自己隐藏的主窗口强行 ShowWindow 出来（2026-11-12 飞书）。
+                crate::gatt_note(
+                    "registered_app_launch phase=foreground_readback target_result=deferred reason=window_hidden_by_app"
+                        .to_owned(),
+                );
+                false
+            } else {
+                let foreground_observed = pid.is_some_and(|pid| {
+                    observe_registered_foreground(
+                        pid,
+                        &app_user_model_id,
+                        executable_path.as_deref(),
+                        method == "shell_fallback",
+                    )
+                });
+                crate::gatt_note(format!(
+                    "registered_app_launch phase=foreground_readback method={method} pid_available={} target_result={}",
+                    pid.is_some(),
+                    if foreground_observed { "foreground_observed" } else { "foreground_denied" }
+                ));
+                foreground_observed
+            };
             (
                 classify_registered_launch(submitted, foreground_observed),
                 foreground_observed,

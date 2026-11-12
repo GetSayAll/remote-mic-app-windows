@@ -1133,48 +1133,166 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
         if !path.exists() {
             return Err(format!("应用不存在：{id}"));
         }
-        if id.to_ascii_lowercase().ends_with(".exe") {
-            let exe_name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default();
-            match activate_running(&[&exe_name]) {
+        // `.lnk` 先解析成真实 exe/参数/工作目录；custom `.exe` 直接用自身。
+        // 两者随后走同一条"先判定可见性，再决定激活还是交给应用"的路径。
+        let mut entry_path = id.to_owned();
+        let mut arguments: Option<String> = None;
+        let mut working_dir: Option<String> = None;
+        if id.to_ascii_lowercase().ends_with(".lnk") {
+            match resolve_lnk(id) {
+                Some(resolved) if !resolved.exe_path.is_empty() => {
+                    entry_path = resolved.exe_path;
+                    if !resolved.arguments.is_empty() {
+                        arguments = Some(resolved.arguments);
+                    }
+                    if !resolved.working_dir.is_empty() {
+                        working_dir = Some(resolved.working_dir);
+                    }
+                }
+                _ => return launch_path(id),
+            }
+        }
+        let Some(exe_name) = std::path::Path::new(&entry_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+        else {
+            return launch_explicit(
+                &entry_path,
+                arguments.as_deref(),
+                working_dir.as_deref(),
+                true,
+            );
+        };
+        let visibility = window_visibility(WindowSelector::ExecutableNames(&[&exe_name]));
+        match custom_running_plan(visibility) {
+            CustomRunningPlan::ActivateVisible => match activate_running(&[&exe_name]) {
                 RunningActivation::Activated(_) => return Ok(()),
                 RunningActivation::ForegroundDenied => {
                     return Err("Windows 拒绝将目标应用切换到前台".to_owned());
                 }
                 RunningActivation::NotFound => {}
-            }
-            return launch_explicit(id, None, None, true);
-        }
-        if let Some(resolved) = resolve_lnk(id) {
-            if !resolved.exe_path.is_empty() {
-                let exe_name = std::path::Path::new(&resolved.exe_path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                match activate_running(&[&exe_name]) {
-                    RunningActivation::Activated(_) => return Ok(()),
-                    RunningActivation::ForegroundDenied => {
-                        return Err("Windows 拒绝将目标应用切换到前台".to_owned());
-                    }
-                    RunningActivation::NotFound => {}
-                }
-                let arguments =
-                    (!resolved.arguments.is_empty()).then_some(resolved.arguments.clone());
-                let dir =
-                    (!resolved.working_dir.is_empty()).then_some(resolved.working_dir.clone());
-                return launch_explicit(
-                    &resolved.exe_path,
+            },
+            CustomRunningPlan::DelegateHidden => {
+                return delegate_custom_hidden_target(
+                    id,
+                    &entry_path,
+                    &exe_name,
+                    visibility.largest_hidden,
                     arguments.as_deref(),
-                    dir.as_deref(),
-                    true,
+                    working_dir.as_deref(),
                 );
             }
+            CustomRunningPlan::Launch => {}
         }
-        return launch_path(id);
+        return launch_explicit(
+            &entry_path,
+            arguments.as_deref(),
+            working_dir.as_deref(),
+            true,
+        );
     }
     Err(format!("未知预设应用：{id}"))
+}
+
+/// custom 目标的主窗口已隐藏（收在托盘）时，交给应用自己的入口唤回。
+///
+/// 顺序与预设应用的隐藏窗口路径一致：托盘图标 → 应用自身启动入口 →
+/// 有界复核原隐藏窗口是否自己变可见。**任何一步都不直接 `ShowWindow` 隐藏窗口**：
+/// 外部显示会让 Electron 应用保留内部隐藏态，窗口可见但点击不进入应用
+/// （2026-11-12 飞书本机复现；同类记录见 2026-10-03 微信/WorkBuddy）。
+#[cfg(windows)]
+fn delegate_custom_hidden_target(
+    target: &str,
+    exe_path: &str,
+    exe_name: &str,
+    known_hidden: Option<isize>,
+    arguments: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<(), String> {
+    let mut names = vec![exe_name.to_owned()];
+    if let Some(stem) = exe_name
+        .strip_suffix(".exe")
+        .or_else(|| exe_name.strip_suffix(".EXE"))
+    {
+        if !stem.is_empty() {
+            names.push(stem.to_owned());
+        }
+    }
+    // `.lnk` 的文件名就是用户看到的托盘名称（如“飞书”）；不含标题/个人信息。
+    if let Some(stem) = std::path::Path::new(target)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+    {
+        if !stem.is_empty() && !names.iter().any(|name| name.eq_ignore_ascii_case(stem)) {
+            names.push(stem.to_owned());
+        }
+    }
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let tray = crate::tray_icons::invoke_tray_icon(&borrowed);
+    let tray_visible = tray.submitted && readback_hidden_window_shown(known_hidden);
+    crate::ble::gatt_note(format!(
+        "app_launcher action=activate_or_launch target_kind=custom phase=tray_icon matched={} submitted={} method={} terminal_result={}",
+        tray.matched,
+        tray.submitted,
+        tray.method,
+        if tray_visible { "passed" } else { "failed" },
+    ));
+    if tray_visible {
+        // 托盘回调只保证窗口可见，不保证它成为前台；不补置前时下一次按键
+        // 仍可能按前台应用匹配到旧方案（与预设路径同因，2026-10-28 真机）。
+        let focused = known_hidden
+            .is_some_and(|hwnd| unsafe { win_impl::activate_known_window(hwnd) })
+            || wait_for_target_foreground(target, std::time::Duration::from_millis(400));
+        crate::ble::gatt_note(format!(
+            "app_launcher action=activate_or_launch target_kind=custom phase=tray_foreground terminal_result={}",
+            if focused { "passed" } else { "failed" }
+        ));
+        return Ok(());
+    }
+
+    crate::ble::gatt_note(
+        "app_launcher action=activate_or_launch target_kind=custom phase=relaunch_entry reason=window_hidden_by_app"
+            .to_owned(),
+    );
+    if let Err(error) = launch_explicit(exe_path, arguments, working_dir, true) {
+        crate::ble::gatt_note(
+            "app_launcher action=activate_or_launch target_kind=custom phase=relaunch_entry terminal_result=failed reason=launch_entry_failed window_observed=false"
+                .to_owned(),
+        );
+        return Err(error);
+    }
+    let became_visible = readback_with_recheck(
+        || match known_hidden {
+            Some(hwnd) => unsafe {
+                windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(
+                    windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void),
+                )
+            }
+            .as_bool(),
+            None => window_visibility(WindowSelector::ExecutableNames(&[exe_name])).visible > 0,
+        },
+        || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
+        RELAUNCH_VISIBLE_CHECKS,
+    );
+    let focus_target = match known_hidden {
+        Some(hwnd) if became_visible => Some(hwnd),
+        _ => window_visibility(WindowSelector::ExecutableNames(&[exe_name])).largest_visible,
+    };
+    let focused = focus_target.is_some_and(|hwnd| unsafe { win_impl::activate_known_window(hwnd) })
+        || wait_for_target_foreground(target, std::time::Duration::from_millis(400));
+    crate::ble::gatt_note(format!(
+        "app_launcher action=activate_or_launch target_kind=custom phase=relaunch_entry terminal_result={} reason={} window_observed={became_visible}",
+        if focused { "passed" } else { "deferred" },
+        if became_visible {
+            "app_shown_known_window"
+        } else {
+            "app_window_not_observed"
+        },
+    ));
+    // 启动入口已提交但窗口仍不可见时，不把隐藏窗口强行拉出来；保留
+    // `launched_without_foreground` 语义，用户仍可从托盘图标手动恢复。
+    Ok(())
 }
 
 /// 快捷方式解析结果（.lnk → 目标 exe/参数/工作目录）。
@@ -1345,6 +1463,34 @@ fn running_window_disposition(
     }
 }
 
+/// custom `.exe` / `.lnk` 的运行中处置。
+///
+/// custom 目标没有预设表里的 `relaunch_when_hidden` 元数据，但同样不能在主窗口
+/// 隐藏时直接 `ShowWindow`：飞书（Electron）主窗口被外部显示后会保留内部隐藏态，
+/// 窗口可见但点击不进入应用（2026-11-12 本机复现）。隐藏主窗口一律交给应用自己
+/// 的托盘图标或启动入口，只有可见/最小化窗口才走 `activate_running`。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomRunningPlan {
+    ActivateVisible,
+    DelegateHidden,
+    Launch,
+}
+
+#[cfg(windows)]
+fn custom_running_plan(visibility: WindowVisibility) -> CustomRunningPlan {
+    match running_window_disposition(
+        visibility.visible,
+        visibility.visible_max_area,
+        visibility.hidden,
+        visibility.hidden_max_area,
+    ) {
+        RunningWindowDisposition::ActivateVisible => CustomRunningPlan::ActivateVisible,
+        RunningWindowDisposition::DelegateToApp => CustomRunningPlan::DelegateHidden,
+        RunningWindowDisposition::StartFresh => CustomRunningPlan::Launch,
+    }
+}
+
 /// 第一次按常规公开 API 激活；若 Windows 只闪任务栏、前台读回仍不是目标进程，
 /// 再用一次成对 Alt 边沿解除 foreground lock 后重试。API 布尔值只作诊断，
 /// 最终成功判据必须是 `GetForegroundWindow` 读回属于目标进程。
@@ -1376,10 +1522,21 @@ pub(crate) fn readback_hidden_window_shown(hwnd: Option<isize>) -> bool {
     hwnd.is_some_and(|hwnd| win_impl::known_window_shown(hwnd))
 }
 
+/// 已运行注册应用在激活契约后复核应用自己是否显示窗口：3 × 200 ms。
+///
+/// 比托盘/重新拉起的 1.2 s 短：失败后 `ensure_open_only_foreground` 会继续
+/// 每 500 ms 观察并激活可见窗口，不需要在这里干等满 1.2 s
+/// （2026-11-12 飞书冷启动 1.3 s 等待优化）。
+#[cfg(windows)]
+pub(crate) fn readback_hidden_window_shown_brief(hwnd: Option<isize>) -> bool {
+    hwnd.is_some_and(|hwnd| win_impl::known_window_shown_with_checks(hwnd, APP_SELF_SHOWN_CHECKS))
+}
+
 /// 复核应用是否自己把已知隐藏窗口显示出来：6 × 200 ms（托盘图标路线与
 /// "重新拉起"共用）。冷启动到窗口出现通常在 1 s 内，没有出现就按失败处理、
 /// 回落到定点显示已知窗口的路径。
 const RELAUNCH_VISIBLE_CHECKS: u8 = 6;
+const APP_SELF_SHOWN_CHECKS: u8 = 3;
 const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 启动之后的**有界置前**预算：10 × 150 ms。
@@ -1668,23 +1825,31 @@ pub fn launcher_family_rank(
     }
 }
 
-/// 启动器式目标的兜底激活：在同一安装目录下寻找同族进程并前置其窗口。
+/// 同安装目录同族进程的 PID 集合：`(优先, 兜底)`。
+///
+/// 与 `activate_install_directory_family` 共用同一份扫描，避免"可见性查询"
+/// 和"激活"使用两套口径——2026-11-12 飞书注册应用现场：窗口属于
+/// `app\Feishu.exe`，而注册项解析到根目录 `Feishu.exe`；按精确路径查不到窗口，
+/// 同族兜底却能看到并 `ShowWindow` 隐藏主窗口。
 #[cfg(windows)]
-pub(crate) fn activate_install_directory_family(
+fn pids_for_install_directory_family(
     resolved_path: &str,
     app_user_model_id: &str,
-) -> bool {
+) -> (
+    std::collections::HashSet<u32>,
+    std::collections::HashSet<u32>,
+) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
 
-    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-        return false;
-    };
     let mut preferred = std::collections::HashSet::new();
     let mut fallback = std::collections::HashSet::new();
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return (preferred, fallback);
+    };
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
@@ -1707,6 +1872,16 @@ pub(crate) fn activate_install_directory_family(
     unsafe {
         let _ = CloseHandle(snapshot);
     }
+    (preferred, fallback)
+}
+
+/// 启动器式目标的兜底激活：在同一安装目录下寻找同族进程并前置其窗口。
+#[cfg(windows)]
+pub(crate) fn activate_install_directory_family(
+    resolved_path: &str,
+    app_user_model_id: &str,
+) -> bool {
+    let (preferred, fallback) = pids_for_install_directory_family(resolved_path, app_user_model_id);
     let activated = !preferred.is_empty()
         && matches!(
             activate_process_windows(&preferred),
@@ -1788,6 +1963,11 @@ pub(crate) enum WindowSelector<'a> {
     ExecutableNames(&'a [&'a str]),
     ExecutablePath(&'a str),
     AppUserModelId(&'a str),
+    /// 启动器式注册目标：解析路径 + 同安装目录同族进程。
+    InstallDirectoryFamily {
+        resolved_path: &'a str,
+        app_user_model_id: &'a str,
+    },
 }
 
 /// 只读枚举结果。`largest_hidden` 是**面积最大**的隐藏候选（通常是应用主窗口），
@@ -1863,11 +2043,25 @@ pub(crate) fn target_window_visibility(target: &str) -> Option<WindowVisibility>
         // "目标应用没有可见窗口"）。shell 项里的 `System.Link.TargetParsingPath`
         // 给出真实 exe，启动路径本来就用它，这里复用同一口径。
         let by_identity = window_visibility(WindowSelector::AppUserModelId(aumid));
-        let by_path = crate::registered_apps::resolve_registered_executable_path(target)
+        let resolved_path = crate::registered_apps::resolve_registered_executable_path(target);
+        let by_path = resolved_path
+            .as_deref()
             .map_or(WindowVisibility::EMPTY, |path| {
-                window_visibility(WindowSelector::ExecutablePath(&path))
+                window_visibility(WindowSelector::ExecutablePath(path))
             });
-        return Some(by_identity.merge(by_path));
+        // 启动器式注册项：窗口可能属于同目录 `app\Feishu.exe`，精确路径查不到。
+        // 前台等待与启动判定必须共用同一份同族口径，否则会出现
+        // `registered_app_launch foreground_observed` 但 `focus_wait_foreground timeout`
+        // 的撕裂状态，随后误触发重试并把用户刚关掉的窗口重新拉起（2026-11-12 飞书）。
+        let by_family = resolved_path
+            .as_deref()
+            .map_or(WindowVisibility::EMPTY, |path| {
+                window_visibility(WindowSelector::InstallDirectoryFamily {
+                    resolved_path: path,
+                    app_user_model_id: aumid,
+                })
+            });
+        return Some(by_identity.merge(by_path).merge(by_family));
     }
     if let Some(app) = preset_app(target) {
         let by_exe = window_visibility(WindowSelector::ExecutableNames(app.exe_names));
@@ -1877,14 +2071,24 @@ pub(crate) fn target_window_visibility(target: &str) -> Option<WindowVisibility>
         });
     }
     if is_custom_path_target(target) {
-        let resolved = if target.to_ascii_lowercase().ends_with(".lnk") {
+        let is_shortcut = target.to_ascii_lowercase().ends_with(".lnk");
+        let resolved = if is_shortcut {
             resolve_lnk(target)
                 .map(|shortcut| shortcut.exe_path)
                 .unwrap_or_else(|| target.to_owned())
         } else {
             target.to_owned()
         };
-        return Some(window_visibility(WindowSelector::ExecutablePath(&resolved)));
+        let by_path = window_visibility(WindowSelector::ExecutablePath(&resolved));
+        // `.lnk` 常指向根目录启动器，真正窗口在 `app\` 子目录。焦点等待/就绪判定
+        // 必须把同族窗口算进来，否则会误判"没到前台"并再次拉起（2026-11-12 飞书）。
+        let by_family = is_shortcut.then(|| {
+            window_visibility(WindowSelector::InstallDirectoryFamily {
+                resolved_path: &resolved,
+                app_user_model_id: "",
+            })
+        });
+        return Some(by_family.map_or(by_path, |family| by_path.merge(family)));
     }
     None
 }
@@ -1898,6 +2102,16 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
         WindowSelector::ExecutableNames(names) => (pids_for_exe_names(names), None),
         WindowSelector::ExecutablePath(path) => (pids_for_executable_path(path), None),
         WindowSelector::AppUserModelId(aumid) => (pids_for_app_user_model_id(aumid), Some(aumid)),
+        WindowSelector::InstallDirectoryFamily {
+            resolved_path,
+            app_user_model_id,
+        } => {
+            let (preferred, fallback) =
+                pids_for_install_directory_family(resolved_path, app_user_model_id);
+            let mut pids = preferred;
+            pids.extend(fallback);
+            (pids, Some(app_user_model_id))
+        }
     };
     if pids.is_empty() && app_user_model_id.is_none() {
         return WindowVisibility::EMPTY;
@@ -2177,11 +2391,15 @@ mod win_impl {
 
     /// 复核"已知的那个隐藏窗口"是否已经由应用自己显示出来（有界）。
     pub(super) fn known_window_shown(hwnd: isize) -> bool {
+        known_window_shown_with_checks(hwnd, super::RELAUNCH_VISIBLE_CHECKS)
+    }
+
+    pub(super) fn known_window_shown_with_checks(hwnd: isize, checks: u8) -> bool {
         let target = HWND(hwnd as *mut core::ffi::c_void);
         super::readback_with_recheck(
             || unsafe { IsWindowVisible(target) }.as_bool(),
             || std::thread::sleep(super::RELAUNCH_VISIBLE_WAIT),
-            super::RELAUNCH_VISIBLE_CHECKS,
+            checks,
         )
     }
 
@@ -2758,6 +2976,26 @@ pub fn learn_focus_point(target: &str) -> Result<crate::focus::RecordedPoint, St
 #[cfg(not(windows))]
 pub fn learn_focus_point(_target: &str) -> Result<crate::focus::RecordedPoint, String> {
     Err("unsupported".to_owned())
+}
+
+/// 只激活目标**已经可见**的窗口；不启动、不显示隐藏窗口。
+///
+/// 冷启动前台补偿必须用这个入口：用户可能已经把刚打开的窗口关掉，此时再走
+/// `activate_or_launch` 会重新启动应用，表现为“关掉后又自己打开”
+/// （2026-11-12 飞书现场）。没有可见窗口时返回 false，调用方按超时处理即可。
+#[cfg(windows)]
+pub(crate) fn activate_existing_window(target: &str) -> bool {
+    let Some(hwnd) =
+        target_window_visibility(target).and_then(|visibility| visibility.largest_visible)
+    else {
+        return false;
+    };
+    unsafe { win_impl::activate_known_window(hwnd) }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn activate_existing_window(_target: &str) -> bool {
+    false
 }
 
 /// 等待目标应用成为前台窗口（有界）。
@@ -3414,6 +3652,53 @@ pub(crate) mod tests {
         assert_eq!(
             running_window_disposition(0, 0, 0, 0),
             RunningWindowDisposition::StartFresh
+        );
+    }
+
+    /// custom `.exe` / `.lnk` 没有预设的 `relaunch_when_hidden` 元数据，但同样
+    /// 不能直接 `ShowWindow` 应用自己隐藏的主窗口：飞书 Electron 主窗口被外部
+    /// 显示后会保留内部隐藏态，界面点击不进入应用（2026-11-12 本机复现）。
+    #[cfg(windows)]
+    #[test]
+    fn custom_path_hidden_window_delegates_to_app_instead_of_force_show() {
+        use super::*;
+        assert_eq!(
+            custom_running_plan(WindowVisibility {
+                visible: 1,
+                hidden: 0,
+                largest_hidden: None,
+                largest_visible: Some(1),
+                visible_max_area: 900_000,
+                hidden_max_area: 0,
+            }),
+            CustomRunningPlan::ActivateVisible
+        );
+        assert_eq!(
+            custom_running_plan(WindowVisibility {
+                visible: 0,
+                hidden: 1,
+                largest_hidden: Some(2),
+                largest_visible: None,
+                visible_max_area: 0,
+                hidden_max_area: 900_000,
+            }),
+            CustomRunningPlan::DelegateHidden
+        );
+        // 主窗口隐藏、只剩登录/入口小窗口可见：仍按主窗口隐藏处理。
+        assert_eq!(
+            custom_running_plan(WindowVisibility {
+                visible: 1,
+                hidden: 1,
+                largest_hidden: Some(2),
+                largest_visible: Some(3),
+                visible_max_area: 114_000,
+                hidden_max_area: 942_000,
+            }),
+            CustomRunningPlan::DelegateHidden
+        );
+        assert_eq!(
+            custom_running_plan(WindowVisibility::EMPTY),
+            CustomRunningPlan::Launch
         );
     }
 
@@ -4079,6 +4364,23 @@ pub(crate) mod tests {
             .expect("spawn create thread failed")
             .join()
             .expect("create thread panicked")
+    }
+
+    /// 真机取证：注册应用与 `.lnk` 的窗口可见性必须包含同安装目录同族窗口，
+    /// 否则 `focus_wait_foreground` 会与 `registered_app_launch foreground_observed`
+    /// 撕裂，误触发重试并把窗口重新拉起。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires SAYALL_TEST_FEISHU_TARGET and SAYALL_TEST_FEISHU_LNK with Feishu running"]
+    fn feishu_family_visibility_matches_foreground_wait_selector() {
+        for key in ["SAYALL_TEST_FEISHU_TARGET", "SAYALL_TEST_FEISHU_LNK"] {
+            let target = std::env::var(key).unwrap_or_else(|_| panic!("set {key}"));
+            let visibility = target_window_visibility(&target).expect("known target");
+            assert!(
+                visibility.visible + visibility.hidden > 0,
+                "{key}: family window not visible to target_window_visibility"
+            );
+        }
     }
 
     #[test]
