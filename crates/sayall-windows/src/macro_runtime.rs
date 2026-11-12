@@ -240,6 +240,12 @@ pub fn execute_macro(
             }
             StepOutcome::Failed => return finish(MacroTerminalResult::StepFailed, steps),
         }
+        // 取消在步骤边界生效：当前步骤返回后若取消标志已置位，必须如实报告
+        // Cancelled，而不是把最后一步的成功当成 Completed。单步宏尤其明显，
+        // 且这一步必须放在失败终态之后，保留原有失败诊断的优先级。
+        if cancel.load(Ordering::Relaxed) {
+            return finish(MacroTerminalResult::Cancelled, steps);
+        }
     }
     finish(
         if nested_missing_dependency {
