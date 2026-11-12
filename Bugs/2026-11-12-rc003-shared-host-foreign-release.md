@@ -36,17 +36,18 @@
     同一设备对象还有其它句柄（不同 TLC）时不会提前释放。
   - 新增 `foreign_reports` / `forced_releases` 计数与限流日志 `source:foreign`，
     心跳里可看到「有异源报告被挡住」和「强制释放发生过」。
-  - `AGENT_BUILD` 升至 `2026-11-12.device-source`，让宿主里的旧 agent 能被识别/
-    自动刷新，避免继续跑旧逻辑。
+  - `AGENT_BUILD` 升至 `2026-11-12.device-source`；与并行 voice-key clear-only
+    修复合并后当前为 `2026-11-12.voice-key-clear`，旧 agent 靠代次识别/自动刷新，
+    避免继续跑旧逻辑。
 - 验证：
-  - `node hardware/RC003/helper/agent/agent_logic_test.mjs`：**86/86 passed**。
-    新增来源隔离组覆盖：异源空报告不得清空按下状态、异源按键不得冒充、只有同源
-    空报告产生 UP、同源释放后异源可接管、活动来源关闭补发 UP、同一设备多句柄
-    只在最后一个关闭时释放、语音键释放后来源归属不永久占用、强制释放清空
+  - `node hardware/RC003/helper/agent/agent_logic_test.mjs`：**95/95 passed**
+    （含本变更的来源隔离组）。覆盖：异源空报告不得清空按下状态、异源按键不得冒充、
+    只有同源空报告产生 UP、同源释放后异源可接管、活动来源关闭补发 UP、同一设备
+    多句柄只在最后一个关闭时释放、语音键释放后来源归属不永久占用、强制释放清空
     `synthHeld`。
   - 阳性对照：用本次修改前的 `rc003_agent.js` 跑同一测试，来源隔离组按预期失败
     （旧 agent 没有来源概念），证明测试有分辨力。
-  - 助手 `cargo test`：**84 passed / 0 failed**；`sayall-helper.exe --selftest`
+  - 助手 `cargo test`：**86 passed / 0 failed**；`sayall-helper.exe --selftest`
     退出码 0，内嵌 agent 与源码 SHA-256 一致。
   - `cargo fmt --all -- --check`：passed。
   - **真机共享宿主验证：deferred**。需要 RC003（以及 RC001 各一轮）与另一台 HID

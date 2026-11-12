@@ -345,13 +345,15 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
   “另一台设备的空报告结束遥控器长按”，**不改变**上面那条 usage 门禁的残留风险：
   遥控器空闲时，另一台设备若先按到同一 usage，仍可能成为活动来源。真正按
   VID/PID/实例只认 RC003 需要把设备身份从应用/助手传到 agent，留在产品决策。
-  回归：`agent_logic_test.mjs` 86/86；修改前 agent 的来源隔离组按预期红。
+  回归：`agent_logic_test.mjs` 95/95（含 voice-key clear-only 并行修复）；修改前
+  agent 的来源隔离组按预期红。
   真机共享宿主复验仍为 **deferred**。详见
   [Bugs/2026-11-12-rc003-shared-host-foreign-release.md](../Bugs/2026-11-12-rc003-shared-host-foreign-release.md)。
 - **真机验收（deferred，随下一版包）**：保持共享宿主（RC003 + 另一台 HID 设备），
   升级后预期 `[AGENT-STALE]` → `[AGENT-REFRESH] mode=shared_device_node phase=requested`
   → `[HOST] action=recover_device_node` / `new_host_ready` →
-  `[AGENT-REFRESH] terminal_result=passed`，新 `[HELLO]` 的 `build=2026-11-12.device-source`；
+  `[AGENT-REFRESH] terminal_result=passed`，新 `[HELLO]` 的
+  `build=2026-11-12.voice-key-clear`（与并行 voice-key 修复合并后的当前代次）；
   另一台 BLE 设备不断连；按住遥控器键期间另一台设备发空报告，长按持续。失败时记录
   `[AGENT-REFRESH] ... stage=recover_device_node|inject`，不得宣称修复。
 
