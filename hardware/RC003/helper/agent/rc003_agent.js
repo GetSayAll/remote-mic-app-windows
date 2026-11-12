@@ -56,7 +56,8 @@
  *   5. 租约有效（助手续约未过期）
  *   6. mode == 'clear'（观察模式一个字节都不写）
  *   7. 累计清键次数 < MAX_CLEARS
- *   8. usage ∈ clearUsages（产品目标来自主程序；验收时可能多一个哨兵键）
+ *   8. usage ∈ clearUsages（产品目标来自主程序；验收时可能多一个哨兵键；
+ *      语音键 0x003E 是产品的 clear-only 目标，不上报边沿）
  * 只写偏移 3..8，绝不触碰 report_id / modifiers / reserved。
  *
  * ⚠️ 一个必须说明的可观测性缺口（2026-09-23）
@@ -87,20 +88,26 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-12.device-source';
+var AGENT_BUILD = '2026-11-12.voice-key-clear';
 
 var TARGET_IOCTL = 0x80018483;
+/* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
+   目标由 targets.clear 下发，绝不能在 report 里。 */
 var TARGET_USAGES = [
   0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051,
   0x0052, 0x0065, 0x0066, 0x007F, 0x0080, 0x0081
 ];
 
 /* 语音键热键合成（豆包支持，2026-09-28 白名单）。
- * from 只允许语音键 0x003E：ATVV 会话走 BLE 协议层不经过它，且它在
- * Windows 输入流本来就未映射——槽内替换零损失。
+ * from 只允许语音键 0x003E：ATVV 会话走 BLE 协议层不经过它；它在 Windows
+ * 键盘层是 F5，产品路径默认作为 clear-only 目标清掉（2026-11-12），只有
+ * 合成配置存在时才改为槽内替换。
  * to 只允许已实测映射的合成 usage（USAGE_TO_VK，见探针 wudf_ioctl_synth.py）：
  * 0x00E6 实测产出 VK_RMENU(0xA5)、0x00E2 实测产出 VK_LMENU(0xA4)。
  * 未实测的 usage 一律拒绝——替换 usage 必须逐键实测。 */
+/* 语音键 usage：产品路径作为 clear-only 目标下发（不进入 report，不产生映射边沿），
+   确保遥控器原生 F5 不会漏到桌面/前台应用；合成配置存在时仍优先槽内替换。 */
+var VOICE_KEY_HID_USAGE = 0x003E;
 var SYNTH_FROM_WHITELIST = [0x003E];
 var SYNTH_TO_WHITELIST = [0x00E6, 0x00E2];
 var TARGET_NAMES = {
@@ -197,8 +204,11 @@ var tReady = Date.now();
 var stat = {
   ioctl_calls: 0,
   target_hits: 0,
-  /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。 */
+  /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。
+     语音键 0x003E 是产品路径的 clear-only 目标，不算哨兵键。 */
   canary_hits: 0,
+  /* 语音键 clear-only 命中数：证明 F5 在报告层被清掉（不是 synth 替换）。 */
+  voice_clear_hits: 0,
   clears_ok: 0,
   clears_fail: 0,
   restores_ok: 0,
@@ -487,7 +497,8 @@ function handleCommand(line) {
   }
   /* 下发动态捕获范围。两条护栏：report 只能来自语义按键白名单；clear 必须覆盖
      report，避免出现“已经上报但没有清掉原生边沿”的双触发。空集合是关闭增强捕获
-     时的 fail-open 配置。clear 仍可额外带哨兵键供人工验收。 */
+     时的 fail-open 配置。clear 仍可额外带哨兵键供人工验收，以及语音键 0x003E
+     作为产品 clear-only 目标（它不进 report，因此不产生映射边沿）。 */
   if (cmd.type === 'targets') {
     var rep = usageArrayOf(cmd.report);
     var clr = usageArrayOf(cmd.clear);
@@ -972,6 +983,9 @@ function installHook() {
         /* 哨兵键命中单独计数：它不上报边沿，若混进 target_hits，
            "target_hits × 2 == edges_sent"这条交叉校验就再也读不懂了。 */
         for (var ci = 0; ci < toClear.length; ci++) {
+          /* 语音键是产品 clear-only 目标，不是哨兵键；计入 canary 会让
+             “哨兵键是否生效”这一诊断判据被每次语音按压污染。 */
+          if (toClear[ci] === VOICE_KEY_HID_USAGE) continue;
           if (reportUsages.indexOf(toClear[ci]) < 0) { stat.canary_hits++; break; }
         }
 
@@ -1006,6 +1020,7 @@ function installHook() {
         var patched = bytes.slice();
         var changed = false;
         var synthChanged = false;
+        var voiceClearChanged = false;
         for (var i = 0; i < 3; i++) {
           var o = 3 + i * 2;
           var u = bytes[o] | (bytes[o + 1] << 8);
@@ -1022,6 +1037,7 @@ function installHook() {
           patched[o] = 0;
           patched[o + 1] = 0;
           changed = true;
+          if (u === VOICE_KEY_HID_USAGE) voiceClearChanged = true;
         }
         if (!changed) { if (synthSeen) synthTrace('skip reason=nochange'); return; }
 
@@ -1038,6 +1054,13 @@ function installHook() {
             stat.synth_hits++;
             synthTrace('replace ok to=0x' + synthTo.toString(16));
             synthHeld = true;
+          }
+          if (voiceClearChanged) {
+            stat.voice_clear_hits++;
+            /* 只记首条与每 20 条：证明 clear-only 路径真的生效，又不刷爆日志。 */
+            if (stat.voice_clear_hits === 1 || stat.voice_clear_hits % 20 === 0) {
+              logLine('voice:clear n=' + stat.voice_clear_hits + ' mode=clear');
+            }
           }
           this.cleared = true;
         } else {
@@ -1176,6 +1199,7 @@ function heartbeat() {
       ioctl_calls: stat.ioctl_calls,
       target_hits: stat.target_hits,
       canary_hits: stat.canary_hits,
+      voice_clear_hits: stat.voice_clear_hits,
       clears_ok: stat.clears_ok,
       clears_fail: stat.clears_fail,
       restores_ok: stat.restores_ok,

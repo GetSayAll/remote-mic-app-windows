@@ -350,7 +350,8 @@ mod imp {
     /// 合成命令的 from 恒为它，桥（S 行）只下发目标 usage。
     const VOICE_KEY_HID_USAGE: u16 = 0x003E;
 
-    /// agent 允许接管的全部语义按键白名单（语音键 0x003E 明确排除）。
+    /// agent 允许**上报**的语义按键白名单（语音键 0x003E 只作为 clear-only
+    /// 目标由 [`clear_with_voice_key`] 追加，不在此表；否则会产生映射边沿）。
     const TARGET_USAGES: [u16; 13] = [
         0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F,
         0x0080, 0x0081,
@@ -2341,6 +2342,25 @@ mod imp {
             .map(|u| u.to_string())
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// 产品路径的清空集合：上报集合 ∪ 语音键（clear-only）。
+    ///
+    /// 语音键 0x003E 在 HID 键盘层是 F5；它不进入 `reportUsages`（不产生映射
+    /// 边沿），但必须在报告层被清掉，否则桌面有焦点时会刷新图标、前台应用会
+    /// 收到 F5。配置了 synth 时 agent 仍优先做槽内替换，清空集合不会覆盖它。
+    ///
+    /// **空上报集合 = 增强捕获关闭**：此时必须返回空 clear（完全恢复原生，
+    /// 不接管语音键），否则用户关掉「全按键支持」后仍会被吞掉 F5。
+    fn clear_with_voice_key(usages: &[u16]) -> Vec<u16> {
+        let mut clear = usages.to_vec();
+        if clear.is_empty() {
+            return clear;
+        }
+        if !clear.contains(&VOICE_KEY_HID_USAGE) {
+            clear.push(VOICE_KEY_HID_USAGE);
+        }
+        clear
     }
 
     /// 令牌用进程内时间 + 计数器拼出来的伪随机值。
@@ -7136,7 +7156,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         logger.line(
             "已武装。主程序会动态下发已配置按键；[CONFIG] / [HB] 的 report_usages 是当前实际目标。",
         );
-        logger.line("未列入 report_usages 的按键保持 Windows 原生行为；语音键不参与本链路。");
+        logger.line("未列入 report_usages 的按键保持 Windows 原生行为；语音键只进入 clear 集合（清掉 F5、不上报边沿），合成配置存在时仍优先槽内替换。");
         logger.line(&format!(
             "心跳（[HB]）只在状态变化或每 30 秒记一条（避免把日志刷爆）；Ctrl+C 或直接关掉本窗口结束\
              （会先给 agent 发 disarm；即使来不及，agent 也会在 {LEASE_MS} ms 租约到期后自行停止清键）。\
@@ -7826,10 +7846,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         targets: &BridgeCaptureTargets,
         synth: Option<(u16, u16)>,
     ) -> io::Result<()> {
-        // 清空集合 = 上报集合 ∪ 哨兵键。哨兵键把"清空到底有没有生效"变成外部可观测的实验
+        // 清空集合 = 上报集合 ∪ 语音键（clear-only） ∪ 哨兵键。语音键不产生映射边沿，
+        // 但必须清掉原生 F5；哨兵键把"清空到底有没有生效"变成外部可观测的实验
         // （详见 `--canary-usage` 的说明）。产品路径下目标来自主程序；无主程序时由
         // 调用方显式传入历史三键默认值，agent 自身默认保持空集合（fail-open）。
         let mut clear = targets.usages.clone();
+        // 只在增强捕获开启（report 非空）时追加语音键；关闭时必须保持空 clear。
+        if !clear.is_empty() {
+            clear = clear_with_voice_key(&clear);
+        }
         for usage in canary {
             if !clear.contains(usage) {
                 clear.push(*usage);
@@ -7951,11 +7976,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         token: &str,
         targets: &BridgeCaptureTargets,
     ) -> io::Result<()> {
+        let clear = clear_with_voice_key(&targets.usages);
         let line = format!(
             "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
             targets.generation,
             usages_json(&targets.usages),
-            usages_json(&targets.usages)
+            usages_json(&clear)
         );
         write_socket_line(stream, &line)
     }
@@ -9583,6 +9609,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
         );
 
+        // 23d) 语音键 clear-only（2026-11-12 报障：桌面图标被 F5 刷新）。
+        //      语音键只能进 clear 集合，不能进 report；canary 统计必须排除它。
+        check(
+            "内嵌 agent：语音键 clear-only 与 canary 排除",
+            AGENT_JS.contains("var VOICE_KEY_HID_USAGE = 0x003E;")
+                && AGENT_JS.contains("voice_clear_hits")
+                && AGENT_JS.contains("if (toClear[ci] === VOICE_KEY_HID_USAGE) continue;")
+                && AGENT_JS.contains("voice:clear n="),
+            format!(
+                "has_voice_constant={} has_canary_skip={}",
+                AGENT_JS.contains("var VOICE_KEY_HID_USAGE = 0x003E;"),
+                AGENT_JS.contains("if (toClear[ci] === VOICE_KEY_HID_USAGE) continue;"),
+            ),
+        );
+
         // 23c) agent 代次必须与内嵌脚本一致，否则 [AGENT-STALE] 形同虚设：
         //      hello 里报的代次永远对不上，或者反过来永远对得上（两边都忘了改）。
         check(
@@ -10235,7 +10276,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-11-12.device-source";
+    const AGENT_BUILD: &str = "2026-11-12.voice-key-clear";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -11308,7 +11349,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert_eq!(VOICE_KEY_HID_USAGE, 0x003E);
             assert!(
                 !TARGET_USAGES.contains(&VOICE_KEY_HID_USAGE),
-                "语音键不能进接管白名单：ATVV 会话走 BLE 层，且合成命令的 from 就是它"
+                "语音键不能进 report 白名单：ATVV 会话走 BLE 层，且合成命令的 from 就是它；它只作为 clear-only 目标"
             );
         }
 
@@ -11335,6 +11376,34 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(message.contains("kind=ConnectionRefused"));
             assert!(message.contains("os=Some(10061)"));
             assert!(message.contains("elapsed_ms=37"));
+        }
+    }
+
+    #[cfg(test)]
+    mod voice_key_clear_tests {
+        use super::*;
+
+        #[test]
+        fn clear_set_includes_voice_key_without_duplicates() {
+            // 空上报集合 = 增强捕获关闭：不接管语音键，完全恢复原生 F5。
+            assert_eq!(clear_with_voice_key(&[]), Vec::<u16>::new());
+            assert_eq!(
+                clear_with_voice_key(&[0x00F1, 0x0080, 0x0081]),
+                vec![0x00F1, 0x0080, 0x0081, VOICE_KEY_HID_USAGE]
+            );
+            let already_present = vec![0x00F1, VOICE_KEY_HID_USAGE, 0x0080];
+            assert_eq!(clear_with_voice_key(&already_present), already_present);
+        }
+
+        #[test]
+        fn dynamic_report_set_never_contains_voice_key() {
+            // 产品路径：report 只含映射键，clear 额外追加语音键。若把 0x3E
+            // 误加进 report，会带来一次假的映射边沿（且与 ATVV 语音会话重叠）。
+            let report = vec![0x0028, 0x0066];
+            let clear = clear_with_voice_key(&report);
+            assert!(clear.contains(&VOICE_KEY_HID_USAGE));
+            assert!(!report.contains(&VOICE_KEY_HID_USAGE));
+            assert!(clear.starts_with(&report));
         }
     }
 

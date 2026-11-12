@@ -627,6 +627,70 @@ if (typeof ctx.sourceKeyOf === 'function') {
   ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 11, report: [], clear: [] }));
 }
 
+/* -------- 14. 语音键 clear-only：F5 必须在报告层被清掉，不能漏到桌面（2026-11-12 报障） -------- */
+{
+  await freshStubConnection();
+  ctx.handleCommand('{"type":"renew"}');
+  ctx.handleCommand('{"type":"mode","clear":true}');
+  ctx.handleCommand('{"type":"gate","on":false}');
+  ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 12, report: [0x00f1], clear: [0x00f1, 0x003e],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  const beforeCanary = ctx.stat.canary_hits;
+  const beforeTarget = ctx.stat.target_hits;
+  const beforeVoiceClear = ctx.stat.voice_clear_hits || 0;
+  const plainVoice = press(0x003e);
+  check('语音键 clear-only：槽被清零（F5 不交给 Windows）',
+    plainVoice.ptr.buf[3] === 0 && plainVoice.ptr.buf[4] === 0 && plainVoice.self.cleared === true,
+    `buf3=0x${plainVoice.ptr.buf[3].toString(16)} cleared=${plainVoice.self.cleared}`);
+  check('语音键 clear-only：不计入 canary_hits（不是哨兵键）',
+    ctx.stat.canary_hits === beforeCanary,
+    `canary=${ctx.stat.canary_hits} before=${beforeCanary}`);
+  check('语音键 clear-only：voice_clear_hits +1',
+    (ctx.stat.voice_clear_hits || 0) === beforeVoiceClear + 1,
+    `voice_clear=${ctx.stat.voice_clear_hits}`);
+  check('语音键 clear-only：不计入 target_hits（不产生映射边沿）',
+    ctx.stat.target_hits === beforeTarget);
+
+  /* 合成配置存在时，槽内替换优先于清空：语音键仍变成 RightAlt，且不污染 canary。 */
+  ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003e, to: 0x00e6 }));
+  const beforeSynthCanary = ctx.stat.canary_hits;
+  const beforeSynthVoiceClear = ctx.stat.voice_clear_hits || 0;
+  const synthVoice = press(0x003e);
+  check('语音键 synth + clear-only：仍替换为 0x00E6',
+    synthVoice.ptr.buf[3] === 0xe6 && synthVoice.ptr.buf[4] === 0x00,
+    `buf3=0x${synthVoice.ptr.buf[3].toString(16)}`);
+  check('语音键 synth + clear-only：不计入 canary_hits',
+    ctx.stat.canary_hits === beforeSynthCanary);
+  check('语音键 synth + clear-only：不重复计 voice_clear_hits',
+    (ctx.stat.voice_clear_hits || 0) === beforeSynthVoiceClear);
+  ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 13, report: [], clear: [] }));
+}
+
+/* -------- 15. 增强捕获关闭：语音键必须恢复原生（不能把 clear-only 变成常驻吞键） -------- */
+{
+  ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 14, report: [], clear: [],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  const beforeVoiceClear = ctx.stat.voice_clear_hits || 0;
+  const { ptr, self } = press(0x003e);
+  check('增强捕获关闭：语音键不被清空（F5 恢复原生）',
+    ptr.buf[3] === 0x3e && !self.cleared,
+    `buf3=0x${ptr.buf[3].toString(16)} cleared=${self.cleared}`);
+  check('增强捕获关闭：voice_clear_hits 不增长',
+    (ctx.stat.voice_clear_hits || 0) === beforeVoiceClear,
+    `voice_clear=${ctx.stat.voice_clear_hits}`);
+}
+
 const failed = results.filter((r) => !r.ok);
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '  -- ' + r.detail : ''}`);

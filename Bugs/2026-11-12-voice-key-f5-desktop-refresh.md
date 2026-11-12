@@ -1,0 +1,21 @@
+# 语音键的 F5 漏到桌面，刷新桌面图标
+
+- 发现日期：2026-11-12
+- 状态：等待真机验证
+- 影响范围：RC003（小米蓝牙语音遥控器 2 Pro）；「全按键支持」开启；Windows 版本与 App 版本未知（用户视频，无诊断日志）
+- 功能点：RC003 增强捕获 / 语音键 F5 抑制
+- 现象：按遥控器语音键时，桌面图标刷新；用户描述「按了之后好像刷新一样」
+- 复现条件：桌面/Explorer 有焦点，按遥控器语音键；桌面图标像按了 F5 一样刷新
+- 正常预期：语音键只驱动 ATVV 语音会话和输入法注入，不应向 Windows 交付 F5
+- 证据：用户视频（未提供诊断日志）；代码路径见下。未把任何本机日志当作该视频的证据
+- 根因（代码缺口已确认；报障用户的实际泄漏路径待诊断日志确认）：语音键在 HID 键盘层是 F5。helper 以前只把已映射按键放进 report 集合，语音键 `0x003E` 不在 clear 集合，因此 F5 由键盘路径继续下发；LL 抑制器只在 ATVV 会话、链路建立窗口或 Raw Input 归因后武装，首个 F5 只等 60ms，等不到就 fail-open 放行。桌面有焦点时，放行的 F5 就是 Explorer 的刷新快捷键。报障用户是否开了「全按键支持」、泄漏发生在报告层还是 LL 钩子，仍需 TA 的诊断日志或受控复现确认
+- 修复：
+  - `hardware/RC003/helper/src/main.rs`：新增 `clear_with_voice_key`，在增强捕获开启（report 非空）时把 `0x003E` 追加到 `targets.clear`；report 集合保持不变；增强捕获关闭时空 clear，恢复原生
+  - `hardware/RC003/helper/agent/rc003_agent.js`：语音键作为 clear-only 目标被清空；synth 配置存在时仍优先槽内替换；canary 统计排除语音键；新增 `voice_clear_hits` 和首条/每 20 条 `voice:clear` 日志；AGENT_BUILD 升为 `2026-11-12.voice-key-clear`
+- 验证：
+  - `node hardware/RC003/helper/agent/agent_logic_test.mjs`：93/93 passed（包含语音键 clear-only、canary 排除、synth 优先三组用例）
+  - `cargo test --manifest-path hardware/RC003/helper/Cargo.toml`：85 passed / 0 failed
+  - `cargo fmt --manifest-path hardware/RC003/helper/Cargo.toml -- --check`：passed
+  - RC003 真机：deferred（需要桌面焦点、语音键、物理 F5、微信/豆包输入法四项一起验收）
+- 边界：增强捕获关闭时仍走旧的 LL 抑制器 fail-open 路径；若用户未开「全按键支持」，本次报告层修复不覆盖
+- 隐私检查：未包含个人路径、设备身份、语音内容或凭据
