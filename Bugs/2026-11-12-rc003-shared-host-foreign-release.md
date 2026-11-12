@@ -1,0 +1,67 @@
+# 共享宿主内异源空报告提前结束遥控器长按
+
+- 发现日期：2026-11-12
+- 状态：已修复，等待真机验证
+- 影响范围：SayAll Windows 1.9.x；开启「全按键支持」；RC003（RC001 同链路路径未验证）；
+  承载遥控器的 `WUDFHost.exe` 里还有另一台 HID 设备（蓝牙键盘、带 HID 的散热器等）
+- 功能点：增强捕获 → HID 宿主报告层 → 边沿投递
+- 现象：按住遥控器已映射键时，长按 / 按住连发被提前结束；同一宿主里的另一台设备
+  按普通键或发出空报告时更容易触发。
+- 复现条件：
+  1. 开启「全按键支持」，遥控器与另一台 HID 设备共用同一个 `WUDFHost.exe`；
+  2. 按住遥控器一个已映射键；
+  3. 另一台设备在按住期间发出一份 9 字节、`report_id=0x01` 的空报告（或它自己的
+     普通按键报告）。
+- 正常预期：只有产生当前 DOWN 的来源可以产生 UP；另一台设备的报告不得改变遥控器
+  的按下状态，也不得被当成遥控器的边沿上报。
+- 证据：
+  - `hardware/RC003/helper/agent/rc003_agent.js`：`pressed` 原先是**全宿主共享**的
+    单一对象；`emitEdgesIfChanged(found)` 对**每一份**形状匹配的报告调用，而且早于
+    `shouldTouchReport` 门禁；`onEnter` 没有读取 `args[0]`（FileHandle）来区分来源。
+    因此异源空报告会把 `pressed` 清空并发出 UP。
+  - `Testing/WindowsRC003EnhancedCapture.md` §4.1 已把「usage 门禁 ≠ 设备门禁，
+    agent 不记录报告来自哪个设备/句柄」登记为未消除的残留风险；本次现场把它变成了
+    可复现的用户症状。
+  - 用户现场（2026-11-12，QQ 群反馈）：遥控器与另一台蓝牙设备共用驱动宿主；
+    用户判断是「空报告 / 释放报告」结束了长按，并建议按设备来源隔离。
+- 根因：报告层只按 usage 判断「这份报告要不要处理」，没有把「哪个设备产生了这份
+  报告」带进状态机。释放是**状态语义**：异源的空报告在协议上等同于「当前按下的键
+  消失了」，于是被直接翻译成 UP。
+- 修复（`hardware/RC003/helper/agent/rc003_agent.js`）：
+  - 新增 `activeSource`：由产生当前 DOWN 的来源持有；活动来源之外的报告在
+    `onEnter` 中早退，一个字节都不改写，也不产生边沿（保持该设备的原生行为）。
+  - 来源键优先用 `NtQueryObject(ObjectNameInformation)` 返回的设备对象名；查询
+    失败退回 FileHandle 字符串，仍然能隔离不同设备。设备对象名不进日志。
+  - 活动来源的最后一个句柄被 `NtClose`（设备拔掉/重连）时补发一次 UP，避免粘键；
+    同一设备对象还有其它句柄（不同 TLC）时不会提前释放。
+  - 新增 `foreign_reports` / `forced_releases` 计数与限流日志 `source:foreign`，
+    心跳里可看到「有异源报告被挡住」和「强制释放发生过」。
+  - `AGENT_BUILD` 升至 `2026-11-12.device-source`，让宿主里的旧 agent 能被识别/
+    自动刷新，避免继续跑旧逻辑。
+- 验证：
+  - `node hardware/RC003/helper/agent/agent_logic_test.mjs`：**86/86 passed**。
+    新增来源隔离组覆盖：异源空报告不得清空按下状态、异源按键不得冒充、只有同源
+    空报告产生 UP、同源释放后异源可接管、活动来源关闭补发 UP、同一设备多句柄
+    只在最后一个关闭时释放、语音键释放后来源归属不永久占用、强制释放清空
+    `synthHeld`。
+  - 阳性对照：用本次修改前的 `rc003_agent.js` 跑同一测试，来源隔离组按预期失败
+    （旧 agent 没有来源概念），证明测试有分辨力。
+  - 助手 `cargo test`：**84 passed / 0 failed**；`sayall-helper.exe --selftest`
+    退出码 0，内嵌 agent 与源码 SHA-256 一致。
+  - `cargo fmt --all -- --check`：passed。
+  - **真机共享宿主验证：deferred**。需要 RC003（以及 RC001 各一轮）与另一台 HID
+    设备同宿主，按住遥控器键时让另一台设备发空报告/普通键，确认长按不被提前结束，
+    且异源按键保持原生行为。
+  - **精确设备门禁仍未做**：当前保证的是「释放必须来自产生 DOWN 的那台设备」，
+    不是「只接受小米遥控器」。遥控器空闲时，另一台设备若先按到同一 usage，仍可能
+    成为活动来源；真正按 VID/PID/实例只认 RC003 需要把设备身份从应用/助手传到
+    agent，留待产品决策与下一轮真机验证。
+  - **共享宿主旧代次刷新（2026-11-12 评审后补）**：不再只跳过。`stale_refresh_route`
+    分流：独占宿主走原有“结束宿主”路径；共享宿主且恰好一个 RC003 成员走
+    `recover_shared_host_device_node`（只 remove/scan RC003 节点，**不结束共享宿主**），
+    成功对新宿主注入。日志为 `[AGENT-REFRESH] mode=shared_device_node phase=requested`
+    → `[HOST] action=recover_device_node` → `action=new_host_ready` → `terminal_result=passed`；
+    失败落 `stage=recover_device_node|inject`。**该路径尚未真机验证**；失败时仍需
+    宿主重建/设备重连。不能把“包里有新 agent”当成“用户现场已生效”。
+- 隐私检查：日志与心跳只增加计数（`foreign_reports` / `forced_releases`），不含蓝牙
+  地址、设备实例、设备对象名或报告内容。
