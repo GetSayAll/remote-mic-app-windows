@@ -73,7 +73,8 @@
 ## 2026-09-27 全按键动态目标增量验收
 
 - 捕获集合 = “全按键支持已开启”时**恒含三键**（返回 / 音量+ / 音量−；清空它们零副作用——这三个 usage 对 Windows 本就不可见）∪ 当前至少配置一个动作的按键；其余未映射键不清空，保留 Windows 原始行为（2026-10-13 修订，见下节）。
-- 语音键 usage `0x003E` 永远不进入目标集合。
+- 语音键 usage `0x003E` **不进入 report 目标集合**；产品路径把它作为 clear-only 目标下发（清掉 F5、不上报边沿），有合成配置时仍优先槽内替换。增强捕获关闭时 clear 集合为空，语音键恢复原生。
+- **桌面焦点回归（2026-11-12）**：增强捕获开启时，先点桌面让 Explorer 获得焦点，再按遥控器语音键 → 桌面图标不得刷新；等 1 秒以上（避开语音会话的 250ms 宽限），按物理 F5 → 桌面图标应刷新（证明只清遥控器语音键，不误吞物理键）。`[HB]` 的 `voice_clear_hits` 应增长；配置 synth 时 `synth_hits` 增长、`voice_clear_hits` 不增长。真机结果 `deferred`。
 - 主程序只在收到相同 `generation + usages` 的 agent ACK 后撤掉该键的旧键盘门控；ACK 超时、Helper 断开、关闭功能或删除映射必须恢复旧逻辑。
 - 自动化判据：`agent_logic_test.mjs` 对 13 个 usage 逐键验证报告槽被清零，并验证空目标恢复原报告；`rc003_bridge` 真 TCP 用例验证 `OK/T/O`、动态主页边沿和关闭时撤销所有权。
 - 真机判据（RC001、RC003 分别执行）：为确定、主页、TV、四方向、菜单、电源、静音和三键逐个配置可观察动作；开启时每键只触发映射动作且物理键盘同名键完全原生，关闭后除返回/音量±外全部沿用旧逻辑。覆盖按下中关闭、Helper 强杀、1.5s 所有权超时、冷态首按与连续按压。
@@ -193,9 +194,15 @@ if (found.length === 0) return;      // ← 只含哨兵键的报告在这里就
 接管旧 tap——握手正常、命令照发、日志漂亮，只是行为还是旧的。所以新增了 `AGENT_BUILD`
 代次：接管到旧实例时日志会打 `[AGENT-STALE] running=… embedded=…`。
 **看到这一条，就必须先让宿主换新（重启机器最稳），再重跑验收，否则又是白跑一轮。**
-（2026-10-14 起助手会自动换代：同一"旧代→内嵌代"组合只自动刷新一次、共享宿主
-不刷新——`[AGENT-REFRESH]` 以 `requested`+`completed` 成对出现，跳过时带
-`terminal_result=skipped reason=shared_host|host_scan_failed|already_attempted_once`。）
+（2026-10-14 起助手会自动换代：同一"旧代→内嵌代"组合只自动刷新一次。
+`[AGENT-REFRESH]` 以 `requested`+`completed` 成对出现，跳过时带
+`terminal_result=skipped reason=host_scan_failed|already_attempted_once|rc003_members_not_one`。
+2026-11-12 起共享宿主不再只跳过：恰好一个 RC003 成员时走
+`recover_shared_host_device_node`——只 remove/scan RC003 设备节点，**不结束共享宿主**；
+日志 `mode=shared_device_node` → `[HOST] action=recover_device_node` →
+`new_host_ready` → `terminal_result=passed`。设备节点恢复自身的跳过原因是
+`shared_host_no_gadget|no_instance|bridge_down|cooldown`。**该路径真机 deferred**；
+失败时仍需宿主重建/设备重连。）
 
 **修复已在真机上验证（2026-09-26 21:48，见 §3.1）**：`canary_hits` 会随主页键增长、
 `clears_ok` 从 0 涨到 14，同一轮里"未武装 → 武装"的对照闭合，E2 判据成立。
@@ -341,6 +348,12 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
   回归：`agent_logic_test.mjs` 86/86；修改前 agent 的来源隔离组按预期红。
   真机共享宿主复验仍为 **deferred**。详见
   [Bugs/2026-11-12-rc003-shared-host-foreign-release.md](../Bugs/2026-11-12-rc003-shared-host-foreign-release.md)。
+- **真机验收（deferred，随下一版包）**：保持共享宿主（RC003 + 另一台 HID 设备），
+  升级后预期 `[AGENT-STALE]` → `[AGENT-REFRESH] mode=shared_device_node phase=requested`
+  → `[HOST] action=recover_device_node` / `new_host_ready` →
+  `[AGENT-REFRESH] terminal_result=passed`，新 `[HELLO]` 的 `build=2026-11-12.device-source`；
+  另一台 BLE 设备不断连；按住遥控器键期间另一台设备发空报告，长按持续。失败时记录
+  `[AGENT-REFRESH] ... stage=recover_device_node|inject`，不得宣称修复。
 
 ### §4.2 边沿不缺不重 —— 决定性一轮（2026-09-26 23:14:35，产品路径 / `canary=none` / 每键只按一次）
 
@@ -533,7 +546,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[HELLO]` | `auth` `pid` `agent` **`build`（脚本代次）** `mode` `restore` `lease_ms` |
 | `[REJECT]` | `reason=token_mismatch\|host_pid_mismatch` `total` `agent_pid` `target_pid`（折叠：前 3 条 + 每 30 条一条；`host_pid_mismatch` = 另一支同型号遥控器宿主里的残留 agent 在重连，见 §10） |
 | `[AGENT-STALE]` | `running` `embedded` `host_pid` —— **出现即表示本轮接管的是旧脚本，新逻辑不会生效**（见 §0.1） |
-| `[AGENT-REFRESH]` | `phase=requested\|completed`；completed 可带 `terminal_result=skipped reason=shared_host\|host_scan_failed\|already_attempted_once` —— 同一代次组合只自动刷新一次、共享宿主不刷新（2026-10-14） |
+| `[AGENT-REFRESH]` | `phase=requested\|completed`、`mode=shared_device_node`（共享宿主）；completed 可带 `terminal_result=skipped reason=host_scan_failed\|already_attempted_once\|rc003_members_not_one\|shared_host_no_gadget\|shared_host_no_instance\|shared_host_bridge_down\|shared_host_cooldown`，失败带 `stage=recover_device_node\|inject` —— 同一代次组合只自动刷新一次；共享宿主只重建 RC003 节点、不结束宿主（2026-11-12） |
 | `[TOKEN]` | `source=file\|generated\|explicit` |
 | `[PREP]` | `dll` `action=reuse\|overwrite\|skip_copy_attaching_existing_tap` `reason` |
 | `[TAP]` / `[ATTACH]` | 宿主内已有 tap 的路径 / 接管决定（`skip_injection`） |

@@ -1042,12 +1042,35 @@ mod imp {
 
     /// 纯决策（可自检）：stale 自动刷新前的独占安全闸（2026-10-14）。
     ///
-    /// 只对"独自承载 RC003"的宿主刷新：共享宿主同时承载用户别的 BLE 设备，
-    /// 结束它会把它们一起弄掉——判据与 `should_restart_host_for_clean_inject`
-    /// 的 members 闸门同源。命不中时跳过且**不写尝试记录**——宿主恢复独占后
-    /// 仍允许该组合的首次自动刷新。
+    /// 只对"独自承载 RC003"的宿主走**结束宿主**刷新：共享宿主同时承载用户别的
+    /// BLE 设备，结束它会把它们一起弄掉——判据与 `should_restart_host_for_clean_inject`
+    /// 的 members 闸门同源。共享宿主改走 `stale_refresh_route` 的设备节点恢复分支，
+    /// **绝不**经过本函数。
     fn should_refresh_stale_agent_host(members: usize, rc003_members: usize) -> bool {
         members == 1 && rc003_members == 1
+    }
+
+    /// 旧代次 agent 的刷新路线（纯决策，单测覆盖）。
+    ///
+    /// - 独占 RC003：结束宿主 → 等新宿主 → 重新注入（既有路径）；
+    /// - 共享宿主且恰好一个 RC003 成员：**不结束宿主**，只移除/重扫 RC003 设备节点，
+    ///   由系统决定是否重建宿主（2026-10-21 真机验证过该动作不误伤鼠标等其它设备）；
+    /// - 其它情况（0 个或多个 RC003 成员）：不猜、不动手，落日志等人工/下一轮。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum StaleRefreshRoute {
+        ExclusiveHost,
+        SharedHostDeviceNode,
+        Skip,
+    }
+
+    fn stale_refresh_route(members: usize, rc003_members: usize) -> StaleRefreshRoute {
+        if should_refresh_stale_agent_host(members, rc003_members) {
+            StaleRefreshRoute::ExclusiveHost
+        } else if members > 1 && rc003_members == 1 {
+            StaleRefreshRoute::SharedHostDeviceNode
+        } else {
+            StaleRefreshRoute::Skip
+        }
     }
 
     fn now_unix() -> u64 {
@@ -1133,6 +1156,24 @@ mod imp {
         Some((members.len(), rc003_members))
     }
 
+    /// 该宿主里目标 RC003 的完整设备实例 ID。**只用于设备节点恢复，绝不进日志**
+    /// （含 HID 路径，属隐私红线）。
+    fn host_rc003_instance_id(pid: u32) -> Option<String> {
+        let scan = enum_hosts().ok()?;
+        scan.entries
+            .iter()
+            .find(|entry| entry.pid == pid && entry.is_rc003)
+            .and_then(|entry| entry.rc003_instance_id.clone())
+    }
+
+    /// 宿主里我们这一代 Gadget 的模块数。共享宿主刷新前用它做防 pid 复用/误伤闸门
+    /// （与 `[ATTACH]` 的 `gadget_maps` 同源）；扫描失败按 0 处理，只跳过不动手。
+    fn host_gadget_maps(pid: u32) -> usize {
+        enum_modules(pid)
+            .map(|modules| resident_taps(&modules).len())
+            .unwrap_or(0)
+    }
+
     /// 结束旧宿主后"新宿主"的选择判据（纯函数，单测 + 自检覆盖）。
     ///
     /// 2026-10-14 现场：两支同型号遥控器同时在线时，若只按"任一新 RC003 宿主"选，可能挑到
@@ -1154,7 +1195,12 @@ mod imp {
     /// 2026-10-14 加固（外部报障"设备约每小时中断一次"复核）：
     /// - **独占闸门**：共享宿主一律跳过（不写尝试记录，宿主恢复独占后仍可再试）；
     /// - **每组合一次**：同一"旧代→内嵌代"组合只自动刷新一次，之后只落折叠日志。
-    fn spawn_agent_refresh_if_needed(running_build: &str, host_pid: u32, logger: &Logger) {
+    fn spawn_agent_refresh_if_needed(
+        running_build: &str,
+        host_pid: u32,
+        bridge: Option<&AppBridge>,
+        logger: &Logger,
+    ) {
         let Some(dll) = PREPARED_GADGET_DLL.get().cloned() else {
             return; // 本轮没准备好 DLL（dry-run / 自检路径），不刷新
         };
@@ -1175,7 +1221,6 @@ mod imp {
             }
             return;
         }
-        // 独占闸门在写记录**之前**：共享宿主跳过时不留痕，宿主变独占后可再刷新。
         let Some((members, rc003_members)) = host_membership(host_pid) else {
             logger.kv(
                 "[AGENT-REFRESH]",
@@ -1188,13 +1233,14 @@ mod imp {
             );
             return;
         };
-        if !should_refresh_stale_agent_host(members, rc003_members) {
+        let route = stale_refresh_route(members, rc003_members);
+        if route == StaleRefreshRoute::Skip {
             logger.kv(
                 "[AGENT-REFRESH]",
                 &[
                     ("phase", "completed".into()),
                     ("terminal_result", "skipped".into()),
-                    ("reason", "shared_host".into()),
+                    ("reason", "rc003_members_not_one".into()),
                     ("host_pid", host_pid.to_string()),
                     ("members", members.to_string()),
                     ("rc003_members", rc003_members.to_string()),
@@ -1202,13 +1248,112 @@ mod imp {
             );
             return;
         }
+
+        // 共享宿主分支的全部破坏性动作都走 `recover_shared_host_device_node`：
+        // 只移除/重扫 RC003 节点，**绝不结束宿主**。闸门比独占路径多三项：
+        // 确有我们的 gadget、拿得到 RC003 实例、主程序桥接在 10s 内活着。
+        let mut shared_instance: Option<String> = None;
+        let mut shared_gadget_maps = 0_usize;
+        let bridge_recent = bridge
+            .map(|bridge| {
+                let last = bridge.last_connected_ms();
+                last != 0 && now_ms_u64().saturating_sub(last) <= DEVICE_RECOVERY_BRIDGE_FRESH_MS
+            })
+            .unwrap_or(false);
+        if route == StaleRefreshRoute::SharedHostDeviceNode {
+            let gadget_maps = host_gadget_maps(host_pid);
+            let instance = host_rc003_instance_id(host_pid);
+            let cooldown_elapsed =
+                device_recovery_cooldown_elapsed(read_device_recovery_stamp(&dir), now_unix());
+            // `already_attempted` 传 false：当前组合已在 `should_auto_refresh_agent`
+            // 里判定过（true 会早退），这里只判设备节点恢复自身的闸门。
+            if !should_recover_shared_host_device_node(
+                gadget_maps,
+                instance.is_some(),
+                bridge_recent,
+                false,
+                cooldown_elapsed,
+            ) {
+                let reason = if gadget_maps == 0 {
+                    "shared_host_no_gadget"
+                } else if instance.is_none() {
+                    "shared_host_no_instance"
+                } else if !bridge_recent {
+                    "shared_host_bridge_down"
+                } else {
+                    "shared_host_cooldown"
+                };
+                logger.kv(
+                    "[AGENT-REFRESH]",
+                    &[
+                        ("phase", "completed".into()),
+                        ("terminal_result", "skipped".into()),
+                        ("reason", reason.into()),
+                        ("host_pid", host_pid.to_string()),
+                        ("members", members.to_string()),
+                        ("rc003_members", rc003_members.to_string()),
+                        ("gadget_maps", gadget_maps.to_string()),
+                    ],
+                );
+                return;
+            }
+            shared_instance = instance;
+            shared_gadget_maps = gadget_maps;
+            // 主程序侧看到 `R 1` 会推迟“捕获失效 → 重启助手”，否则设备节点恢复
+            // 的 60 秒窗口会被 `/end` 打断。
+            if let Some(bridge) = bridge {
+                bridge.push_recovering(true);
+            }
+        }
+
         stamp.last_refresh_unix = Some(now_unix());
         stamp.tried.push(key);
         write_refresh_stamp(&dir, &stamp);
         let logger = logger.fork();
-        let _ = std::thread::Builder::new()
-            .name("sayall-helper-agent-refresh".into())
-            .spawn(move || refresh_agent_in_host(host_pid, &dll, &logger));
+        match route {
+            StaleRefreshRoute::ExclusiveHost => {
+                let _ = std::thread::Builder::new()
+                    .name("sayall-helper-agent-refresh".into())
+                    .spawn(move || refresh_agent_in_host(host_pid, &dll, &logger));
+            }
+            StaleRefreshRoute::SharedHostDeviceNode => {
+                let Some(instance) = shared_instance else {
+                    if let Some(bridge) = bridge {
+                        bridge.push_recovering(false);
+                    }
+                    return;
+                };
+                let notifier = bridge.map(|bridge| bridge.tx.clone());
+                write_device_recovery_stamp(&dir, now_unix());
+                logger.kv(
+                    "[AGENT-REFRESH]",
+                    &[
+                        ("phase", "requested".into()),
+                        ("mode", "shared_device_node".into()),
+                        ("host_pid", host_pid.to_string()),
+                        ("members", members.to_string()),
+                        ("rc003_members", rc003_members.to_string()),
+                        ("gadget_maps", shared_gadget_maps.to_string()),
+                        ("target_build", AGENT_BUILD.to_string()),
+                    ],
+                );
+                let spawn = std::thread::Builder::new()
+                    .name("sayall-helper-agent-refresh-shared".into())
+                    .spawn(move || {
+                        refresh_agent_in_shared_host(host_pid, &instance, &dll, &logger);
+                        if let Some(tx) = notifier {
+                            let _ = tx.send(BridgeOutbound::Recovering(false));
+                        }
+                    });
+                if spawn.is_err() {
+                    // 起线程失败：恢复标志必须收回，否则主程序会一直等我们。
+                    if let Some(bridge) = bridge {
+                        bridge.push_recovering(false);
+                    }
+                }
+            }
+            StaleRefreshRoute::Skip => unreachable!("skip route returned above"),
+        }
     }
 
     /// 同一组合已被尝试过：不再自动刷新，只折叠落日志（前 3 条 + 每 30 条一条）。
@@ -1315,6 +1460,53 @@ mod imp {
                     ("phase", "completed".into()),
                     ("terminal_result", "failed".into()),
                     ("stage", "inject".into()),
+                    ("detail", error),
+                ],
+            ),
+        }
+    }
+
+    /// 共享宿主旧代次刷新：只重建 RC003 设备节点，**绝不结束宿主**。
+    /// 失败只落日志；不退回“结束宿主”那条破坏性路径。
+    fn refresh_agent_in_shared_host(
+        old_pid: u32,
+        instance_id: &str,
+        dll: &std::path::Path,
+        logger: &Logger,
+    ) {
+        match recover_shared_host_device_node(old_pid, instance_id, logger) {
+            Ok(new_pid) => match inject_gadget(new_pid, dll, logger) {
+                Ok(injection) => {
+                    std::mem::forget(injection);
+                    SERVED_HOST_PID.store(new_pid, Ordering::Relaxed);
+                    logger.kv(
+                        "[AGENT-REFRESH]",
+                        &[
+                            ("phase", "completed".into()),
+                            ("terminal_result", "passed".into()),
+                            ("mode", "shared_device_node".into()),
+                            ("host_pid", new_pid.to_string()),
+                        ],
+                    );
+                }
+                Err(error) => logger.kv(
+                    "[AGENT-REFRESH]",
+                    &[
+                        ("phase", "completed".into()),
+                        ("terminal_result", "failed".into()),
+                        ("mode", "shared_device_node".into()),
+                        ("stage", "inject".into()),
+                        ("detail", error),
+                    ],
+                ),
+            },
+            Err(error) => logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "failed".into()),
+                    ("mode", "shared_device_node".into()),
+                    ("stage", "recover_device_node".into()),
                     ("detail", error),
                 ],
             ),
@@ -5676,6 +5868,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     spawn_agent_refresh_if_needed(
                         &build,
                         extract_num(line, "pid").unwrap_or(0) as u32,
+                        bridge,
                         logger,
                     );
                     logger.kv(
@@ -10577,8 +10770,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     mod agent_refresh_tests {
         use super::{
             format_refresh_stamp, parse_refresh_stamp, refresh_attempt_key,
-            should_auto_refresh_agent, should_refresh_stale_agent_host, AgentRefreshStamp,
-            AGENT_REFRESH_COOLDOWN_SECS,
+            should_auto_refresh_agent, should_refresh_stale_agent_host, stale_refresh_route,
+            AgentRefreshStamp, StaleRefreshRoute, AGENT_REFRESH_COOLDOWN_SECS,
         };
 
         #[test]
@@ -10670,14 +10863,32 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
 
         #[test]
-        fn shared_host_is_never_auto_refreshed() {
-            // 硬性安全闸：共享宿主同时承载用户别的 BLE 设备，结束它会一起弄掉
-            // （判据与 should_restart_host_for_clean_inject 的 members 闸门同源）。
+        fn shared_host_is_never_terminated_for_refresh() {
+            // 硬性安全闸：共享宿主同时承载用户别的 BLE 设备，**结束它会一起弄掉**。
+            // 共享宿主改走设备节点恢复（不结束宿主），所以这里只断言“绝不走结束宿主路径”。
             assert!(should_refresh_stale_agent_host(1, 1));
             assert!(!should_refresh_stale_agent_host(2, 1));
             assert!(!should_refresh_stale_agent_host(2, 2));
             assert!(!should_refresh_stale_agent_host(1, 0));
             assert!(!should_refresh_stale_agent_host(0, 0));
+        }
+
+        #[test]
+        fn stale_refresh_route_picks_device_node_for_shared_rc003_host() {
+            // 独占 → 结束宿主（既有路径）；共享且恰有一个 RC003 → 只重建设备节点；
+            // 0/多个 RC003 或 rc003_members 不唯一 → 不猜、不动手。
+            assert_eq!(stale_refresh_route(1, 1), StaleRefreshRoute::ExclusiveHost);
+            assert_eq!(
+                stale_refresh_route(2, 1),
+                StaleRefreshRoute::SharedHostDeviceNode
+            );
+            assert_eq!(
+                stale_refresh_route(3, 1),
+                StaleRefreshRoute::SharedHostDeviceNode
+            );
+            assert_eq!(stale_refresh_route(2, 2), StaleRefreshRoute::Skip);
+            assert_eq!(stale_refresh_route(1, 0), StaleRefreshRoute::Skip);
+            assert_eq!(stale_refresh_route(0, 0), StaleRefreshRoute::Skip);
         }
     }
 

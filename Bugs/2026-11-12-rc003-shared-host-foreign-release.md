@@ -46,7 +46,7 @@
     `synthHeld`。
   - 阳性对照：用本次修改前的 `rc003_agent.js` 跑同一测试，来源隔离组按预期失败
     （旧 agent 没有来源概念），证明测试有分辨力。
-  - 助手 `cargo test`：**83 passed / 0 failed**；`sayall-helper.exe --selftest`
+  - 助手 `cargo test`：**84 passed / 0 failed**；`sayall-helper.exe --selftest`
     退出码 0，内嵌 agent 与源码 SHA-256 一致。
   - `cargo fmt --all -- --check`：passed。
   - **真机共享宿主验证：deferred**。需要 RC003（以及 RC001 各一轮）与另一台 HID
@@ -56,10 +56,12 @@
     不是「只接受小米遥控器」。遥控器空闲时，另一台设备若先按到同一 usage，仍可能
     成为活动来源；真正按 VID/PID/实例只认 RC003 需要把设备身份从应用/助手传到
     agent，留待产品决策与下一轮真机验证。
-  - **部署边界（评审发现）**：共享宿主不会自动刷新旧 agent（2026-10-14 的安全闸，
-    日志 `[AGENT-REFRESH] reason=shared_host`）。升级/重启助手后，宿主里若仍是旧代次，
-    会打 `[AGENT-STALE]`，但修复要等宿主重建（设备重连/重启）或走既有的共享宿主
-    设备节点恢复路径；该路径本轮未启用、未真机验证。**不能把“包里有新 agent”
-    当成“用户现场已生效”**。
+  - **共享宿主旧代次刷新（2026-11-12 评审后补）**：不再只跳过。`stale_refresh_route`
+    分流：独占宿主走原有“结束宿主”路径；共享宿主且恰好一个 RC003 成员走
+    `recover_shared_host_device_node`（只 remove/scan RC003 节点，**不结束共享宿主**），
+    成功对新宿主注入。日志为 `[AGENT-REFRESH] mode=shared_device_node phase=requested`
+    → `[HOST] action=recover_device_node` → `action=new_host_ready` → `terminal_result=passed`；
+    失败落 `stage=recover_device_node|inject`。**该路径尚未真机验证**；失败时仍需
+    宿主重建/设备重连。不能把“包里有新 agent”当成“用户现场已生效”。
 - 隐私检查：日志与心跳只增加计数（`foreign_reports` / `forced_releases`），不含蓝牙
   地址、设备实例、设备对象名或报告内容。
