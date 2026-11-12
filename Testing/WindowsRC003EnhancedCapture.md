@@ -338,7 +338,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
   “另一台设备的空报告结束遥控器长按”，**不改变**上面那条 usage 门禁的残留风险：
   遥控器空闲时，另一台设备若先按到同一 usage，仍可能成为活动来源。真正按
   VID/PID/实例只认 RC003 需要把设备身份从应用/助手传到 agent，留在产品决策。
-  回归：`agent_logic_test.mjs` 81/81；修改前 agent 的来源隔离组按预期红。
+  回归：`agent_logic_test.mjs` 86/86；修改前 agent 的来源隔离组按预期红。
   真机共享宿主复验仍为 **deferred**。详见
   [Bugs/2026-11-12-rc003-shared-host-foreign-release.md](../Bugs/2026-11-12-rc003-shared-host-foreign-release.md)。
 

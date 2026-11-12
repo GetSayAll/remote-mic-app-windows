@@ -565,6 +565,9 @@ function releaseEdges(reason) {
   /* 即使当前没有按下，也要清掉活动来源：否则下一次异源报告会被挡住，
      而应用侧已经通过看门狗/断线释放了。 */
   activeSource = null;
+  /* 强制释放/来源关闭后不再保持“合成键仍按下”的本地判断；否则下一帧
+     会白等 200ms 的尾音排空，且状态与 OS 可能不一致。 */
+  synthHeld = false;
   if (usages.length === 0) return;
   pressed = {};
   /* `edges_sent` 继续只表示“状态变化边沿”，保住 `target_hits × 2 == edges_sent`
@@ -950,6 +953,15 @@ function installHook() {
             logLine('synth:release hold fail=' + String(e).slice(0, 80));
           }
           synthHeld = false;
+        }
+
+        /* 语音键/哨兵键不写 `pressed`，因此上面的 `emitEdgesIfChanged` 会因为
+           “空集 == 空集”提前返回。若这份报告已经没有按下的目标键、也不是语音
+           按下帧，就把来源归属清掉——否则一次 F5/哨兵键会把 `activeSource`
+           永久钉在错误的设备上，之后遥控器的按键全被当成异源忽略。 */
+        if (!synthSeen && !synthHeld && activeSource === source
+            && currentUsages().length === 0) {
+          activeSource = null;
         }
 
         /* 门禁走 `shouldTouchReport`（= 上报 ∪ 清空），**不能**只走 found：

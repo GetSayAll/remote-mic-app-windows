@@ -544,8 +544,10 @@ check('新连接重置 everRenewed（不让上一代续约影响鉴权判定）'
 
 /* -------- 12. 来源键：NtQueryObject 对象名归并 / 查询失败回退（2026-11-12） -------- */
 /* 真实 Frida 里由 NativeFunction + Memory.alloc 完成；这里用最小桩验证
-   `sourceKeyOf` 的 UNICODE_STRING 读取与“同对象名=同来源”的归并逻辑。 */
-{
+   `sourceKeyOf` 的 UNICODE_STRING 读取与“同对象名=同来源”的归并逻辑。
+   旧 agent（阳性对照）没有 `sourceKeyOf`：记录一条失败并跳过本组，不能让
+   阳性对照在测试台里崩掉——那会让“红”失去分辨力。 */
+if (typeof ctx.sourceKeyOf === 'function') {
   const fakeNameBuffer = (name) => ({
     readU16: () => name.length * 2,
     add: () => ({
@@ -590,6 +592,39 @@ check('新连接重置 everRenewed（不让上一代续约影响鉴权判定）'
   const c = ctx.sourceKeyOf(fakeHandle('fallback-handle'));
   check('来源键：NtQueryObject 不可用时回退句柄字符串',
     c === 'fallback-handle', `c=${c}`);
+} else {
+  check('来源键：agent 提供 sourceKeyOf', false, '旧 agent 无来源键');
+}
+
+/* -------- 13. 语音键释放后不能把 activeSource 永久钉住（2026-11-12 评审） -------- */
+{
+  await freshStubConnection();
+  ctx.handleCommand('{"type":"renew"}');
+  ctx.handleCommand('{"type":"mode","clear":true}');
+  ctx.handleCommand('{"type":"gate","on":false}');
+  ctx.handleCommand(JSON.stringify({ type: 'synth', from: 0x003e, to: 0x00e6 }));
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 10, report: [0x00f1], clear: [0x00f1],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  const voice = pressOn('voice-source', 0x003e);
+  check('来源归属：语音键按下成为活动来源',
+    ctx.activeSource === 'voice-source' && voice.ptr.buf[3] === 0xe6);
+  pressOn('voice-source');
+  check('来源归属：语音键释放后清空来源，不永久占用', ctx.activeSource === null);
+
+  pressOn('voice-source', 0x003e);
+  check('来源归属：语音键按下时 synthHeld=true', ctx.synthHeld === true);
+  ctx.releaseEdges('test');
+  check('来源归属：强制释放清空合成键状态', ctx.synthHeld === false && ctx.activeSource === null);
+
+  const foreignAfterVoice = pressOn('other-source', 0x00f1);
+  check('来源归属：语音释放后其它设备可重新成为来源',
+    ctx.activeSource === 'other-source' && foreignAfterVoice.ptr.buf[3] === 0);
+  ctx.handleCommand(JSON.stringify({ type: 'synth', off: true }));
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 11, report: [], clear: [] }));
 }
 
 const failed = results.filter((r) => !r.ok);
