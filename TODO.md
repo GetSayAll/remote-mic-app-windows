@@ -443,6 +443,7 @@
 
 ### 2026-09-05 IME 专项
 
+- **2026-11-13 Issue #367 后续：readback 误报与超时后的迟到激活**。`GetActiveProfile` 在临时 STA 线程上可能看不到桌面级切换，旧实现把“读回不是目标”当 `activation_failed`（现场 `outcome=failed` 但 `last_switch_age_ms=457`、`fg_hkl=0x08040804` 已切换）；500ms 有界等待超时也直接算失败并可能置 `last_error`。新增 `switched_unverified` / `timed_out` / `superseded` 结果与独立 `error_code=verify_unavailable|activation_timeout`；超时不再返回 Err，STA 线程在调用方超时后补 `ime_activation_worker` 最终结果；每次激活带 generation，旧线程在查询、激活、重绑等待、重试、读回探针和焦点往返前检查代次，工具变化后不再做迟到副作用。自动化 passed：`sayall-windows` 553 passed / 17 ignored（含两项 `activation_result_tests`）、`sayall-windows-app` 218 passed / 2 ignored、`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation`。真机冷切换、连续切换与 RC001/RC003 deferred。记录：`Bugs/2026-11-13-ime-readback-timeout-late-activation.md`。
 - **语音"无法唤起"根因 = 会话活动输入法不是微信输入法**（WeType 语音热键仅在自身活跃时生效；焦点无关，桌面/资源管理器聚焦 6/6 照常开麦）。修复（ime.rs）：注入和弦前用公开 TSF API 会话级激活 WeType（TF_IPPMF_FORSESSION，零延迟 3/3 实证），失败不阻断。参考 macOS 版 PreferredInputSourceMonitor 职责设计。
 
 ### 2026-09-05 性能已知项（评估归档，供后续修复）

@@ -1,4 +1,4 @@
-//! 微信输入法（WeType）会话级激活。
+//! 微信输入法（WeType）桌面级激活。
 //!
 //! 背景（2026-09-05 持锁实验实锤，Testing\investigation\p-ime-experiment.ps1
 //! 与 examples\ime_probe_mta.rs，判据 = ConsentStore 开麦时间戳）：
@@ -21,8 +21,11 @@
 //!
 //! 方案（参考 macOS 版 PreferredInputSourceMonitor 的"保证语音工具是活动
 //! 输入源"职责设计）：注入和弦前，在临时 STA 线程上用公开 TSF API
-//! （ITfInputProcessorProfileMgr + TF_IPPMF_FORSESSION 会话级标志——只影响
-//! 当前应用会话，不改其他应用的输入法记忆）确保 WeType 为当前会话输入法。
+//! （ITfInputProcessorProfileMgr + TF_IPPMF_FORSESSION；官方语义是
+//! “Activate this profile for all threads in the current desktop”——作用于
+//! **当前桌面的所有线程**，包括任务栏、开始菜单、搜索与其他进程，不是仅本应用）
+//! 确保 WeType 为当前会话输入法。因此该调用只能由用户显式触发（按下语音键或
+//! 主动选择工具）；启动恢复不得触发（Issue #367）。
 //!
 //! 护栏：激活失败或超时只记录提示并按原行为注入（绝不比现状更差）；幂等
 //! ——WeType 已活跃时重复激活无害；STA 线程一次性的（创建→调用→退出，
@@ -35,7 +38,8 @@
 //! `TF_IPPMF_FORSESSION` + 冷路径重绑等待），GUID 由 `examples/doubao_ime_probe.rs`
 //! 真机取得并读回验证。Vokie / 「其他工具」不切输入法（`NotRequired`）。
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
 use sayall_core::settings::VoiceInputTool;
@@ -99,14 +103,51 @@ const ACTIVATION_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// 重绑（2026-09-05 首按失败实证）；热路径不付此代价。
 const SESSION_REBIND_SETTLE: Duration = Duration::from_millis(50);
 
-/// 激活结果：AlreadyActive = 会话已是目标输入法（调用方可零延迟注入）；
-/// Switched = 本次执行了会话切换（含重绑等待）；
-/// SkippedSelfForeground = 前台是 SayAll 自身窗口，已跳过激活；
-/// NotRequired = 该工具不需要切输入法（Vokie / 其他工具）。
+/// 每次激活请求的代次。新请求递增；旧 STA 线程在检查点发现代次过期后
+/// 不再重试、读回或做焦点往返，避免 500ms 超时后的迟到切换干扰新选择。
+static ACTIVATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 串行化输入法会话激活（`sta_ensure_ime`）：旧调用即使在阻塞中迟到完成，
+/// 也不会和新调用并发把桌面切回旧目标。新调用排队后按自己的代次决定是否执行；
+/// 焦点往返在锁外执行，不阻塞后续切换。`cycle_wetype_profile` 是独立的休眠
+/// 唤醒路径，不在这把锁内（避免它排队后覆盖更新的工具选择）。
+static ACTIVATION_LOCK: Mutex<()> = Mutex::new(());
+
+fn next_activation_generation() -> u64 {
+    ACTIVATION_GENERATION
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1)
+}
+
+fn is_current_activation(generation: u64) -> bool {
+    ACTIVATION_GENERATION.load(Ordering::Acquire) == generation
+}
+
+/// 工具选择/恢复变化时调用：让在跑的旧激活在下一个检查点退出。
+/// 不等待、不阻塞；旧线程可能已经完成 `ActivateProfile`，但不会再重试、
+/// 读回或做焦点往返。
+pub(crate) fn invalidate_activation_generation() {
+    ACTIVATION_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// 激活结果。
+///
+/// - `AlreadyActive`：当前线程读回已是目标输入法（热路径，可零延迟注入）；
+/// - `Switched`：本次执行了切换，且读回确认；
+/// - `SwitchedUnverified`：`ActivateProfile` 已成功返回，但读回不可用或仍不是目标。
+///   桌面级切换的读回本身不可靠（见模块头），**不能据此判定激活失败**；
+/// - `TimedOut`：调用方 500ms 有界等待超时，STA 线程仍在后台完成；最终结果由
+///   `ime_activation_worker` 日志给出；
+/// - `Superseded`：已有更新的激活请求，本次在检查点主动退出；
+/// - `SkippedSelfForeground`：前台是 SayAll 自身窗口，已跳过激活；
+/// - `NotRequired`：该工具不需要切输入法（Vokie / 其他工具）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImeActivation {
     AlreadyActive,
     Switched,
+    SwitchedUnverified,
+    TimedOut,
+    Superseded,
     SkippedSelfForeground,
     NotRequired,
 }
@@ -117,9 +158,38 @@ impl ImeActivation {
         match self {
             ImeActivation::AlreadyActive => "already_active",
             ImeActivation::Switched => "switched",
+            ImeActivation::SwitchedUnverified => "switched_unverified",
+            ImeActivation::TimedOut => "timed_out",
+            ImeActivation::Superseded => "superseded",
             ImeActivation::SkippedSelfForeground => "skipped_self_foreground",
             ImeActivation::NotRequired => "not_required",
         }
+    }
+}
+
+/// 结果 → 日志 `outcome` token；调用方与 STA 线程共用，避免两处口径漂移。
+fn activation_outcome_token(result: &Result<ImeActivation, String>) -> &'static str {
+    match result {
+        Ok(activation) => activation.log_token(),
+        Err(_) => "failed",
+    }
+}
+
+/// 结果 → `(error_domain, error_code, retryable)`。
+///
+/// 超时和读回不可用都不是“激活失败”：
+/// - `TimedOut`：后台线程可能仍在完成，下一次按下会重试；
+/// - `SwitchedUnverified`：`ActivateProfile` 已成功返回，只是读回不可信；
+/// - `Superseded`：被新请求替代，不是错误。
+fn activation_diagnostics(
+    result: &Result<ImeActivation, String>,
+) -> (&'static str, &'static str, bool) {
+    match result {
+        Ok(ImeActivation::TimedOut) => ("tsf", "activation_timeout", true),
+        Ok(ImeActivation::SwitchedUnverified) => ("tsf", "verify_unavailable", false),
+        Ok(ImeActivation::Superseded) => ("none", "superseded", false),
+        Ok(_) => ("none", "none", false),
+        Err(_) => ("tsf", "activation_failed", true),
     }
 }
 
@@ -369,7 +439,9 @@ impl ImeSwitchScope {
 /// 必须在 STA 线程上执行（MTA 调用返回 S_OK 但不生效，见模块注释）；
 /// 本函数自行创建临时 STA 线程并经 channel 有界等待结果，对调用方
 /// （BLE 工作线程，MTA）透明。返回 Err 时调用方记录提示后仍按原行为
-/// 注入——激活失败不阻断语音。
+/// 注入——激活失败不阻断语音。500ms 超时返回 `Ok(TimedOut)`（未决，
+/// 不置 `last_error`），STA 线程在后台完成并由 `ime_activation_worker`
+/// 记录最终结果；读回不可用返回 `Ok(SwitchedUnverified)`，不按失败处理。
 ///
 /// `tool` 由"用户选的输入工具"决定（不是按和弦猜）：选豆包却把和弦配成
 /// Ctrl+Win 时，旧实现会把输入法切成微信（2026-10-01 语义缺口）。
@@ -397,13 +469,13 @@ fn ensure_session_ime_inner(
     force: bool,
 ) -> Result<ImeActivation, String> {
     let started = std::time::Instant::now();
+    let generation = next_activation_generation();
     let Some(target) = ime_target_for(tool) else {
         // 功能点日志：Vokie / 其他工具明确"不切输入法"也是决策，要能从日志看出
         // 是"没轮到切"还是"切失败"（2026-09-29 真机曾把豆包路径误切成微信）。
-        crate::ble::gatt_note(
-            "ime_activation tool=none outcome=not_required elapsed_ms=0 reason=unsupported_tool"
-                .to_owned(),
-        );
+        crate::ble::gatt_note(format!(
+            "ime_activation tool=none outcome=not_required elapsed_ms=0 generation={generation} reason=unsupported_tool"
+        ));
         return Ok(ImeActivation::NotRequired);
     };
     // 前台是自身 WebView 时跳过激活：TSF 会话切换实证会触发 WebView2
@@ -411,7 +483,7 @@ fn ensure_session_ime_inner(
     // 激活没有任何收益。返回 Ok——这不是错误，不应置 UI last_error。
     if !allow_self_foreground && foreground_is_self() {
         crate::ble::gatt_note(format!(
-            "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 foreground_observed=true self_foreground=true error_domain=none error_code=foreground_is_self retryable=false",
+            "ime_activation tool={} outcome=skipped_self_foreground elapsed_ms=0 generation={generation} foreground_observed=true self_foreground=true error_domain=none error_code=foreground_is_self retryable=false",
             target.label,
         ));
         return Ok(ImeActivation::SkippedSelfForeground);
@@ -420,30 +492,47 @@ fn ensure_session_ime_inner(
     std::thread::Builder::new()
         .name("sayall-ime-activate".to_owned())
         .spawn(move || {
-            let outcome = sta_ensure_ime(target, scope, force);
-            let _ = sender.send(outcome);
+            let worker_started = std::time::Instant::now();
+            let outcome = sta_ensure_ime(target, scope, force, generation);
+            // 调用方收到结果时由 ime_activation 记录；只有调用方已超时/丢弃
+            // 接收端时，才由 STA 线程补一条最终结果，避免超时后没有 ground truth。
+            let delivered = sender.send(outcome.clone()).is_ok();
+            if !delivered {
+                let token = activation_outcome_token(&outcome);
+                let (error_domain, error_code, retryable) = activation_diagnostics(&outcome);
+                let probe = foreground_probe();
+                crate::ble::gatt_note(format!(
+                    "ime_activation_worker tool={} scope={} generation={generation} outcome={token} delivered=false elapsed_ms={} last_switch_age_ms={} fg_pid={} fg_class={} fg_hkl={:#010X} fg_focus={} error_domain={error_domain} error_code={error_code} retryable={retryable}",
+                    target.label,
+                    scope.label(),
+                    worker_started.elapsed().as_millis(),
+                    age_label(last_switch_age_ms()),
+                    probe.pid,
+                    probe.class_token,
+                    probe.hkl,
+                    probe.focus_class,
+                ));
+            }
         })
         .map_err(|error| format!("创建激活线程失败：{error}"))?;
-    // 有界等待，不 join：超时说明激活异常缓慢，按失败处理继续注入；
-    // 线程在后台自然结束（若激活迟到，惠及下一次按键）。
+    // 有界等待，不 join：超时说明激活异常缓慢，按“未决”继续注入；
+    // 线程在后台自然结束，最终结果由 ime_activation_worker 记录。
     let result = match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
         Ok(result) => result,
-        Err(_) => Err(format!("激活 {} 超时（500ms）", target.label)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(ImeActivation::TimedOut),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("激活线程提前退出（结果通道断开）".to_owned())
+        }
     };
+    let (error_domain, error_code, retryable) = activation_diagnostics(&result);
     // 功能点日志（AGENTS.md）：决策结果 + 耗时 + 前台进程，报障时一次
     // 日志拉取即可定位是热/冷路径、查询、激活还是等待环节。
-    let outcome = match &result {
-        Ok(ImeActivation::AlreadyActive) => "already_active",
-        Ok(ImeActivation::Switched) => "switched",
-        Ok(ImeActivation::SkippedSelfForeground) => "skipped_self_foreground",
-        Ok(ImeActivation::NotRequired) => "not_required",
-        Err(_) => "failed",
-    };
     let probe = foreground_probe();
     crate::ble::gatt_note(format!(
-        "ime_activation tool={} scope={} outcome={outcome} elapsed_ms={} last_switch_age_ms={} foreground_observed={} fg_pid={} fg_class={} fg_hkl={:#010X} fg_focus={} error_domain={} error_code={} retryable={}",
+        "ime_activation tool={} scope={} generation={generation} outcome={} elapsed_ms={} last_switch_age_ms={} foreground_observed={} fg_pid={} fg_class={} fg_hkl={:#010X} fg_focus={} error_domain={error_domain} error_code={error_code} retryable={retryable}",
         target.label,
         scope.label(),
+        activation_outcome_token(&result),
         started.elapsed().as_millis(),
         age_label(last_switch_age_ms()),
         foreground_process_name().is_some(),
@@ -451,9 +540,6 @@ fn ensure_session_ime_inner(
         probe.class_token,
         probe.hkl,
         probe.focus_class,
-        if result.is_ok() { "none" } else { "tsf" },
-        if result.is_ok() { "none" } else { "activation_failed" },
-        result.is_err(),
     ));
     result
 }
@@ -826,11 +912,22 @@ fn sta_ensure_ime(
     target: ImeProfile,
     scope: ImeSwitchScope,
     force: bool,
+    generation: u64,
 ) -> Result<ImeActivation, String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
+    if !is_current_activation(generation) {
+        crate::ble::gatt_note(format!(
+            "ime_activation_generation scope={} generation={generation} phase=before_lock outcome=superseded",
+            scope.label()
+        ));
+        return Ok(ImeActivation::Superseded);
+    }
+    let activation_guard = ACTIVATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         // S_OK(0) 或 S_FALSE(1)（本线程已初始化）都算成功。
@@ -838,6 +935,16 @@ fn sta_ensure_ime(
             return Err(format!("CoInitializeEx(STA) 失败：{hr:?}"));
         }
         let result = (|| {
+            let log_superseded = |phase: &str| {
+                crate::ble::gatt_note(format!(
+                    "ime_activation_generation scope={} generation={generation} phase={phase} outcome=superseded",
+                    scope.label()
+                ));
+            };
+            if !is_current_activation(generation) {
+                log_superseded("before_query");
+                return Ok(ImeActivation::Superseded);
+            }
             let manager: ITfInputProcessorProfileMgr = CoCreateInstance(
                 &CLSID_TF_INPUT_PROCESSOR_PROFILES,
                 None,
@@ -854,13 +961,17 @@ fn sta_ensure_ime(
             };
             // 功能点日志：只记录冷/热判定，不落盘输入法 GUID 或前台应用身份。
             crate::ble::gatt_note(format!(
-                "ime_query tool={} ok={} active_is_target={active_is_target} active_profile_present={} forced={force}",
+                "ime_query tool={} generation={generation} ok={} active_is_target={active_is_target} active_profile_present={} forced={force}",
                 target.label,
                 query.is_ok(),
                 profile.clsid != GUID::from_u128(0),
             ));
             if !should_activate(active_is_target, force) {
                 return Ok(ImeActivation::AlreadyActive);
+            }
+            if !is_current_activation(generation) {
+                log_superseded("before_activate");
+                return Ok(ImeActivation::Superseded);
             }
             manager
                 .ActivateProfile(
@@ -872,21 +983,35 @@ fn sta_ensure_ime(
                     TF_IPPMF_FORSESSION,
                 )
                 .map_err(|error| format!("激活 {} 会话失败：{error}", target.label))?;
+            // 迟到的旧激活：ActivateProfile 可能已经执行，但不再做重绑等待、
+            // 读回、重试或焦点往返——把后续动作让给更新的请求。
+            if !is_current_activation(generation) {
+                log_superseded("after_activate");
+                return Ok(ImeActivation::Superseded);
+            }
             // 冷切换：等目标应用完成输入法会话重绑再放行注入。
             std::thread::sleep(SESSION_REBIND_SETTLE);
+            if !is_current_activation(generation) {
+                log_superseded("after_settle");
+                return Ok(ImeActivation::Superseded);
+            }
             note_switch_happened();
-            // 切换后自校验（2026-10-03，Andy：日志定位不了就加日志）：`ActivateProfile`
-            // 返回成功不等于会话真的切过去（2026-09-05 曾实证 S_OK 但不生效）。这里读回
-            // 活动配置；不一致按有界重试一次，两次结果都落日志——"切成没成"一眼可判，
-            // 也保证"后续按下必能拉起"不会因一次静默失败而失效。
-            // `stuck` 语义：true = 读回仍不是目标（失败方向），false = 已切到目标。
+            // 切换后自校验：`ActivateProfile` 返回成功不等于会话真的切过去。
+            // 但 GetActiveProfile 在临时 STA 线程上也可能看不到桌面级切换
+            // （Issue #367 现场：切换已生效，读回仍不是目标）。所以“读回不一致”
+            // 只作为证据，不能升级为激活失败；一次有界重试后仍不一致就返回
+            // SwitchedUnverified，由读回探针和后续按下继续观测。
             let mut verified = query_active_is_target(&manager, target);
             let mut attempts = 1u32;
             if !verified {
                 crate::ble::gatt_note(format!(
-                    "ime_verify scope={} attempt=1 stuck=true",
+                    "ime_verify scope={} generation={generation} attempt=1 stuck=true",
                     scope.label(),
                 ));
+                if !is_current_activation(generation) {
+                    log_superseded("before_retry");
+                    return Ok(ImeActivation::Superseded);
+                }
                 let _ = manager.ActivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,
                     LANGID_ZH_CN,
@@ -895,34 +1020,49 @@ fn sta_ensure_ime(
                     HKL::default(),
                     TF_IPPMF_FORSESSION,
                 );
+                if !is_current_activation(generation) {
+                    log_superseded("after_retry_activate");
+                    return Ok(ImeActivation::Superseded);
+                }
                 std::thread::sleep(SESSION_REBIND_SETTLE);
+                if !is_current_activation(generation) {
+                    log_superseded("after_retry_settle");
+                    return Ok(ImeActivation::Superseded);
+                }
                 note_switch_happened();
                 verified = query_active_is_target(&manager, target);
                 attempts = 2;
             }
             crate::ble::gatt_note(format!(
-                "ime_verify scope={} attempt={attempts} stuck={}",
+                "ime_verify scope={} generation={generation} attempt={attempts} stuck={}",
                 scope.label(),
                 !verified,
             ));
-            if !verified {
-                return Err(format!(
-                    "{} 切换后读回仍不是当前活动输入法（attempts={attempts}）",
-                    target.label
-                ));
-            }
+            let outcome = if verified {
+                ImeActivation::Switched
+            } else {
+                ImeActivation::SwitchedUnverified
+            };
             // 2026-10-09 诊断（Andy：失败样本全部来自"切完工具快速切到窗口"）：
-            // 切换当下读回成功 ≠ 之后一直有效。追加有界读回探针记录保持情况。
-            spawn_readback_probes(target, scope);
-            Ok(ImeActivation::Switched)
+            // 切换当下读回成功 ≠ 之后一直有效。两种结果都保留有界读回探针，
+            // 给“多久才真正接上/是否回退”提供时间线。
+            spawn_readback_probes(target, scope, generation);
+            Ok(outcome)
         })();
         CoUninitialize();
+        // 焦点往返在激活锁外执行：它需要 300ms+，不能阻塞后续切换。
+        drop(activation_guard);
         // 切换后的"重绑保障"（2026-10-10 真机数据）：会话切换完成 ≠ 目标窗口
         // 已重绑输入法上下文。仅在对齐路径（ToolSelect）行动——那时用户刚点进
         // 目标窗口、尚未开始输入；按下路径（VoicePress）的和弦已在下行，
         // 不在此处插入焦点往返（由失败后的自动救回兜底）。
-        if matches!(result, Ok(ImeActivation::Switched)) && scope == ImeSwitchScope::ToolSelect {
-            post_switch_rebind_safeguard();
+        if matches!(
+            result,
+            Ok(ImeActivation::Switched | ImeActivation::SwitchedUnverified)
+        ) && scope == ImeSwitchScope::ToolSelect
+            && is_current_activation(generation)
+        {
+            post_switch_rebind_safeguard(generation);
         }
         result
     }
@@ -934,14 +1074,30 @@ fn sta_ensure_ime(
 /// 用户手动"点走再点回"与程序化焦点往返均已验证可解；这里趁用户刚点进目标
 /// 窗口、尚未开始输入的窗口期主动做一次不可见焦点往返，把"首按失败"消灭在
 /// 发生之前。失败路径全部有界，只留结构化日志供测试定位。
-fn post_switch_rebind_safeguard() {
+fn post_switch_rebind_safeguard(generation: u64) {
+    if !is_current_activation(generation) {
+        crate::ble::gatt_note(format!(
+            "ime_post_switch_bounce generation={generation} skipped=superseded"
+        ));
+        return;
+    }
     std::thread::sleep(std::time::Duration::from_millis(300));
+    if !is_current_activation(generation) {
+        crate::ble::gatt_note(format!(
+            "ime_post_switch_bounce generation={generation} skipped=superseded phase=after_settle"
+        ));
+        return;
+    }
     if foreground_is_self() {
-        crate::ble::gatt_note("ime_post_switch_bounce skipped=self_foreground".to_owned());
+        crate::ble::gatt_note(format!(
+            "ime_post_switch_bounce generation={generation} skipped=self_foreground"
+        ));
         return;
     }
     let outcome = crate::wetype_revive::focus_bounce_foreground();
-    crate::ble::gatt_note(format!("ime_post_switch_bounce {outcome}"));
+    crate::ble::gatt_note(format!(
+        "ime_post_switch_bounce generation={generation} {outcome}"
+    ));
 }
 
 /// 读回当前会话的活动配置是否为目标（切换后自校验用；语义与 `sta_ensure_ime` 的查询一致）。
@@ -963,10 +1119,20 @@ static READBACK_PROBES_IN_FLIGHT: std::sync::atomic::AtomicUsize =
 /// 切换成功后追加读回探针：验证"切过去"是否**保持**——静默回退、目标应用侧
 /// 重绑输入法都会在这里现形，也给"多久才真正接上"提供时间线。
 /// 只读、有界退出、不写任何状态；并发上限 2。
-fn spawn_readback_probes(target: ImeProfile, scope: ImeSwitchScope) {
+fn spawn_readback_probes(target: ImeProfile, scope: ImeSwitchScope, generation: u64) {
     use std::sync::atomic::Ordering;
+    if !is_current_activation(generation) {
+        crate::ble::gatt_note(format!(
+            "ime_readback scope={} generation={generation} skipped=superseded",
+            scope.label()
+        ));
+        return;
+    }
     if READBACK_PROBES_IN_FLIGHT.load(Ordering::Relaxed) >= 2 {
-        crate::ble::gatt_note(format!("ime_readback scope={} skipped=busy", scope.label()));
+        crate::ble::gatt_note(format!(
+            "ime_readback scope={} generation={generation} skipped=busy",
+            scope.label()
+        ));
         return;
     }
     READBACK_PROBES_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
@@ -979,9 +1145,17 @@ fn spawn_readback_probes(target: ImeProfile, scope: ImeSwitchScope) {
                 if elapsed < delay {
                     std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
                 }
+                if !is_current_activation(generation) {
+                    crate::ble::gatt_note(format!(
+                        "ime_readback scope={} generation={generation} skipped=superseded followup_ms={}",
+                        scope.label(),
+                        started.elapsed().as_millis(),
+                    ));
+                    break;
+                }
                 let active = probe_active_is_target(target);
                 crate::ble::gatt_note(format!(
-                    "ime_readback scope={} followup_ms={} active_is_target={}",
+                    "ime_readback scope={} generation={generation} followup_ms={} active_is_target={}",
                     scope.label(),
                     started.elapsed().as_millis(),
                     active
@@ -1339,7 +1513,7 @@ unsafe fn enumerate_installed_ime_names(
 // 时整页重载"（Bugs/2026-09-12）；本实现用 ActivateKeyboardLayout（非 TSF 配置
 // 切换），是否触发重载待实测。
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use windows::Win32::UI::Input::Ime::ImmIsIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyboardLayoutList, LoadKeyboardLayoutW,
@@ -1468,6 +1642,66 @@ pub fn restore_input_method_after_capture() -> String {
 /// 调用线程当前的输入区域布局（0 = 线程尚无输入上下文）。
 fn current_thread_layout() -> usize {
     unsafe { hkl_to_usize(windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0)) }
+}
+
+#[cfg(test)]
+mod activation_result_tests {
+    use super::*;
+
+    /// 日志 token 是排障消费方的契约：新增结果必须可区分，不能都落成
+    /// `failed`/`switched`。
+    #[test]
+    fn diagnostic_tokens_cover_timeout_unverified_and_superseded() {
+        assert_eq!(ImeActivation::AlreadyActive.log_token(), "already_active");
+        assert_eq!(ImeActivation::Switched.log_token(), "switched");
+        assert_eq!(
+            ImeActivation::SwitchedUnverified.log_token(),
+            "switched_unverified"
+        );
+        assert_eq!(ImeActivation::TimedOut.log_token(), "timed_out");
+        assert_eq!(ImeActivation::Superseded.log_token(), "superseded");
+        assert_eq!(
+            ImeActivation::SkippedSelfForeground.log_token(),
+            "skipped_self_foreground"
+        );
+        assert_eq!(ImeActivation::NotRequired.log_token(), "not_required");
+    }
+
+    /// Issue #367 后续：超时/读回不可用不是激活失败，不能给调用方 Err
+    /// （否则 UI `last_error` 会误报）；真正的激活失败仍要保留失败标记。
+    #[test]
+    fn timeout_and_unverified_are_not_reported_as_activation_failure() {
+        let timeout: Result<ImeActivation, String> = Ok(ImeActivation::TimedOut);
+        assert_eq!(activation_outcome_token(&timeout), "timed_out");
+        assert_eq!(
+            activation_diagnostics(&timeout),
+            ("tsf", "activation_timeout", true)
+        );
+
+        let unverified: Result<ImeActivation, String> = Ok(ImeActivation::SwitchedUnverified);
+        assert_eq!(activation_outcome_token(&unverified), "switched_unverified");
+        assert_eq!(
+            activation_diagnostics(&unverified),
+            ("tsf", "verify_unavailable", false)
+        );
+
+        let superseded: Result<ImeActivation, String> = Ok(ImeActivation::Superseded);
+        assert_eq!(activation_outcome_token(&superseded), "superseded");
+        assert_eq!(
+            activation_diagnostics(&superseded),
+            ("none", "superseded", false)
+        );
+
+        let switched: Result<ImeActivation, String> = Ok(ImeActivation::Switched);
+        assert_eq!(activation_diagnostics(&switched), ("none", "none", false));
+
+        let failed: Result<ImeActivation, String> = Err("activation failed".to_owned());
+        assert_eq!(activation_outcome_token(&failed), "failed");
+        assert_eq!(
+            activation_diagnostics(&failed),
+            ("tsf", "activation_failed", true)
+        );
+    }
 }
 
 #[cfg(test)]
