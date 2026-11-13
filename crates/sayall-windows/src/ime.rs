@@ -103,31 +103,58 @@ const ACTIVATION_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// 重绑（2026-09-05 首按失败实证）；热路径不付此代价。
 const SESSION_REBIND_SETTLE: Duration = Duration::from_millis(50);
 
-/// 每次激活请求的代次。新请求递增；旧 STA 线程在检查点发现代次过期后
-/// 不再重试、读回或做焦点往返，避免 500ms 超时后的迟到切换干扰新选择。
-static ACTIVATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// 激活代次计数器。新请求递增；旧 STA 线程在检查点发现代次过期后不再重试、
+/// 读回或做焦点往返，避免 500ms 超时后的迟到切换干扰新选择。
+///
+/// 抽成值类型只为可测：语义（新请求替代旧请求、`invalidate` 让所有已发放
+/// 代次过期）不依赖进程全局状态，单测可直接构造实例钉住。
+struct ActivationGeneration(AtomicU64);
+
+impl ActivationGeneration {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// 发放下一代（调用方即成为“当前请求”）。
+    fn next(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.0.load(Ordering::Acquire) == generation
+    }
+
+    /// 让所有已发放代次过期（工具选择/恢复变化时调用）。
+    fn invalidate(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+static ACTIVATION_GENERATION: ActivationGeneration = ActivationGeneration::new();
 
 /// 串行化输入法会话激活（`sta_ensure_ime`）：旧调用即使在阻塞中迟到完成，
 /// 也不会和新调用并发把桌面切回旧目标。新调用排队后按自己的代次决定是否执行；
-/// 焦点往返在锁外执行，不阻塞后续切换。`cycle_wetype_profile` 是独立的休眠
-/// 唤醒路径，不在这把锁内（避免它排队后覆盖更新的工具选择）。
+/// 焦点往返在锁外执行，不阻塞后续切换。
+///
+/// `cycle_wetype_profile` 是独立的休眠唤醒路径，不在这把锁内，也不检查代次：
+/// 它的两步切换（切到临时输入法 → 切回 WeType）若与新选择交错，第二步仍可能
+/// 落在新选择之后覆盖它。不取锁只是改变交错方式，并不消除覆盖——已知边界，
+/// 待独立修复（见 Bugs/2026-11-13-ime-readback-timeout-late-activation.md）。
 static ACTIVATION_LOCK: Mutex<()> = Mutex::new(());
 
 fn next_activation_generation() -> u64 {
-    ACTIVATION_GENERATION
-        .fetch_add(1, Ordering::AcqRel)
-        .wrapping_add(1)
+    ACTIVATION_GENERATION.next()
 }
 
 fn is_current_activation(generation: u64) -> bool {
-    ACTIVATION_GENERATION.load(Ordering::Acquire) == generation
+    ACTIVATION_GENERATION.is_current(generation)
 }
 
 /// 工具选择/恢复变化时调用：让在跑的旧激活在下一个检查点退出。
 /// 不等待、不阻塞；旧线程可能已经完成 `ActivateProfile`，但不会再重试、
 /// 读回或做焦点往返。
 pub(crate) fn invalidate_activation_generation() {
-    ACTIVATION_GENERATION.fetch_add(1, Ordering::AcqRel);
+    ACTIVATION_GENERATION.invalidate();
 }
 
 /// 激活结果。
@@ -519,7 +546,13 @@ fn ensure_session_ime_inner(
     // 线程在后台自然结束，最终结果由 ime_activation_worker 记录。
     let result = match receiver.recv_timeout(ACTIVATION_JOIN_TIMEOUT) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Ok(ImeActivation::TimedOut),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // 立即丢弃接收端：worker 随后的 send 必然失败，从而稳定走
+            // `ime_activation_worker` 补最终结果。否则 worker 若恰在这几毫秒里
+            // 完成，结果会成功进入通道缓冲——没人读，也没有 ground truth 日志。
+            drop(receiver);
+            Ok(ImeActivation::TimedOut)
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err("激活线程提前退出（结果通道断开）".to_owned())
         }
@@ -1647,6 +1680,30 @@ fn current_thread_layout() -> usize {
 #[cfg(test)]
 mod activation_result_tests {
     use super::*;
+
+    /// 代次语义（Issue #367 迟到激活回归钉）：新请求让旧请求立即过期，
+    /// `invalidate` 让所有已发放代次过期。用局部实例，避免与并行测试线程
+    /// 共用的全局计数器互相干扰。
+    #[test]
+    fn newer_generation_supersedes_older_and_invalidate_expires_everything() {
+        let generation = ActivationGeneration::new();
+
+        let first = generation.next();
+        assert!(generation.is_current(first));
+
+        let second = generation.next();
+        assert!(!generation.is_current(first), "旧代次必须立即过期");
+        assert!(generation.is_current(second));
+
+        generation.invalidate();
+        assert!(
+            !generation.is_current(second),
+            "invalidate 后所有已发放代次过期"
+        );
+
+        let third = generation.next();
+        assert!(generation.is_current(third));
+    }
 
     /// 日志 token 是排障消费方的契约：新增结果必须可区分，不能都落成
     /// `failed`/`switched`。

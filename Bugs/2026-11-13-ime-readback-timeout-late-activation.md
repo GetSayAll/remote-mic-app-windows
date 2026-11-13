@@ -14,13 +14,14 @@
   - 每次激活互不关联，超时后旧线程仍会重试、读回、做 `post_switch_rebind_safeguard` 焦点往返，可能覆盖更新的选择。
 - 修复：
   - 新增 `ImeActivation::SwitchedUnverified`、`TimedOut`、`Superseded`；`activation_outcome_token` / `activation_diagnostics` 统一日志与错误码：`verify_unavailable`、`activation_timeout`、`superseded`。
-  - 500ms 超时返回 `Ok(TimedOut)`，不再写 `last_error`；STA 线程在调用方超时后补 `ime_activation_worker` 最终结果日志，提供 ground truth。
+  - 500ms 超时返回 `Ok(TimedOut)`，不再写 `last_error`；超时分支立即丢弃接收端，STA 线程随后的结果发送必定失败，从而稳定补一条 `ime_activation_worker` 最终结果日志作为 ground truth。
   - 读回两次仍不一致返回 `Ok(SwitchedUnverified)`，仍保留 500/1500/3000ms 读回探针；真正的 `ActivateProfile` 失败才返回 `Err`。
   - 每次激活分配 generation；旧线程在 `before_query`、`before/after ActivateProfile`、重绑等待、重试、读回探针和焦点往返前检查代次，过期即返回 `Superseded`，不再做迟到副作用。工具选择变化时 `invalidate_activation_generation()` 让旧线程尽快退出。
-  - 新增全局 `ACTIVATION_LOCK` 串行化会话激活的 `ActivateProfile`（仅 `sta_ensure_ime`；`cycle_wetype_profile` 是独立的休眠唤醒路径，不在这把锁内，避免它排队后覆盖更新的工具选择）：旧调用完成后新调用才执行，避免旧调用在阻塞中迟到完成、把桌面切回旧目标；焦点往返在锁外执行，不阻塞后续切换。若 `ActivateProfile` 永久挂起，后续对齐会排队，但调用方仍有 500ms 超时，不阻塞语音。
+  - 新增全局 `ACTIVATION_LOCK` 串行化会话激活的 `ActivateProfile`（仅 `sta_ensure_ime`）：旧调用完成后新调用才执行，避免旧调用在阻塞中迟到完成、把桌面切回旧目标；焦点往返在锁外执行，不阻塞后续切换。若 `ActivateProfile` 永久挂起，后续对齐会排队，但调用方仍有 500ms 超时，不阻塞语音。
 - 验证：
   - 新增 `ime::activation_result_tests::diagnostic_tokens_cover_timeout_unverified_and_superseded`：passed。
   - 新增 `ime::activation_result_tests::timeout_and_unverified_are_not_reported_as_activation_failure`：passed。
+  - 新增 `ime::activation_result_tests::newer_generation_supersedes_older_and_invalidate_expires_everything`：passed。
   - `cargo test -p sayall-windows --lib`：553 passed / 0 failed / 17 ignored。
   - `cargo test -p sayall-windows-app`：218 passed / 0 failed / 2 ignored。
   - `cargo fmt --all -- --check`：passed。
@@ -28,4 +29,5 @@
   - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
   - 真机冷切换（微信输入法冷启动 >500ms）、超时后 worker 完成日志、连续切换/快速选择、RC001/RC003：deferred。
 - 已知边界：本次只改“切换后读回”和超时/迟到副作用；`should_activate` 的预检查 `active_is_target` 仍可能在新 STA 线程上假阳性（本该切却走 AlreadyActive 快速路径）。该问题需要单独的真机实验与延迟权衡，不混入本次收口。
+- 已知边界：`cycle_wetype_profile`（休眠唤醒）不取 `ACTIVATION_LOCK`，也不检查代次。它的两步切换若与新选择交错，第二步“切回 WeType”仍可能落在新选择之后覆盖它；不取锁只是避免“排队后必定覆盖”，并不消除覆盖。需要独立修复（例如 cycle 开始时取代次，第二步前发现过期就放弃）。
 - 隐私检查：本记录未包含个人路径、设备身份、语音内容或凭据。
