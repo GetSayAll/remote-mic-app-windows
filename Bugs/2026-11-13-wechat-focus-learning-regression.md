@@ -37,7 +37,8 @@
 - `pnpm test` passed：689 passed | 10 skipped。
 - `pnpm build`（`vue-tsc --noEmit` + `vite build`）passed。
 - 新增回归用例：微信 `recorded_point` 档案优先于预设默认；预置微信可学习点击位置并按预设 id 落盘；预置目标显示摘要与「去配置」；旧 `recorded_point` 档案在编辑器里可见可执行；预置滚动区域可学习覆盖并在清除后恢复预置。
-- 本地测试包：2026-11-14 变更后重新构建并安装验证，结果见交付说明。
+- 本地测试包（基于 `origin/main` `ac2e7e3` + 代码提交 `4718918`）：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `E2C1C78B8320A6863345D87DC9585C740FB9E38000AE708E2E654C915180ACF9`（本地测试密钥签名，不可发布）；前端嵌入校验 18/18 passed。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐，app exe 仅 3 字节 UNK→NSS 差异，内嵌修订号 `4718918b` count=1；启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-004650.png` 确认 1.9.1 的 APP 适配页：预置 APP 已不再显示只读「预置能力」卡；微信行显示「已记录输入框 · 预置可用」。
 - 真实微信目视确认：**deferred**。需要在本机微信 4.x 里记录一个群聊输入框位置，确认「打开微信 → 聚焦到该群」实际点击落点正确。
 
 ## 隐私检查
