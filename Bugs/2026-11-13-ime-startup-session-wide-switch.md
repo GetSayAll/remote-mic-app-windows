@@ -16,8 +16,9 @@
   - 更新模块注释，明确 `TF_IPPMF_FORSESSION` 是桌面级作用域，只能在用户显式触发时使用。
 - 验证：
   - 新增 `sayall-windows` 单测 `tests::restoring_voice_tool_clears_pending_alignment`：passed。
+  - 新增 `sayall-windows-app` 分发契约双测 `restoring_voice_tool_write_never_uses_the_alignment_setter` / `user_selection_voice_tool_write_still_uses_the_alignment_setter`：passed。
   - `cargo test -p sayall-windows --lib`：552 passed / 0 failed / 17 ignored。
-  - `cargo test -p sayall-windows-app`：218 passed / 0 failed / 2 ignored。
+  - `cargo test -p sayall-windows-app`：220 passed / 0 failed / 2 ignored。
   - `cargo fmt --all -- --check`：passed。
   - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
   - `pnpm test`：683 passed / 10 skipped；`pnpm build`（`vue-tsc --noEmit` + `vite build`）：passed。

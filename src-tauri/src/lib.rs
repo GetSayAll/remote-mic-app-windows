@@ -3928,6 +3928,22 @@ impl VoiceToolWriteAction {
     }
 }
 
+/// 按写入来源选择平台调用（纯函数，便于单测钉住 Issue #367 的契约）。
+///
+/// `UserSelect` 允许一次“选中即对齐”；`Restore` 只恢复按下语音键时的目标，
+/// **绝不能**落到 `set_voice_input_tool`，否则启动失焦会再次触发桌面级切换。
+fn apply_voice_tool_write(
+    action: VoiceToolWriteAction,
+    tool: Option<VoiceInputTool>,
+    set: impl FnOnce(Option<VoiceInputTool>),
+    restore: impl FnOnce(Option<VoiceInputTool>),
+) {
+    match action {
+        VoiceToolWriteAction::UserSelect => set(tool),
+        VoiceToolWriteAction::Restore => restore(tool),
+    }
+}
+
 /// 保存输入工具并把目标推给平台；`action` 决定是否允许“选中即对齐”。
 ///
 /// 为什么必须分开（Issue #367）：`tool_select` 对齐最终使用
@@ -3949,13 +3965,15 @@ async fn write_voice_input_tool(
     ));
     let result = match tauri::async_runtime::spawn_blocking(move || {
         settings.save_voice_input_tool(tool)?;
-        match action {
+        apply_voice_tool_write(
+            action,
+            tool,
             // 用户显式选择：保留 2026-10-03 的“选中即对齐”（自身窗口在前台时
             // 布防，等失焦后再切）。
-            VoiceToolWriteAction::UserSelect => platform.set_voice_input_tool(tool),
+            |tool| platform.set_voice_input_tool(tool),
             // 启动恢复 / 旧配置推断：只恢复按下语音键时的兜底切换目标。
-            VoiceToolWriteAction::Restore => platform.restore_voice_input_tool(tool),
-        }
+            |tool| platform.restore_voice_input_tool(tool),
+        );
         Ok(tool)
     })
     .await
@@ -6776,6 +6794,46 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #367 的回归锁：启动恢复/旧配置推断走 `Restore` 时，绝不能调用
+    /// `set_voice_input_tool`（后者会布防 `tool_select`，失焦后用
+    /// `TF_IPPMF_FORSESSION` 切换整个桌面）。用两个回调直接钉住分发，
+    /// 不依赖 Tauri 运行时或真实 TSF。
+    #[test]
+    fn restoring_voice_tool_write_never_uses_the_alignment_setter() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        apply_voice_tool_write(
+            VoiceToolWriteAction::Restore,
+            Some(VoiceInputTool::Wechat),
+            |_| calls.borrow_mut().push("set"),
+            |tool| {
+                calls.borrow_mut().push(match tool {
+                    Some(VoiceInputTool::Wechat) => "restore:wechat",
+                    _ => "restore:other",
+                });
+            },
+        );
+        assert_eq!(*calls.borrow(), vec!["restore:wechat"]);
+    }
+
+    /// 反向锁：用户显式选择工具时仍必须走 `set`，保留 2026-10-03 的
+    /// “选中即对齐”（Issue #367 只禁止启动/推断路径触发）。
+    #[test]
+    fn user_selection_voice_tool_write_still_uses_the_alignment_setter() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        apply_voice_tool_write(
+            VoiceToolWriteAction::UserSelect,
+            Some(VoiceInputTool::Doubao),
+            |tool| {
+                calls.borrow_mut().push(match tool {
+                    Some(VoiceInputTool::Doubao) => "set:doubao",
+                    _ => "set:other",
+                });
+            },
+            |_| calls.borrow_mut().push("restore"),
+        );
+        assert_eq!(*calls.borrow(), vec!["set:doubao"]);
+    }
 
     /// 手动回归（2026-11-10 用户现场）：程序选择返回的 `.lnk` 也必须能拿到 Shell 图标。
     /// 运行：

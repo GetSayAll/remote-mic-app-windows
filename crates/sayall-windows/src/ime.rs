@@ -1,4 +1,4 @@
-//! 微信输入法（WeType）会话级激活。
+//! 微信输入法（WeType）桌面级激活。
 //!
 //! 背景（2026-09-05 持锁实验实锤，Testing\investigation\p-ime-experiment.ps1
 //! 与 examples\ime_probe_mta.rs，判据 = ConsentStore 开麦时间戳）：
