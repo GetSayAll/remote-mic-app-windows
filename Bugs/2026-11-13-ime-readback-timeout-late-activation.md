@@ -27,4 +27,5 @@
   - `cargo check --workspace`：passed。
   - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
   - 真机冷切换（微信输入法冷启动 >500ms）、超时后 worker 完成日志、连续切换/快速选择、RC001/RC003：deferred。
+- 已知边界：本次只改“切换后读回”和超时/迟到副作用；`should_activate` 的预检查 `active_is_target` 仍可能在新 STA 线程上假阳性（本该切却走 AlreadyActive 快速路径）。该问题需要单独的真机实验与延迟权衡，不混入本次收口。
 - 隐私检查：本记录未包含个人路径、设备身份、语音内容或凭据。
