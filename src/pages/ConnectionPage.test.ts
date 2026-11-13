@@ -143,6 +143,7 @@ const mocks = vi.hoisted(() => ({
   setVoiceHoldHotkey: vi.fn(),
   getVoiceInputTool: vi.fn(),
   setVoiceInputTool: vi.fn(),
+  restoreVoiceInputTool: vi.fn(),
   getVokieInstallation: vi.fn(),
   openVokieHomepage: vi.fn(),
   launchVokie: vi.fn(),
@@ -173,6 +174,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setVoiceHoldHotkey: mocks.setVoiceHoldHotkey,
     getVoiceInputTool: mocks.getVoiceInputTool,
     setVoiceInputTool: mocks.setVoiceInputTool,
+    restoreVoiceInputTool: mocks.restoreVoiceInputTool,
     getVokieInstallation: mocks.getVokieInstallation,
     openVokieHomepage: mocks.openVokieHomepage,
     launchVokie: mocks.launchVokie,
@@ -211,6 +213,7 @@ describe("VB-CABLE first-launch guidance", () => {
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.restoreVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
@@ -444,7 +447,8 @@ describe("VB-CABLE first-launch guidance", () => {
     await flushPromises();
 
     expect(selectedToolCard(wrapper)).toBe("豆包输入法");
-    expect(mocks.setVoiceInputTool).toHaveBeenCalledWith("doubao");
+    // 老配置推断属于“恢复”，不能走会触发输入法对齐的 set（Issue #367）。
+    expect(mocks.restoreVoiceInputTool).toHaveBeenCalledWith("doubao");
     wrapper.unmount();
   });
 
@@ -1062,6 +1066,7 @@ describe("connection page remote model", () => {
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.restoreVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
@@ -1470,6 +1475,7 @@ describe("connection page audio gain", () => {
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.restoreVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
@@ -1702,6 +1708,7 @@ describe("connection page interface language", () => {
     mocks.setVoiceHoldHotkey.mockImplementation(async (hotkey) => hotkey);
     mocks.getVoiceInputTool.mockResolvedValue("wechat");
     mocks.setVoiceInputTool.mockImplementation(async (tool) => tool);
+    mocks.restoreVoiceInputTool.mockImplementation(async (tool) => tool);
     mocks.getVokieInstallation.mockResolvedValue({ installed: true, running: true });
     mocks.getOtherVoiceHotkey.mockResolvedValue(null);
     mocks.setOtherVoiceHotkey.mockImplementation(async (keys: string[]) => keys);
