@@ -49,6 +49,7 @@ export default {
   "翻页": "Paging",
   "上下翻页 · 滚到两端": "Page up/down · Scroll to edges",
   "预置应用已内置自动聚焦与翻页，无需学习或配置。": "Built-in apps already have automatic focus and paging; no learning or configuration is needed.",
+  "预置滚动区域已可用；重新学习会覆盖预置区域。": "The built-in scroll region is already available; learning again replaces it.",
   "预置聚焦是默认方式；如需聚焦特定聊天或输入框，可在下面自定义。": "The built-in focus method is the default. To focus a specific chat or input field, customize it below.",
   "当前使用预置默认聚焦；如果应用找不到输入框，请选择「记录点击位置」。": "The built-in default focus is active. If the app cannot find an input field, choose Click position.",
   "已自定义": "Customized",

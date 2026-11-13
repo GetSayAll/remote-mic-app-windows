@@ -1087,13 +1087,20 @@ const focusCustomTargets = computed<Array<{ id: string; name: string }>>(() => {
 
 const focusScrollStatus = computed(() => {
   const target = focusTarget.value;
-  if (!target || focusTargetIsBuiltInPreset.value) {
-    return focusTargetIsBuiltInPreset.value ? t("预置可用") : null;
+  if (!target) return null;
+  if (
+    scrollRegionForTarget(
+      focusScrollRegions.value,
+      target,
+      focusTargetPresetId.value,
+    )
+  ) {
+    return t("已学习");
   }
-  if (focusTargetIsLibraryPreset.value) return t("预置可用");
-  return scrollRegionForTarget(focusScrollRegions.value, target)
-    ? t("已学习")
-    : t("需学习");
+  if (focusTargetIsBuiltInPreset.value || focusTargetIsLibraryPreset.value) {
+    return t("预置可用");
+  }
+  return t("需学习");
 });
 
 watch([selectedStepId, focusTarget], () => {

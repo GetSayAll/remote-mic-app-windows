@@ -16,7 +16,6 @@ import {
   type ShortcutCaptureEdge,
 } from "../lib/bridge";
 import { FOCUS_STRATEGY_OPTIONS } from "../lib/focus-defaults";
-import { focusStrategyLabel } from "../lib/app-adaptation";
 import { t } from "../lib/i18n";
 import { MODIFIER_KEYS, codeToKeyCode } from "../lib/key-codes";
 
@@ -65,24 +64,9 @@ const pointBusy = computed(
   () => pointState.value === "opening" || pointState.value === "recording",
 );
 const controlsDisabled = computed(() => props.disabled || busy.value);
-// 主选项保留「只打开 APP / 打开后自动聚焦」，并恢复 Windows 独有的
-// 「记录点击位置」：微信 4.x 不暴露 UIA 树，只有按位置点击能聚焦聊天输入框。
-// auto_composer 旧档案仍可执行，但不再提供入口。
-const primaryOptions = computed(() =>
-  FOCUS_STRATEGY_OPTIONS.filter(
-    (option) =>
-      option.value === "open_only" ||
-      option.value === "recorded_element" ||
-      option.value === "recorded_point",
-  ),
-);
-const legacyStrategy = computed<string | null>(() => {
-  const current = effective.value.strategy;
-  if (current !== "auto_composer") return null;
-  // 预置默认就是 auto_composer 时不叫“旧版”；只有用户存过的旧档案才提示。
-  if (!props.profile && props.fallback?.strategy === "auto_composer") return null;
-  return t(focusStrategyLabel(current));
-});
+// 与普通 APP 一致：五种策略都可选。预置应用默认策略会显示为选中态，
+// 同时允许用户重新学习覆盖。
+const primaryOptions = computed(() => FOCUS_STRATEGY_OPTIONS);
 const shortcut = computed(() => effective.value.shortcut);
 
 function notice(message: string, tone: "success" | "error" = "success"): void {
@@ -112,7 +96,8 @@ function profileForStrategy(next: FocusStrategy): AppFocusProfile {
   const previous = effective.value;
   const profile: AppFocusProfile = { strategy: next };
   if (next === "app_shortcut") {
-    if (previous.shortcut?.keys?.length) profile.shortcut = previous.shortcut;
+    const shortcut = previous.shortcut ?? props.fallback?.shortcut;
+    if (shortcut?.keys?.length) profile.shortcut = shortcut;
   }
   if (next === "recorded_element" && previous.recorded) profile.recorded = previous.recorded;
   if (next === "recorded_point" && previous.point) profile.point = previous.point;
@@ -408,6 +393,9 @@ onUnmounted(() => {
   <section class="section-card focus-editor" :aria-busy="busy || learnBusy || pointBusy">
     <div class="section-head">
       <h3>{{ t("聚焦方式") }}</h3>
+      <span v-if="props.fallback" class="preset-source">
+        {{ props.profile ? t("已自定义") : t("预置可用") }}
+      </span>
       <span class="spacer"></span>
     </div>
 
@@ -441,17 +429,11 @@ onUnmounted(() => {
         </svg>
         <span class="option-label">
           {{ t(option.label) }}
-          <small v-if="option.value === 'recorded_point'">{{ t("界面不暴露输入框时") }}</small>
+          <small v-if="option.value === 'auto_composer'">{{ t("Windows 默认") }}</small>
+          <small v-else-if="option.value === 'recorded_point'">{{ t("界面不暴露输入框时") }}</small>
         </span>
       </button>
     </div>
-
-    <p v-if="legacyStrategy" class="hint legacy-hint">
-      {{ t("当前为旧版聚焦方式：{strategy}。选择上方任一方式后生效。", { strategy: legacyStrategy }) }}
-    </p>
-    <p v-else-if="strategy === 'auto_composer'" class="hint">
-      {{ t("当前使用预置默认聚焦；如果应用找不到输入框，请选择「记录点击位置」。") }}
-    </p>
 
     <template v-if="strategy === 'recorded_element'">
       <p class="hint">
@@ -525,6 +507,16 @@ onUnmounted(() => {
       <p v-if="pointMessage" class="state-message" :class="pointState">{{ pointMessage }}</p>
     </template>
 
+    <template v-else-if="strategy === 'auto_composer'">
+      <p class="hint">
+        {{ t("打开 APP 后由 Windows 自动寻找可编辑的输入框；找不到时再改用学习或点击位置。") }}
+      </p>
+    </template>
+
+    <template v-else-if="strategy === 'open_only'">
+      <p class="hint">{{ t("只打开 APP，不移动输入焦点。") }}</p>
+    </template>
+
     <template v-else-if="strategy === 'app_shortcut'">
       <p class="hint">
         {{ t("先点击“录入快捷键”，再按下该 APP 用于聚焦输入框的单个按键或组合键。执行时会先激活 APP，再发送此按键。") }}
@@ -594,6 +586,14 @@ onUnmounted(() => {
 }
 .section-head .spacer {
   flex: 1 1 auto;
+}
+.preset-source {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-surface);
+  color: var(--success-text);
+  font-size: 10.5px;
+  font-weight: 600;
 }
 .option-grid {
   display: grid;

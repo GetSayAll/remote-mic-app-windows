@@ -31,7 +31,6 @@ import {
   explicitProfileForTarget,
   findAppBindings,
   findMacroReferences,
-  focusStrategyLabel,
   mergeApplications,
   nextSelectedTarget,
   removeAppAdaptation,
@@ -89,7 +88,11 @@ const selectedProfile = computed<AppFocusProfile | null>(() => {
 });
 const selectedScrollRegion = computed<ScrollRegionTarget | null>(() =>
   selectedRow.value
-    ? scrollRegionForTarget(mappings.value.scrollRegions, selectedRow.value.target)
+    ? scrollRegionForTarget(
+        mappings.value.scrollRegions,
+        selectedRow.value.target,
+        selectedRow.value.presetId,
+      )
     : null,
 );
 const scrollBusy = computed(() => scrollLearning.value || scrollTesting.value !== null || saving.value);
@@ -98,20 +101,10 @@ const fallbackProfile = computed<AppFocusProfile | null>(() => {
   return row?.preset ? presetFocusDefault(row.presetId ?? row.target, true) : null;
 });
 const selectedIsPreset = computed(() => Boolean(selectedRow.value?.preset));
-const presetFocusLabel = computed(() => {
-  const row = selectedRow.value;
-  if (!row) return "";
-  const profile = effectiveAppProfile(row, mappings.value.focusProfiles);
-  return profile ? focusStrategyLabel(profile.strategy) : t("只打开 APP");
-});
-/**
- * 预置应用的聚焦默认值只是兜底：没有可靠内置快捷键（auto_composer）或已有显式档案时，
- * 允许用户重新学习。Chrome / 网易云这类有稳定快捷键的预置仍保持只读。
- */
-const presetFocusEditable = computed(() => {
-  const row = selectedRow.value;
-  if (!row?.preset) return false;
-  return Boolean(selectedProfile.value) || fallbackProfile.value?.strategy === "auto_composer";
+/** 预置应用的滚动区域已可用；用户重新学习后以显式档案为准。 */
+const scrollStatusLabel = computed(() => {
+  if (selectedScrollRegion.value) return t("已学习");
+  return selectedIsPreset.value ? t("预置可用") : t("需学习");
 });
 /** 没有真实路径的预设只剩产品默认值，用「恢复默认」语义；有路径的按普通 APP 展示。 */
 function isPresetPlaceholder(row: AppAdaptationRow | null): boolean {
@@ -160,14 +153,16 @@ function selectRow(target: string): void {
 
 /** 列表摘要：预设整体预置可用；自定义 APP 显示短聚焦名 + 翻页状态。 */
 function rowStatus(row: AppAdaptationRow): string {
-  if (row.preset) {
-    const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
-    return `${focus} · ${t("预置可用")}`;
-  }
   const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
-  const scroll = scrollRegionForTarget(mappings.value.scrollRegions, row.target)
+  const scroll = scrollRegionForTarget(
+    mappings.value.scrollRegions,
+    row.target,
+    row.presetId,
+  )
     ? t("已学习")
-    : t("需学习");
+    : row.preset
+      ? t("预置可用")
+      : t("需学习");
   return `${focus} · ${scroll}`;
 }
 
@@ -305,15 +300,18 @@ async function saveProfile(
 }
 
 async function saveScrollRegion(
-  target: string,
+  row: AppAdaptationRow,
   region: ScrollRegionTarget | null,
 ): Promise<boolean> {
   const scrollRegions = { ...(mappings.value.scrollRegions ?? {}) };
-  const expected = target.toLocaleLowerCase();
+  const keys = [row.target, row.presetId]
+    .filter((key): key is string => Boolean(key))
+    .map((key) => key.toLocaleLowerCase());
   for (const key of Object.keys(scrollRegions)) {
-    if (key.toLocaleLowerCase() === expected) delete scrollRegions[key];
+    if (keys.includes(key.toLocaleLowerCase())) delete scrollRegions[key];
   }
-  if (region) scrollRegions[target] = region;
+  const key = row.presetId ?? row.target;
+  if (region) scrollRegions[key] = region;
   return persist({ ...mappings.value, scrollRegions });
 }
 
@@ -325,7 +323,7 @@ async function learnScrollRegionForSelected(): Promise<void> {
   try {
     await activateAppForLearning(row.target);
     const region = await learnScrollRegion();
-    if (await saveScrollRegion(row.target, region)) {
+    if (await saveScrollRegion(row, region)) {
       scrollRegionMessage(t("滚动区域已记录，可以直接测试翻页。"));
     } else {
       scrollRegionMessage(t("保存滚动区域失败，请重试。"), "error");
@@ -341,7 +339,7 @@ async function clearScrollRegion(): Promise<void> {
   const row = selectedRow.value;
   if (!row || scrollBusy.value) return;
   scrollMessage.value = null;
-  if (!(await saveScrollRegion(row.target, null))) {
+  if (!(await saveScrollRegion(row, null))) {
     scrollRegionMessage(t("清除滚动区域失败，请重试。"), "error");
   }
 }
@@ -351,8 +349,15 @@ async function testScroll(command: ScrollCommand): Promise<void> {
   if (!row || !row.installed || scrollBusy.value) return;
   scrollTesting.value = command;
   scrollMessage.value = null;
+  const regionKey =
+    scrollRegionForTarget(mappings.value.scrollRegions, row.target)
+      ? row.target
+      : row.presetId &&
+          scrollRegionForTarget(mappings.value.scrollRegions, row.presetId)
+        ? row.presetId
+        : (row.presetId ?? row.target);
   try {
-    const outcome = await testScrollRegion(row.target, command);
+    const outcome = await testScrollRegion(regionKey, command);
     if (command === "to_top" && outcome.atEdge) {
       scrollRegionMessage(t("已滚到顶部。"));
     } else if (command === "to_bottom" && outcome.atEdge) {
@@ -519,43 +524,11 @@ onUnmounted(() => {
           {{ t("应用未找到，请重新添加。") }}
         </p>
 
-        <p v-if="!selectedIsPreset" class="scope-note">
+        <p class="scope-note">
           {{ t("输入框聚焦和上下翻页按 APP 单独设置：只要该 APP 在前台就能用，与「打开 App」动作无关。") }}
         </p>
 
-        <section v-if="selectedIsPreset" class="section-card preset-card">
-          <div class="section-head">
-            <h3>{{ t("预置能力") }}</h3>
-            <span class="scroll-status learned">{{ t("预置可用") }}</span>
-            <span class="spacer"></span>
-          </div>
-          <div class="preset-status-row">
-            <span class="preset-status-label">{{ t("聚焦方式") }}</span>
-            <span class="preset-status-value">{{ presetFocusLabel }}</span>
-            <span class="preset-badge">{{
-              selectedProfile
-                ? t("已自定义")
-                : presetFocusEditable
-                  ? t("需设置")
-                  : t("预置可用")
-            }}</span>
-          </div>
-          <div class="preset-status-row">
-            <span class="preset-status-label">{{ t("翻页") }}</span>
-            <span class="preset-status-value">{{ t("上下翻页 · 滚到两端") }}</span>
-            <span class="preset-badge">{{ t("预置可用") }}</span>
-          </div>
-          <p class="hint">
-            {{
-              presetFocusEditable
-                ? t("预置聚焦是默认方式；如需聚焦特定聊天或输入框，可在下面自定义。")
-                : t("预置应用已内置自动聚焦与翻页，无需学习或配置。")
-            }}
-          </p>
-        </section>
-
         <AppFocusProfileEditor
-          v-if="!selectedIsPreset || presetFocusEditable"
           :target="selectedRow.target"
           :profile="selectedProfile"
           :fallback="fallbackProfile"
@@ -564,16 +537,23 @@ onUnmounted(() => {
           @notice="showNotice"
         />
 
-        <section v-if="!selectedIsPreset" class="section-card scroll-card">
+        <section class="section-card scroll-card">
           <div class="section-head">
             <h3>{{ t("滚动区域") }}</h3>
-            <span class="scroll-status" :class="{ learned: selectedScrollRegion }">
-              {{ selectedScrollRegion ? t("已学习") : t("需学习") }}
+            <span
+              class="scroll-status"
+              :class="{ learned: selectedScrollRegion || selectedIsPreset }"
+            >
+              {{ scrollStatusLabel }}
             </span>
             <span class="spacer"></span>
           </div>
           <p class="hint">
-            {{ t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。") }}
+            {{
+              selectedIsPreset && !selectedScrollRegion
+                ? t("预置滚动区域已可用；重新学习会覆盖预置区域。")
+                : t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。")
+            }}
           </p>
           <div class="scroll-learn-row">
             <button
@@ -1005,38 +985,6 @@ onUnmounted(() => {
 }
 .scroll-status.learned {
   color: var(--success-text);
-}
-.preset-card {
-  display: grid;
-  gap: 8px;
-}
-.preset-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 28px;
-  padding: 5px 9px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-subtle);
-}
-.preset-status-label {
-  min-width: 64px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.preset-status-value {
-  flex: 1 1 auto;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.preset-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--success-surface);
-  color: var(--success-text);
-  font-size: 11px;
-  font-weight: 600;
 }
 .scroll-learn-row,
 .scroll-edge-row {

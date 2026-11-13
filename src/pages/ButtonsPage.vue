@@ -648,11 +648,19 @@ const customAppsExpanded = computed(
 const focusScrollStatus = computed(() => {
   const target = focusTarget.value;
   if (!target) return null;
-  if (focusTargetIsBuiltInPreset.value) return t("预置可用");
-  if (focusTargetIsLibraryPreset.value) return t("预置可用");
-  return scrollRegionForTarget(mappings.value.scrollRegions, target)
-    ? t("已学习")
-    : t("需学习");
+  if (
+    scrollRegionForTarget(
+      mappings.value.scrollRegions,
+      target,
+      focusTargetPresetId.value,
+    )
+  ) {
+    return t("已学习");
+  }
+  if (focusTargetIsBuiltInPreset.value || focusTargetIsLibraryPreset.value) {
+    return t("预置可用");
+  }
+  return t("需学习");
 });
 watch([presetApps, () => mappings.value.applications], () => {
   registerPresetAppNames([...presetApps.value, ...(mappings.value.applications ?? []).map(app => ({ id: app.path, name: app.name }))]);

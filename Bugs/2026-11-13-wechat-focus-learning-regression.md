@@ -34,13 +34,16 @@
 - `cargo fmt --all -- --check` passed。
 - `cargo test --workspace -j 1` passed：`sayall-windows` 556 passed / 17 ignored；`sayall-windows-app` 220 passed / 2 ignored；其余 workspace 测试 passed。
 - `cargo check -p sayall-windows-app --features runtime-simulation` passed。
-- `pnpm test` passed：688 passed | 10 skipped。
+- `pnpm test` passed：689 passed | 10 skipped。
 - `pnpm build`（`vue-tsc --noEmit` + `vite build`）passed。
-- 新增回归用例：微信 `recorded_point` 档案优先于预设默认；预置微信可学习点击位置并按预设 id 落盘；预置目标显示摘要与「去配置」；旧 `recorded_point` 档案在编辑器里可见可执行。
-- 本地测试包（基于 `origin/main` `ac2e7e3` + 修复提交 `aac41fa`）：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `C1A7E300BBDEFEACB5C92BC9AC870E2E8E2B432145291B9B2B8A28579D69B50C`（本地测试密钥签名，不可发布）；前端嵌入校验 18/18 passed。
-- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐，app exe 仅 3 字节 UNK→NSS 差异，内嵌修订号 `aac41fa0` count=1；窗口截图确认 1.9.1 连接页正常，不是目录列表。
+- 新增回归用例：微信 `recorded_point` 档案优先于预设默认；预置微信可学习点击位置并按预设 id 落盘；预置目标显示摘要与「去配置」；旧 `recorded_point` 档案在编辑器里可见可执行；预置滚动区域可学习覆盖并在清除后恢复预置。
+- 本地测试包：2026-11-14 变更后重新构建并安装验证，结果见交付说明。
 - 真实微信目视确认：**deferred**。需要在本机微信 4.x 里记录一个群聊输入框位置，确认「打开微信 → 聚焦到该群」实际点击落点正确。
 
 ## 隐私检查
 
 本记录未包含个人路径、设备身份、聊天内容或凭据；只保留代码路径、策略名和测试计数。
+
+## 2026-11-14 追加：预置 APP 与普通 APP 一致
+
+用户要求移除只读「预置能力」卡：预置 APP 也显示聚焦方式与滚动区域，预置默认策略显示为选中并标「预置可用」；用户仍可重新学习覆盖，滚动区域清除后恢复预置。已同步修改 `AppsPage`、`AppFocusProfileEditor` 与滚动区域预设 id/路径别名解析；自动化 passed。

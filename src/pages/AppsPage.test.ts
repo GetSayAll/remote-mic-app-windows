@@ -188,8 +188,9 @@ describe("APP adaptation page", () => {
     await flushPromises();
     expect(wrapper.find(".detail-panel").text()).toContain("预置可用");
     expect(wrapper.find(".detail-panel").text()).toContain("使用 APP 快捷键聚焦");
-    expect(wrapper.find(".focus-editor").exists()).toBe(false);
-    expect(wrapper.find(".scroll-card").exists()).toBe(false);
+    expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.find(".scroll-card").exists()).toBe(true);
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
   });
 
   it("shows an explicitly navigated preset without adding it to the library", async () => {
@@ -301,6 +302,8 @@ describe("APP adaptation page", () => {
 
     expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
       "只打开 APP",
+      "自动选择输入框 Windows 默认",
+      "使用 APP 快捷键聚焦",
       "打开后自动聚焦",
       "记录点击位置 界面不暴露输入框时",
     ]);
@@ -318,6 +321,8 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
     expect(wrapper.find(".app-row-status").text()).toBe("自动选择 · 预置可用");
     expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.find(".focus-option.selected").text()).toContain("自动选择输入框");
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
 
     const pointOption = wrapper
       .findAll(".focus-option")
@@ -343,6 +348,41 @@ describe("APP adaptation page", () => {
     expect(saved.focusProfiles.wechat?.point?.xRatio).toBe(0.5);
     expect(wrapper.find(".app-row-status").text()).toContain("点击位置");
     vi.useRealTimers();
+  });
+
+  it("lets a preset override and restore its preset scroll region", async () => {
+    const target = "C:\\Program Files\\Tencent\\WeChat\\Weixin.exe";
+    configureMappings({
+      applications: [{ name: "微信", path: target }],
+    });
+    const wrapper = await mountPage();
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "学习滚动区域")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(activateAppForLearning).toHaveBeenCalledWith(target);
+    expect(learnScrollRegion).toHaveBeenCalled();
+    const learned = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      scrollRegions?: Record<string, { automationId?: string }>;
+    };
+    expect(learned.scrollRegions?.wechat?.automationId).toBe("RootWebArea");
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("已学习");
+    expect(wrapper.find(".app-row-status").text()).toContain("已学习");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "清除学习结果")!
+      .trigger("click");
+    await flushPromises();
+    const cleared = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      scrollRegions?: Record<string, unknown>;
+    };
+    expect(cleared.scrollRegions).toBeUndefined();
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
   });
 
   it("blocks deletion while a button still opens the app", async () => {
@@ -400,7 +440,7 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".page-notice").exists()).toBe(false);
   });
 
-  it("shows built-in capabilities for a manually added preset without editable focus or scrolling", async () => {
+  it("shows preset focus and scroll as normal editable sections", async () => {
     configureMappings({
       applications: [
         { name: "Chrome 浏览器", path: "C:\\Program Files\\Chrome\\chrome.exe" },
@@ -409,11 +449,17 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
     const detail = wrapper.find(".detail-panel").text();
     expect(detail).not.toContain("C:\\Program Files\\Chrome\\chrome.exe");
-    expect(detail).toContain("预置能力");
-    expect(detail).toContain("预置可用");
+    expect(detail).not.toContain("预置能力");
     expect(detail).toContain("使用 APP 快捷键聚焦");
-    expect(wrapper.find(".focus-editor").exists()).toBe(false);
-    expect(wrapper.find(".scroll-card").exists()).toBe(false);
+    expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.find(".focus-option.selected").text()).toContain(
+      "使用 APP 快捷键聚焦",
+    );
+    expect(wrapper.find(".scroll-card").exists()).toBe(true);
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
+    expect(wrapper.find(".scroll-card").text()).toContain(
+      "预置滚动区域已可用；重新学习会覆盖预置区域。",
+    );
     expect(wrapper.find(".delete-row").exists()).toBe(true);
   });
 

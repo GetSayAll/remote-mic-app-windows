@@ -314,11 +314,14 @@ export function removeAppAdaptation(
 export function scrollRegionForTarget(
   regions: Record<string, ScrollRegionTarget> | undefined,
   target: string | null,
+  presetId?: string | null,
 ): ScrollRegionTarget | null {
   if (!regions || !target) return null;
-  const expected = keyOf(target);
+  const keys = [target, presetId]
+    .filter((key): key is string => Boolean(key))
+    .map((key) => keyOf(key));
   for (const [key, region] of Object.entries(regions)) {
-    if (keyOf(key) === expected) return region;
+    if (keys.includes(keyOf(key))) return region;
   }
   return null;
 }

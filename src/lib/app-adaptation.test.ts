@@ -304,6 +304,13 @@ describe("deleting an adaptation", () => {
         "c:\\apps\\cursor.exe",
       ),
     ).toEqual({ controlType: "Document" });
+    expect(
+      scrollRegionForTarget(
+        { wechat: { controlType: "Document" } },
+        "C:\\Apps\\Weixin.exe",
+        "wechat",
+      ),
+    ).toEqual({ controlType: "Document" });
     expect(scrollRegionForTarget(undefined, "chrome")).toBeNull();
   });
 });
