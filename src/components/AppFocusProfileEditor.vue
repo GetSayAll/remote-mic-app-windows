@@ -3,6 +3,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   activateAppForLearning,
   chordLabel,
+  focusPointErrorLabel,
+  learnFocusPoint,
   learnFocusTarget,
   startShortcutCapture,
   stopShortcutCapture,
@@ -38,6 +40,9 @@ const strategy = computed(() => effective.value.strategy);
 const busy = ref(false);
 const learnState = ref<"idle" | "opening" | "learning" | "captured" | "error">("idle");
 const learnMessage = ref<string | null>(null);
+const pointState = ref<"idle" | "opening" | "recording" | "recorded" | "error">("idle");
+const pointMessage = ref<string | null>(null);
+let pointTimer: number | null = null;
 let generation = 0;
 
 const capturing = ref(false);
@@ -56,19 +61,27 @@ let unmounted = false;
 const learnBusy = computed(
   () => learnState.value === "opening" || learnState.value === "learning",
 );
+const pointBusy = computed(
+  () => pointState.value === "opening" || pointState.value === "recording",
+);
 const controlsDisabled = computed(() => props.disabled || busy.value);
-// 对齐 Mac：只保留「只打开 APP / 打开后自动聚焦」两个主选项；
-// 旧版 auto_composer / recorded_point 档案仍可执行，但不再提供入口。
+// 主选项保留「只打开 APP / 打开后自动聚焦」，并恢复 Windows 独有的
+// 「记录点击位置」：微信 4.x 不暴露 UIA 树，只有按位置点击能聚焦聊天输入框。
+// auto_composer 旧档案仍可执行，但不再提供入口。
 const primaryOptions = computed(() =>
   FOCUS_STRATEGY_OPTIONS.filter(
-    (option) => option.value === "open_only" || option.value === "recorded_element",
+    (option) =>
+      option.value === "open_only" ||
+      option.value === "recorded_element" ||
+      option.value === "recorded_point",
   ),
 );
 const legacyStrategy = computed<string | null>(() => {
   const current = effective.value.strategy;
-  return current === "auto_composer" || current === "recorded_point"
-    ? t(focusStrategyLabel(current))
-    : null;
+  if (current !== "auto_composer") return null;
+  // 预置默认就是 auto_composer 时不叫“旧版”；只有用户存过的旧档案才提示。
+  if (!props.profile && props.fallback?.strategy === "auto_composer") return null;
+  return t(focusStrategyLabel(current));
 });
 const shortcut = computed(() => effective.value.shortcut);
 
@@ -85,10 +98,14 @@ function setShortcutMessage(
 }
 
 function clearLearnState(): void {
-  // 改选策略/切换目标都会作废进行中的学习，迟到结果不得覆盖新状态。
+  // 改选策略/切换目标都会作废进行中的学习与位置记录，迟到结果不得覆盖新状态。
   generation += 1;
   learnState.value = "idle";
   learnMessage.value = null;
+  pointState.value = "idle";
+  pointMessage.value = null;
+  if (pointTimer !== null) window.clearTimeout(pointTimer);
+  pointTimer = null;
 }
 
 function profileForStrategy(next: FocusStrategy): AppFocusProfile {
@@ -98,6 +115,7 @@ function profileForStrategy(next: FocusStrategy): AppFocusProfile {
     if (previous.shortcut?.keys?.length) profile.shortcut = previous.shortcut;
   }
   if (next === "recorded_element" && previous.recorded) profile.recorded = previous.recorded;
+  if (next === "recorded_point" && previous.point) profile.point = previous.point;
   return profile;
 }
 
@@ -116,7 +134,7 @@ async function selectStrategy(next: FocusStrategy): Promise<void> {
 }
 
 async function startFocusLearning(): Promise<void> {
-  if (controlsDisabled.value || learnBusy.value) return;
+  if (controlsDisabled.value || learnBusy.value || pointBusy.value) return;
   const requestGeneration = ++generation;
   learnState.value = "opening";
   learnMessage.value = t("正在打开目标应用…");
@@ -157,6 +175,67 @@ async function testFocus(): Promise<void> {
     console.warn("test app focus failed", error);
     notice(t("测试请求发送失败，请重试。"), "error");
   }
+}
+
+async function startPointRecording(): Promise<void> {
+  if (controlsDisabled.value || pointBusy.value || learnBusy.value) return;
+  const requestGeneration = ++generation;
+  pointState.value = "opening";
+  pointMessage.value = t("正在打开目标应用…");
+  try {
+    await activateAppForLearning(props.target);
+  } catch {
+    if (requestGeneration !== generation || unmounted) return;
+    pointState.value = "error";
+    pointMessage.value = t("没能打开目标应用，请确认它已安装后再试。");
+    return;
+  }
+  if (requestGeneration !== generation || unmounted) return;
+  pointState.value = "recording";
+  pointMessage.value = t("正在等待你把鼠标停在目标输入框上……（6 秒后自动记录）");
+  if (pointTimer !== null) window.clearTimeout(pointTimer);
+  pointTimer = window.setTimeout(() => {
+    pointTimer = null;
+    void finishPointRecording(requestGeneration);
+  }, 6000);
+}
+
+async function finishPointRecording(requestGeneration: number): Promise<void> {
+  if (requestGeneration !== generation || unmounted) return;
+  try {
+    const point = await learnFocusPoint(props.target);
+    if (requestGeneration !== generation || unmounted) return;
+    const saved = await props.save({
+      ...profileForStrategy("recorded_point"),
+      strategy: "recorded_point",
+      point,
+    });
+    if (requestGeneration !== generation || unmounted) return;
+    if (saved) {
+      pointState.value = "recorded";
+      pointMessage.value = t(
+        "已记录位置（窗口大小变化超过 25% 时会拒绝点击，需要重新记录）",
+      );
+    } else {
+      pointState.value = "error";
+      pointMessage.value = t("保存点击位置失败，请重试。");
+    }
+  } catch (error) {
+    if (requestGeneration !== generation || unmounted) return;
+    const raw = error instanceof Error ? error.message : String(error);
+    console.warn("learn focus point failed", raw);
+    pointState.value = "error";
+    pointMessage.value = t("记录位置失败：{reason}", {
+      reason: focusPointErrorLabel(raw),
+    });
+  }
+}
+
+async function clearRecordedPoint(): Promise<void> {
+  if (controlsDisabled.value) return;
+  clearLearnState();
+  const saved = await props.save({ strategy: "recorded_point" });
+  pointMessage.value = saved ? t("已清除记录") : t("清除记录失败，请重试。");
 }
 
 async function beginShortcutCapture(): Promise<void> {
@@ -317,6 +396,8 @@ onUnmounted(() => {
   window.removeEventListener("blur", handleBlur);
   unlistenCapture?.();
   unlistenCapture = null;
+  if (pointTimer !== null) window.clearTimeout(pointTimer);
+  pointTimer = null;
   if (captureTimeout !== null) window.clearTimeout(captureTimeout);
   captureTimeout = null;
   void stopShortcutCapture().catch(() => undefined);
@@ -324,7 +405,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="section-card focus-editor" :aria-busy="busy || learnBusy">
+  <section class="section-card focus-editor" :aria-busy="busy || learnBusy || pointBusy">
     <div class="section-head">
       <h3>{{ t("聚焦方式") }}</h3>
       <span class="spacer"></span>
@@ -358,12 +439,18 @@ onUnmounted(() => {
         <svg v-else class="radio-icon" viewBox="0 0 16 16" aria-hidden="true">
           <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.2" />
         </svg>
-        <span>{{ t(option.label) }}</span>
+        <span class="option-label">
+          {{ t(option.label) }}
+          <small v-if="option.value === 'recorded_point'">{{ t("界面不暴露输入框时") }}</small>
+        </span>
       </button>
     </div>
 
     <p v-if="legacyStrategy" class="hint legacy-hint">
       {{ t("当前为旧版聚焦方式：{strategy}。选择上方任一方式后生效。", { strategy: legacyStrategy }) }}
+    </p>
+    <p v-else-if="strategy === 'auto_composer'" class="hint">
+      {{ t("当前使用预置默认聚焦；如果应用找不到输入框，请选择「记录点击位置」。") }}
     </p>
 
     <template v-if="strategy === 'recorded_element'">
@@ -396,6 +483,46 @@ onUnmounted(() => {
       <p v-else-if="!effective.recorded" class="hint">
         {{ t("学习只需要在目标 APP 里点一下输入框，比录快捷键更快。") }}
       </p>
+    </template>
+
+    <template v-else-if="strategy === 'recorded_point'">
+      <p class="hint">
+        {{ t("「记录点击位置」会先打开目标应用；把鼠标停在要点击的位置上，6 秒后自动记录，之后按这个位置点击聚焦。") }}
+      </p>
+      <div class="actions">
+        <button class="primary" type="button" :disabled="controlsDisabled || pointBusy || learnBusy" @click="startPointRecording">
+          {{
+            pointState === "opening"
+              ? t("正在打开应用…")
+              : pointState === "recording"
+                ? t("等待鼠标停留…")
+                : effective.point
+                  ? t("重新记录位置")
+                  : t("开始记录位置")
+          }}
+        </button>
+        <button
+          class="secondary"
+          type="button"
+          :disabled="controlsDisabled || !effective.point"
+          @click="testFocus"
+        >
+          {{ t("测试打开与聚焦") }}
+        </button>
+        <span class="inline-status" :class="{ pending: !effective.point }">
+          {{ effective.point ? t("已记录点击位置") : t("尚未记录点击位置") }}
+        </span>
+        <button
+          v-if="effective.point"
+          class="quiet"
+          type="button"
+          :disabled="controlsDisabled"
+          @click="clearRecordedPoint"
+        >
+          {{ t("清除") }}
+        </button>
+      </div>
+      <p v-if="pointMessage" class="state-message" :class="pointState">{{ pointMessage }}</p>
     </template>
 
     <template v-else-if="strategy === 'app_shortcut'">
@@ -499,6 +626,20 @@ onUnmounted(() => {
 }
 .focus-option.selected:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.option-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.option-label small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+.focus-option.selected .option-label small {
+  color: color-mix(in srgb, var(--accent) 70%, var(--muted));
 }
 .radio-icon {
   width: 15px;

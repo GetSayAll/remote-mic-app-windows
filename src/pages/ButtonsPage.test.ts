@@ -1669,6 +1669,42 @@ describe("buttons mapping page", () => {
     ]);
   });
 
+  it("built-in preset with a learned click position shows the summary and a configure entry", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target: "wechat" },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      focusProfiles: {
+        wechat: {
+          strategy: "recorded_point",
+          point: {
+            xRatio: 0.5,
+            yRatio: 0.82,
+            windowWidth: 1200,
+            windowHeight: 800,
+          },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("记录点击位置");
+    expect(summary.find(".link-button").text()).toBe("去配置");
+    await summary.find(".link-button").trigger("click");
+    expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
+      { page: "apps", params: { appTarget: "wechat" } },
+    ]);
+  });
+
   it("手动添加的预设显示预置可用，不提供可编辑配置", async () => {
     const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     vi.mocked(listPresetApps).mockResolvedValueOnce([

@@ -130,6 +130,7 @@
   - **已知边界**：完全不暴露无障碍接口的应用（微信 4.x）只能走「记录点击位置」；窗口尺寸变化超过 25%（旧记录）会拒绝点击并要求重新记录；记录位置不感知布局本身的变化。
   - 自动化 passed（八轮修复后重跑）：`cargo test --workspace`（core 56 / windows 388 / app 131）、`cargo fmt --all -- --check`、vitest 421 passed | 10 skipped、`vue-tsc` + `vite build`。
   - **待办**：真机复验（RC001/RC003 全矩阵、微信「记录点击位置」的目视确认）仍 deferred。
+  - 2026-11-13 修复 1.9 回归：预置应用（微信）显式聚焦档案重新优先于预设默认；APP 适配页恢复「记录点击位置」学习，组合动作页显示「去配置」。自动化见 `Bugs/2026-11-13-wechat-focus-learning-regression.md`；真实微信目视仍 deferred。
 - [ ] 增强捕获：换遥控器后**自动重选宿主**（2026-10-13 现场提出，助手侧已实现）：助手新增目标
   watchdog（每 2 秒复查 `rc003-target.ini`），目标地址变为另一支且宿主不同 ⇒ 记
   `[RETARGET] event=restart` 并重启自己（复用启动路径重新定位/注入）；应用侧在"报告层没生效 + 豆包"

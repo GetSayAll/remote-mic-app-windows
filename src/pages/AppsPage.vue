@@ -28,12 +28,12 @@ import {
   buildAppRows,
   compactFocusLabel,
   effectiveAppProfile,
+  explicitProfileForTarget,
   findAppBindings,
   findMacroReferences,
   focusStrategyLabel,
   mergeApplications,
   nextSelectedTarget,
-  profileForTarget,
   removeAppAdaptation,
   scrollRegionForTarget,
   type AppAdaptationRow,
@@ -83,7 +83,9 @@ const selectedRow = computed<AppAdaptationRow | null>(
 );
 const selectedProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
-  return row ? profileForTarget(mappings.value.focusProfiles, row.target) : null;
+  return row
+    ? explicitProfileForTarget(mappings.value.focusProfiles, row.target, row.presetId)
+    : null;
 });
 const selectedScrollRegion = computed<ScrollRegionTarget | null>(() =>
   selectedRow.value
@@ -102,10 +104,23 @@ const presetFocusLabel = computed(() => {
   const profile = effectiveAppProfile(row, mappings.value.focusProfiles);
   return profile ? focusStrategyLabel(profile.strategy) : t("只打开 APP");
 });
+/**
+ * 预置应用的聚焦默认值只是兜底：没有可靠内置快捷键（auto_composer）或已有显式档案时，
+ * 允许用户重新学习。Chrome / 网易云这类有稳定快捷键的预置仍保持只读。
+ */
+const presetFocusEditable = computed(() => {
+  const row = selectedRow.value;
+  if (!row?.preset) return false;
+  return Boolean(selectedProfile.value) || fallbackProfile.value?.strategy === "auto_composer";
+});
 /** 没有真实路径的预设只剩产品默认值，用「恢复默认」语义；有路径的按普通 APP 展示。 */
 function isPresetPlaceholder(row: AppAdaptationRow | null): boolean {
   return Boolean(row?.preset && !row.path);
 }
+/** 只有用户手动添加过的应用才显示删除适配；显式导航来的条目删除后仍会留在当前页。 */
+const canDeleteSelected = computed(
+  () => Boolean(selectedRow.value?.library) && !isPresetPlaceholder(selectedRow.value),
+);
 const bindings = computed(() => {
   const row = selectedRow.value;
   return row ? findAppBindings(mappings.value.actions, row.target) : [];
@@ -145,7 +160,10 @@ function selectRow(target: string): void {
 
 /** 列表摘要：预设整体预置可用；自定义 APP 显示短聚焦名 + 翻页状态。 */
 function rowStatus(row: AppAdaptationRow): string {
-  if (row.preset) return t("预置可用");
+  if (row.preset) {
+    const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
+    return `${focus} · ${t("预置可用")}`;
+  }
   const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
   const scroll = scrollRegionForTarget(mappings.value.scrollRegions, row.target)
     ? t("已学习")
@@ -269,13 +287,20 @@ async function persist(next: ButtonMappings): Promise<boolean> {
   }
 }
 
-async function saveProfile(target: string, profile: AppFocusProfile | null): Promise<boolean> {
+async function saveProfile(
+  row: AppAdaptationRow,
+  profile: AppFocusProfile | null,
+): Promise<boolean> {
   const focusProfiles = { ...(mappings.value.focusProfiles ?? {}) };
-  const expected = target.toLocaleLowerCase();
+  const keys = [row.target, row.presetId]
+    .filter((key): key is string => Boolean(key))
+    .map((key) => key.toLocaleLowerCase());
   for (const key of Object.keys(focusProfiles)) {
-    if (key.toLocaleLowerCase() === expected) delete focusProfiles[key];
+    if (keys.includes(key.toLocaleLowerCase())) delete focusProfiles[key];
   }
-  if (profile) focusProfiles[target] = profile;
+  // 预设统一存到预设 id：组合动作可能用 `wechat`，按键页/应用库可能用真实路径。
+  const key = row.presetId ?? row.target;
+  if (profile) focusProfiles[key] = profile;
   return persist({ ...mappings.value, focusProfiles });
 }
 
@@ -365,7 +390,24 @@ async function selectApp(app: CustomAppPick): Promise<void> {
 async function deleteAdaptation(): Promise<void> {
   const row = selectedRow.value;
   if (!row || deleteBlockedReason.value) return;
-  const next = removeAppAdaptation(mappings.value, row.target, isPresetPlaceholder(row));
+  let next = removeAppAdaptation(mappings.value, row.target, isPresetPlaceholder(row));
+  // 预设档案统一存在预设 id 下，删除适配时连同 id 键一起清理。
+  if (row.presetId) {
+    const expected = row.presetId.toLocaleLowerCase();
+    const focusProfiles = { ...(next.focusProfiles ?? {}) };
+    for (const key of Object.keys(focusProfiles)) {
+      if (key.toLocaleLowerCase() === expected) delete focusProfiles[key];
+    }
+    const scrollRegions = { ...(next.scrollRegions ?? {}) };
+    for (const key of Object.keys(scrollRegions)) {
+      if (key.toLocaleLowerCase() === expected) delete scrollRegions[key];
+    }
+    next = {
+      ...next,
+      focusProfiles: Object.keys(focusProfiles).length ? focusProfiles : undefined,
+      scrollRegions: Object.keys(scrollRegions).length ? scrollRegions : undefined,
+    };
+  }
   if (await persist(next)) {
     selectedTarget.value = nextSelectedTarget(rows.value, null);
     confirmDelete.value = false;
@@ -490,23 +532,35 @@ onUnmounted(() => {
           <div class="preset-status-row">
             <span class="preset-status-label">{{ t("聚焦方式") }}</span>
             <span class="preset-status-value">{{ presetFocusLabel }}</span>
-            <span class="preset-badge">{{ t("预置可用") }}</span>
+            <span class="preset-badge">{{
+              selectedProfile
+                ? t("已自定义")
+                : presetFocusEditable
+                  ? t("需设置")
+                  : t("预置可用")
+            }}</span>
           </div>
           <div class="preset-status-row">
             <span class="preset-status-label">{{ t("翻页") }}</span>
             <span class="preset-status-value">{{ t("上下翻页 · 滚到两端") }}</span>
             <span class="preset-badge">{{ t("预置可用") }}</span>
           </div>
-          <p class="hint">{{ t("预置应用已内置自动聚焦与翻页，无需学习或配置。") }}</p>
+          <p class="hint">
+            {{
+              presetFocusEditable
+                ? t("预置聚焦是默认方式；如需聚焦特定聊天或输入框，可在下面自定义。")
+                : t("预置应用已内置自动聚焦与翻页，无需学习或配置。")
+            }}
+          </p>
         </section>
 
         <AppFocusProfileEditor
-          v-if="!selectedIsPreset"
+          v-if="!selectedIsPreset || presetFocusEditable"
           :target="selectedRow.target"
           :profile="selectedProfile"
           :fallback="fallbackProfile"
           :disabled="!selectedRow.installed"
-          :save="(profile) => saveProfile(selectedRow!.target, profile)"
+          :save="(profile) => saveProfile(selectedRow!, profile)"
           @notice="showNotice"
         />
 
@@ -604,7 +658,7 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <template v-if="!isPresetPlaceholder(selectedRow)">
+          <template v-if="canDeleteSelected">
             <div class="section-divider" aria-hidden="true"></div>
             <div class="delete-row">
               <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>

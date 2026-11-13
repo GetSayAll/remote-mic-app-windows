@@ -754,6 +754,57 @@ describe("组合动作页 · 编辑向导", () => {
     ]);
   });
 
+  it("预置微信显示已记录的点击位置并可去配置", async () => {
+    getButtonMappingsSpy.mockResolvedValue({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target: "wechat" },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      focusProfiles: {
+        wechat: {
+          strategy: "recorded_point",
+          point: {
+            xRatio: 0.5,
+            yRatio: 0.82,
+            windowWidth: 1200,
+            windowHeight: 800,
+          },
+        },
+      },
+    });
+    getCombinedActionsSpy.mockResolvedValue({
+      formatVersion: 1,
+      definitions: [
+        {
+          ...baseDefinition,
+          steps: [{ stepId: "step.01", action: "focus_input", parameters: { target: "wechat" } }],
+        },
+      ],
+    });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!
+      .trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("记录点击位置");
+    expect(summary.find(".preset-pill").exists()).toBe(false);
+    await summary.find(".link-button").trigger("click");
+    expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
+      { page: "apps", params: { appTarget: "wechat" } },
+    ]);
+  });
+
   it("手动添加的预设使用预置能力并显示预置可用", async () => {
     const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     vi.mocked(listPresetApps).mockResolvedValueOnce([
@@ -819,7 +870,9 @@ describe("组合动作页 · 编辑向导", () => {
     expect(appChips).toContain("打开自定义 APP");
     expect(appChips).not.toContain("添加应用");
     expect(body.text()).not.toContain("按键页还没有「打开应用」动作");
-    expect(body.find(".focus-profile-summary").exists()).toBe(false);
+    const summary = body.find(".focus-profile-summary");
+    expect(summary.exists()).toBe(true);
+    expect(summary.text()).toContain("自动选择输入框");
 
     await body
       .findAll("button")

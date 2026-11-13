@@ -12,8 +12,12 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { SHORTCUT_PRESET_GROUPS, shortcutPresetHint } from "../lib/shortcut-presets";
-import { effectiveFocusProfile, presetFocusDefault } from "../lib/focus-defaults";
-import { focusStrategyLabel, scrollRegionForTarget } from "../lib/app-adaptation";
+import { presetFocusDefault } from "../lib/focus-defaults";
+import {
+  effectiveProfileForTarget,
+  focusStrategyLabel,
+  scrollRegionForTarget,
+} from "../lib/app-adaptation";
 import {
   clearMacroEditorSession,
   readMacroEditorSession,
@@ -988,12 +992,14 @@ const focusCustomAppsExpanded = computed(
     Boolean(focusTarget.value && !focusTargetIsBuiltInPreset.value),
 );
 
-/** 手动添加的预设直接使用预设能力，其余目标读取用户档案。 */
+/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
 function effectiveFocusForTarget(target: string | null | undefined): AppFocusProfile | null {
   if (!target) return null;
-  const presetId = presetIdForTarget(target);
-  if (presetId) return presetFocusDefault(presetId, true);
-  return focusProfiles.value[target] ?? null;
+  return effectiveProfileForTarget(
+    focusProfiles.value,
+    target,
+    focusTargetPresetId.value,
+  );
 }
 
 /** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
@@ -1006,6 +1012,16 @@ const focusSummary = computed(() =>
     ? t(focusStrategyLabel(focusProfile.value.strategy))
     : t("只打开 APP"),
 );
+
+/** 当前目标实际使用快捷键、且预设本身也提供快捷键时，才显示「预置可用」。 */
+const focusTargetUsesPresetShortcut = computed(() => {
+  const presetId = focusTargetPresetId.value;
+  if (!presetId) return false;
+  return (
+    focusProfile.value?.strategy === "app_shortcut" &&
+    presetFocusDefault(presetId, true)?.strategy === "app_shortcut"
+  );
+});
 
 function configureFocusProfile(): void {
   const target = focusTarget.value;
@@ -1071,7 +1087,9 @@ const focusCustomTargets = computed<Array<{ id: string; name: string }>>(() => {
 
 const focusScrollStatus = computed(() => {
   const target = focusTarget.value;
-  if (!target || focusTargetIsBuiltInPreset.value) return null;
+  if (!target || focusTargetIsBuiltInPreset.value) {
+    return focusTargetIsBuiltInPreset.value ? t("预置可用") : null;
+  }
   if (focusTargetIsLibraryPreset.value) return t("预置可用");
   return scrollRegionForTarget(focusScrollRegions.value, target)
     ? t("已学习")
@@ -1840,14 +1858,14 @@ watch(
                     </div>
                   </div>
                   <div
-                    v-if="focusTarget && !focusTargetIsBuiltInPreset"
+                    v-if="focusTarget"
                     class="focus-profile-summary"
                   >
                     <span class="muted">
                       {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
                       {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
                     </span>
-                    <span v-if="focusTargetIsLibraryPreset" class="preset-pill">
+                    <span v-if="focusTargetUsesPresetShortcut" class="preset-pill">
                       {{ t("预置可用") }}
                     </span>
                     <button v-else class="link-button" type="button" @click="configureFocusProfile">

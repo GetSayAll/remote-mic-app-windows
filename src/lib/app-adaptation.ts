@@ -21,6 +21,8 @@ export interface AppAdaptationRow {
   path?: string;
   /** 用户手动添加的应用恰好是内置预设：使用预设聚焦/翻页能力。 */
   preset: boolean;
+  /** 用户手动添加的应用库条目；显式导航到的预设可能为 false。 */
+  library: boolean;
   /** 匹配到的预设 id（例如 `chrome`）；自定义应用为空。 */
   presetId?: string;
   /** 内置预设是否已安装；自定义应用默认 true。 */
@@ -96,14 +98,30 @@ export function buildAppRows(
       preset: Boolean(preset),
       presetId: preset?.id,
       installed: true,
+      library: true,
     });
   }
 
-  // 允许从按键页带一个尚未写入应用库的自定义 target；预设必须手动添加才显示。
+  // 允许从按键页 / 组合动作页带一个目标；显式导航到的预设也要显示详情，
+  // 否则微信这类预置应用没有可进入的聚焦学习入口。
   for (const extra of extraTargets) {
     const target = extra.trim();
     const key = keyOf(target);
-    if (!key || seen.has(key) || presetForTarget(target)) continue;
+    if (!key || seen.has(key)) continue;
+    const preset = presetForTarget(target);
+    if (preset) {
+      seen.add(key);
+      rows.push({
+        target,
+        name: preset.name,
+        path: preset.path ?? undefined,
+        preset: true,
+        presetId: preset.id,
+        installed: preset.installed,
+        library: false,
+      });
+      continue;
+    }
     seen.add(key);
     rows.push({
       target,
@@ -111,6 +129,7 @@ export function buildAppRows(
       path: target,
       preset: false,
       installed: true,
+      library: false,
     });
   }
 
@@ -136,16 +155,38 @@ export function profileForTarget(
   return key ? profiles[key] : null;
 }
 
+/** 显式聚焦档案：先按 target，再按预设 id；两者都不存在时返回 null。 */
+export function explicitProfileForTarget(
+  profiles: Record<string, AppFocusProfile> | undefined,
+  target: string,
+  presetId?: string | null,
+): AppFocusProfile | null {
+  const direct = profileForTarget(profiles, target);
+  if (direct) return direct;
+  return presetId ? profileForTarget(profiles, presetId) : null;
+}
+
+/** 实际会执行的聚焦档案：显式档案优先，预设回落到内置默认。 */
+export function effectiveProfileForTarget(
+  profiles: Record<string, AppFocusProfile> | undefined,
+  target: string,
+  presetId?: string | null,
+): AppFocusProfile | null {
+  const explicit = explicitProfileForTarget(profiles, target, presetId);
+  if (explicit) return explicit;
+  return presetId ? presetFocusDefault(presetId, true) : null;
+}
+
 /** 实际会执行的聚焦档案：显式档案优先，预设回落到内置默认。 */
 export function effectiveAppProfile(
   row: Pick<AppAdaptationRow, "target" | "preset" | "presetId">,
   profiles: Record<string, AppFocusProfile> | undefined,
 ): AppFocusProfile | null {
-  // 手动添加的预设直接使用预设能力，不继承旧的显式档案。
-  if (row.preset && row.presetId) return presetFocusDefault(row.presetId, true);
-  const explicit = profileForTarget(profiles, row.target);
-  if (explicit) return explicit;
-  return presetFocusDefault(row.target, row.preset);
+  return effectiveProfileForTarget(
+    profiles,
+    row.target,
+    row.preset ? (row.presetId ?? row.target) : null,
+  );
 }
 
 /** 列表行里的短标签；全名仍由详情和按键页使用。 */
