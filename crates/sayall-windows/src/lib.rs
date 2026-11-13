@@ -927,6 +927,34 @@ impl WindowsPlatform {
         }
     }
 
+    /// 启动/迁移恢复「你在用的输入工具」：只恢复按下语音键时的兜底切换目标，
+    /// **不做选中即对齐**，也不布防。
+    ///
+    /// Issue #367：启动恢复原先复用 `set_voice_input_tool`，主窗口第一次失焦就会执行
+    /// `scope=tool_select` 的 TSF 激活；`TF_IPPMF_FORSESSION` 的官方语义是
+    /// “Activate this profile for all threads in the current desktop”，会把任务栏、
+    /// 开始菜单、搜索及同桌面其他进程一起切到目标输入法。恢复配置不是用户主动选择，
+    /// 不能触发桌面级切换。
+    pub fn restore_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+        ime::note_tool_select();
+        Self::apply_restored_voice_tool(&self.voice_input_tool, &self.ime_align_pending, tool);
+        crate::ble::gatt_note(format!(
+            "ime_tool_select action=restored tool={}",
+            ime::tool_label(tool)
+        ));
+    }
+
+    /// 恢复工具时的状态写入：只写目标并清掉待对齐布防，不调用任何 TSF API。
+    /// 抽成关联函数以便单测直接覆盖“恢复不得布防”的语义（Issue #367）。
+    fn apply_restored_voice_tool(
+        tool_slot: &std::sync::Mutex<Option<VoiceInputTool>>,
+        align_pending: &std::sync::Mutex<Option<(VoiceInputTool, std::time::Instant)>>,
+        tool: Option<VoiceInputTool>,
+    ) {
+        *lock(tool_slot) = tool;
+        *lock(align_pending) = None;
+    }
+
     /// 更新「你在用的输入工具」：BLE 工作线程在按下语音键时按它决定把哪个输入法
     /// 切进当前会话（`ime::ensure_session_ime`，按下时兜底切换）；并且**选中即对齐**——
     /// 用户刚选过工具时立即尝试把系统输入法切到该工具（自身窗口在前台时改为布防，
@@ -936,6 +964,11 @@ impl WindowsPlatform {
     /// （早于应用知情一个 BLE 往返），若按下时系统输入法还不是所选工具，这一按必然
     /// 赶不上切换——表现为"换工具后第一按拉不起"。选中即对齐把该窗口期清零；
     /// 按下时的兜底切换保留（覆盖用户手动改走输入法的情况）。
+    ///
+    /// 注意：这条路径的 `tool_select` 最终使用 `TF_IPPMF_FORSESSION`，会作用于
+    /// **当前桌面的所有线程**（任务栏、开始菜单、搜索及其他进程），不是仅本应用。
+    /// 因此只能由用户显式选择工具触发；启动恢复、旧配置推断与向导暂存必须走
+    /// [`Self::restore_voice_input_tool`]（Issue #367）。
     pub fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
         // 诊断时间基线（2026-10-09）：失败样本全部来自"切完工具、快速切到目标
         // 窗口"，按下时"距选工具多久"由此起算并进 `voice_attempt`。
@@ -2149,5 +2182,23 @@ mod tests {
             Err(PlatformError::UnsupportedPlatform)
         );
         assert_eq!(platform.audio_snapshot().phase, AudioPhase::Unsupported);
+    }
+
+    /// Issue #367：启动/迁移恢复输入工具只能写“按下时兜底切换”的目标，
+    /// 不能留下 `ime_align_pending`——否则主窗口第一次失焦就会用
+    /// `TF_IPPMF_FORSESSION` 切换整个桌面的输入法。
+    #[test]
+    fn restoring_voice_tool_clears_pending_alignment() {
+        let tool = std::sync::Mutex::new(Some(VoiceInputTool::Wechat));
+        let pending =
+            std::sync::Mutex::new(Some((VoiceInputTool::Wechat, std::time::Instant::now())));
+
+        WindowsPlatform::apply_restored_voice_tool(&tool, &pending, Some(VoiceInputTool::Doubao));
+
+        assert_eq!(*lock(&tool), Some(VoiceInputTool::Doubao));
+        assert!(
+            lock(&pending).is_none(),
+            "恢复工具不得保留待对齐布防，否则失焦会切整个桌面"
+        );
     }
 }

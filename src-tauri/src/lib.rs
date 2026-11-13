@@ -3911,24 +3911,69 @@ async fn get_voice_input_tool(
     result
 }
 
-#[tauri::command]
-async fn set_voice_input_tool(
+#[derive(Clone, Copy)]
+enum VoiceToolWriteAction {
+    /// 用户在连接页/向导里显式选择：允许一次 `tool_select` 对齐。
+    UserSelect,
+    /// 启动恢复 / 老配置推断：只恢复按下时兜底切换的目标，不做对齐。
+    Restore,
+}
+
+impl VoiceToolWriteAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::UserSelect => "save",
+            Self::Restore => "restore",
+        }
+    }
+}
+
+/// 按写入来源选择平台调用（纯函数，便于单测钉住 Issue #367 的契约）。
+///
+/// `UserSelect` 允许一次“选中即对齐”；`Restore` 只恢复按下语音键时的目标，
+/// **绝不能**落到 `set_voice_input_tool`，否则启动失焦会再次触发桌面级切换。
+fn apply_voice_tool_write(
+    action: VoiceToolWriteAction,
     tool: Option<VoiceInputTool>,
-    state: tauri::State<'_, AppState>,
+    set: impl FnOnce(Option<VoiceInputTool>),
+    restore: impl FnOnce(Option<VoiceInputTool>),
+) {
+    match action {
+        VoiceToolWriteAction::UserSelect => set(tool),
+        VoiceToolWriteAction::Restore => restore(tool),
+    }
+}
+
+/// 保存输入工具并把目标推给平台；`action` 决定是否允许“选中即对齐”。
+///
+/// 为什么必须分开（Issue #367）：`tool_select` 对齐最终使用
+/// `TF_IPPMF_FORSESSION`，官方语义是“Activate this profile for all threads in
+/// the current desktop”——会把任务栏、开始菜单、搜索及同桌面其他进程一起切走。
+/// 启动恢复或旧配置推断不是用户主动选择，只能恢复按下语音键时的兜底目标，
+/// 不能触发这次桌面级切换。
+async fn write_voice_input_tool(
+    tool: Option<VoiceInputTool>,
+    settings: SettingsStore,
+    platform: Arc<dyn PlatformRuntime>,
+    action: VoiceToolWriteAction,
 ) -> Result<Option<VoiceInputTool>, String> {
     let started = std::time::Instant::now();
-    let settings = state.settings.clone();
-    let platform = state.platform.clone();
     sayall_windows::gatt_note(format!(
-        "shortcut_settings feature=voice_input_tool action=save phase=requested tool={}",
+        "shortcut_settings feature=voice_input_tool action={} phase=requested tool={}",
+        action.label(),
         voice_input_tool_name(tool)
     ));
     let result = match tauri::async_runtime::spawn_blocking(move || {
         settings.save_voice_input_tool(tool)?;
-        // 推给平台：BLE 工作线程在按下语音键的那一刻按它决定切哪个输入法（按下时兜底切换），
-        // 并且在**选中的当下就尝试对齐**系统输入法（自身窗口在前台时改为布防，等失焦后切；
-        // 见 `sayall_windows::WindowsPlatform::set_voice_input_tool`，2026-10-03 Andy 要求）。
-        platform.set_voice_input_tool(tool);
+        apply_voice_tool_write(
+            action,
+            tool,
+            // 用户显式选择：保留 2026-10-03 的“选中即对齐”（自身窗口在前台时
+            // 布防，等失焦后再切）。
+            |tool| platform.set_voice_input_tool(tool),
+            // 启动恢复 / 旧配置推断：只恢复按下语音键时的兜底切换目标。
+            |tool| platform.restore_voice_input_tool(tool),
+        );
         Ok(tool)
     })
     .await
@@ -3938,17 +3983,49 @@ async fn set_voice_input_tool(
     };
     sayall_windows::gatt_note(match &result {
         Ok(saved) => format!(
-            "shortcut_settings feature=voice_input_tool action=save phase=completed terminal_result=passed tool={} elapsed_ms={}",
+            "shortcut_settings feature=voice_input_tool action={} phase=completed terminal_result=passed tool={} elapsed_ms={}",
+            action.label(),
             voice_input_tool_name(*saved),
             started.elapsed().as_millis()
         ),
         Err(_) => format!(
-            "shortcut_settings feature=voice_input_tool action=save phase=completed terminal_result=failed tool={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            "shortcut_settings feature=voice_input_tool action={} phase=completed terminal_result=failed tool={} error_domain=settings error_code=save_failed reason=settings_save_failed retryable=true elapsed_ms={}",
+            action.label(),
             voice_input_tool_name(tool),
             started.elapsed().as_millis()
         ),
     });
     result
+}
+
+/// 用户在连接页/向导里显式选择输入工具：保存并允许一次选中即对齐。
+#[tauri::command]
+async fn set_voice_input_tool(
+    tool: Option<VoiceInputTool>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<VoiceInputTool>, String> {
+    write_voice_input_tool(
+        tool,
+        state.settings.clone(),
+        state.platform.clone(),
+        VoiceToolWriteAction::UserSelect,
+    )
+    .await
+}
+
+/// 启动恢复 / 老配置推断输入工具：保存推断值并恢复平台目标，但不触发对齐。
+#[tauri::command]
+async fn restore_voice_input_tool(
+    tool: Option<VoiceInputTool>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<VoiceInputTool>, String> {
+    write_voice_input_tool(
+        tool,
+        state.settings.clone(),
+        state.platform.clone(),
+        VoiceToolWriteAction::Restore,
+    )
+    .await
 }
 
 /// 「锁定当前按键」偏好（按键页页脚开关，2026-10-18 持久化）。
@@ -4013,9 +4090,9 @@ async fn set_lock_mapping_selection(
 
 /// 「用户选的输入工具」的唯一来源（`settings.json`，与 `get_voice_input_tool` 同源）。
 ///
-/// 为什么不问平台：`PlatformRuntime` 只有 setter（`set_voice_input_tool`），没有
-/// getter；平台侧持有的那份本身也始终由 `settings.json` 写入（启动装载 + 每次保存），
-/// 读设置文件不会引入第二份真值。
+/// 为什么不问平台：`PlatformRuntime` 只有 setter（`set_voice_input_tool` /
+/// `restore_voice_input_tool`），没有 getter；平台侧持有的那份本身也始终由
+/// `settings.json` 写入（启动装载 + 每次保存），读设置文件不会引入第二份真值。
 fn load_voice_input_tool(settings: &SettingsStore) -> Option<VoiceInputTool> {
     settings
         .load()
@@ -4145,8 +4222,10 @@ async fn complete_onboarding(
 
 /// 第④步暂存语音绑定：落回滚快照 + 应用正式配置，并把工具/快捷键推给平台。
 ///
-/// 平台应用与 `set_voice_input_tool` / `set_voice_hold_hotkey` 同一条链路：
-/// 保证第⑤步真实验证时按下语音键就能按 staged 组合触发。
+/// 平台应用与 `restore_voice_input_tool` / `set_voice_hold_hotkey` 同一条链路：
+/// 保证第⑤步真实验证时按下语音键就能按 staged 组合触发。这里**不做选中即对齐**
+/// ——向导第⑤步是只读检查 + 文字提醒（2026-10-13 定稿）；对齐会切换整个桌面的
+/// 输入法（Issue #367）。
 #[tauri::command]
 async fn stage_onboarding_voice_binding(
     tool: VoiceInputTool,
@@ -4157,7 +4236,7 @@ async fn stage_onboarding_voice_binding(
     let platform = state.platform.clone();
     match tauri::async_runtime::spawn_blocking(move || {
         let staged = settings.stage_onboarding_voice_binding(tool, hotkey.clone())?;
-        platform.set_voice_input_tool(Some(tool));
+        platform.restore_voice_input_tool(Some(tool));
         platform.set_voice_hold_hotkey(hotkey);
         Ok::<_, String>(staged)
     })
@@ -6087,16 +6166,19 @@ pub fn run() {
             }
 
             // 选的输入工具同样要推给平台（2026-10-01）：语音会话开始前决定把哪个
-            // 输入法切进当前会话。启动恢复同样走"选中即对齐"（2026-10-03 Andy：
-            // 保证重启/冷启动后的第一按也能拉起）：自身在前台先布防、失焦后切一次；
-            // 否则立即切。基准确认见 Bugs/2026-10-03-ime-switch-lags-tool-selection.md。
+            // 输入法切进当前会话。
+            //
+            // 启动恢复**不做**“选中即对齐”（Issue #367）：对齐最终使用
+            // `TF_IPPMF_FORSESSION`，会切换当前桌面的所有线程（任务栏、开始菜单、
+            // 搜索及同桌面其他进程）；开机后用户还没按语音键就把默认输入法切走，
+            // 是不可接受的副作用。这里只恢复按下语音键时的兜底目标。
             match settings.load() {
                 Ok(loaded) => {
                     sayall_windows::gatt_note(format!(
                         "shortcut_settings feature=voice_input_tool action=restore phase=completed terminal_result=passed tool={}",
                         voice_input_tool_name(loaded.voice_input_tool)
                     ));
-                    platform.set_voice_input_tool(loaded.voice_input_tool);
+                    platform.restore_voice_input_tool(loaded.voice_input_tool);
                 }
                 Err(error) => {
                     sayall_windows::gatt_note(
@@ -6491,6 +6573,7 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        restore_voice_input_tool,
         get_lock_mapping_selection,
         set_lock_mapping_selection,
         get_ime_status,
@@ -6638,6 +6721,7 @@ pub fn run() {
         set_voice_hold_hotkey,
         get_voice_input_tool,
         set_voice_input_tool,
+        restore_voice_input_tool,
         get_lock_mapping_selection,
         set_lock_mapping_selection,
         get_ime_status,
@@ -6710,6 +6794,46 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #367 的回归锁：启动恢复/旧配置推断走 `Restore` 时，绝不能调用
+    /// `set_voice_input_tool`（后者会布防 `tool_select`，失焦后用
+    /// `TF_IPPMF_FORSESSION` 切换整个桌面）。用两个回调直接钉住分发，
+    /// 不依赖 Tauri 运行时或真实 TSF。
+    #[test]
+    fn restoring_voice_tool_write_never_uses_the_alignment_setter() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        apply_voice_tool_write(
+            VoiceToolWriteAction::Restore,
+            Some(VoiceInputTool::Wechat),
+            |_| calls.borrow_mut().push("set"),
+            |tool| {
+                calls.borrow_mut().push(match tool {
+                    Some(VoiceInputTool::Wechat) => "restore:wechat",
+                    _ => "restore:other",
+                });
+            },
+        );
+        assert_eq!(*calls.borrow(), vec!["restore:wechat"]);
+    }
+
+    /// 反向锁：用户显式选择工具时仍必须走 `set`，保留 2026-10-03 的
+    /// “选中即对齐”（Issue #367 只禁止启动/推断路径触发）。
+    #[test]
+    fn user_selection_voice_tool_write_still_uses_the_alignment_setter() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        apply_voice_tool_write(
+            VoiceToolWriteAction::UserSelect,
+            Some(VoiceInputTool::Doubao),
+            |tool| {
+                calls.borrow_mut().push(match tool {
+                    Some(VoiceInputTool::Doubao) => "set:doubao",
+                    _ => "set:other",
+                });
+            },
+            |_| calls.borrow_mut().push("restore"),
+        );
+        assert_eq!(*calls.borrow(), vec!["set:doubao"]);
+    }
 
     /// 手动回归（2026-11-10 用户现场）：程序选择返回的 `.lnk` 也必须能拿到 Shell 图标。
     /// 运行：

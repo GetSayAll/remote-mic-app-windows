@@ -1,0 +1,27 @@
+# 启动恢复输入工具时切换整个桌面输入法（Issue #367）
+
+- 发现日期：2026-11-13
+- 状态：已修复，等待真机验证
+- 影响范围：Windows 1.9.0 / 1.9.1；`voice_input_tool` 为 `wechat` 或 `doubao`；开机自启与普通启动均受影响
+- 功能点：输入工具恢复 / TSF 输入法激活（`crates/sayall-windows/src/ime.rs`、`crates/sayall-windows/src/lib.rs`、`src-tauri/src/lib.rs`）
+- 现象：每次开机登录后，任务栏、开始菜单、Win 搜索及同一桌面上的其他进程被切到微信输入法；系统设置里的默认输入语言仍是英文。
+- 复现条件：配置 `voice_input_tool=wechat` 并开机自启。主窗口显示时，启动后第一次失焦触发；主窗口隐藏时，启动恢复当场触发。
+- 正常预期：启动只恢复“按下语音键时兜底切换”的目标，不在用户未按语音键时切换桌面输入法。
+- 证据：Issue #367 的诊断日志呈现 `ime_tool_select action=pending_self_foreground` → `action=fired trigger=window_blur` → `ime_activation scope=tool_select`；报障人同时用 `GetKeyboardLayout` 观测到约 22 个进程的线程在数毫秒内一起切换。微软文档对 `TF_IPPMF_FORSESSION` 的定义是 “Activate this profile for all threads in the current desktop”。
+- 根因：启动恢复复用了 `WindowsPlatform::set_voice_input_tool`，主窗口失焦时执行 `tool_select` 对齐；该对齐调用 TSF `ActivateProfile(..., TF_IPPMF_FORSESSION)`，作用范围是当前桌面的所有线程，而不是本应用会话。`ime.rs` 模块注释里“只影响当前应用会话”的旧说法与官方语义不符。
+- 修复：
+  - 新增 `WindowsPlatform::restore_voice_input_tool`：只写按下语音键时的兜底目标并清掉 `ime_align_pending`，不调用任何 TSF API。
+  - 启动恢复、向导第④步暂存、老配置推断改走 `restore_voice_input_tool`；用户显式选择工具仍走 `set_voice_input_tool`，保留 2026-10-03 的“选中即对齐”。
+  - 新增 IPC `restore_voice_input_tool` 与前端 `restoreVoiceInputTool`；`set_voice_input_tool` 的日志口径保持 `action=save`。
+  - 更新模块注释，明确 `TF_IPPMF_FORSESSION` 是桌面级作用域，只能在用户显式触发时使用。
+- 验证：
+  - 新增 `sayall-windows` 单测 `tests::restoring_voice_tool_clears_pending_alignment`：passed。
+  - 新增 `sayall-windows-app` 分发契约双测 `restoring_voice_tool_write_never_uses_the_alignment_setter` / `user_selection_voice_tool_write_still_uses_the_alignment_setter`：passed。
+  - `cargo test -p sayall-windows --lib`：552 passed / 0 failed / 17 ignored。
+  - `cargo test -p sayall-windows-app`：220 passed / 0 failed / 2 ignored。
+  - `cargo fmt --all -- --check`：passed。
+  - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
+  - `pnpm test`：683 passed / 10 skipped；`pnpm build`（`vue-tsc --noEmit` + `vite build`）：passed。
+  - 前端老配置用例改为断言调用 `restoreVoiceInputTool`：passed。
+  - 真机登录复现（任务栏 / 开始菜单 / Win 搜索的输入法状态）deferred：需要 Windows 登录会话与微信输入法；RC001/RC003 分别记录。
+- 隐私检查：本记录未包含个人路径、设备身份、语音内容或凭据。

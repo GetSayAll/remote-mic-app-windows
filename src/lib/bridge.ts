@@ -1869,6 +1869,21 @@ export async function setVoiceInputTool(tool: VoiceInputTool): Promise<VoiceInpu
 }
 
 /**
+ * 启动恢复 / 老配置推断输入工具：只落存并把目标推给平台，**不做“选中即对齐”**。
+ *
+ * 对齐最终使用 `TF_IPPMF_FORSESSION`，会切换整个桌面的输入法（任务栏、开始菜单、
+ * 搜索及同桌面其他进程）；只有用户显式选择工具时才允许走 `setVoiceInputTool`
+ * （Issue #367）。
+ */
+export async function restoreVoiceInputTool(tool: VoiceInputTool): Promise<VoiceInputTool> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前是浏览器预览，无法保存输入工具设置");
+  }
+  const saved = await invoke<VoiceInputTool | null>("restore_voice_input_tool", { tool });
+  return saved ?? tool;
+}
+
+/**
  * 「锁定当前按键」（按键页页脚开关，2026-10-18 持久化到应用设置）。
  *
  * 开启时操作实体遥控器不会切换正在编辑的按键；默认开启（对齐 Mac
