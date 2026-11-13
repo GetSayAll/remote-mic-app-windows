@@ -33,11 +33,18 @@
   预期：同样出语音条。
 - **C 组（反向对照，判钩子死活）**：焦点仍留在微信，**用键盘手按一次 F5**
   （物理键盘，不是遥控器）。这一步不验证功能，只回答"F5 抑制器这条链现在能不能收到键"。
-- **D 组（无限重连期，issue #368）**：关闭/移开遥控器，重启应用或等待日志出现
-  `ble_reconnect phase=scheduled` 且 `voice_f5_guard active=true`；此时不唤醒遥控器，
-  用实体键盘按 F5 5 次。预期：`suppressor_ask dir=down swallow=0 ... remote_present=0`，
-  前台应用执行 F5。随后唤醒遥控器并按住语音键一次。预期：`swallow=1`、
-  `remote_present=1`、语音会话正常，记事本不出现时间戳。
+- **D 组（无限重连期，issue #368）**：关闭/移开遥控器（充电式型号可拔充电线后
+  用铝箔/金属盒屏蔽），重启应用或等待日志出现 `ble_reconnect phase=scheduled`
+  且 `voice_f5_guard active=true`；此时不唤醒遥控器，用实体键盘按 F5 5 次。
+  预期：`suppressor_ask dir=down swallow=0 ... remote_present=0`，前台应用执行 F5。
+  随后唤醒遥控器并按住语音键一次：
+  - **增强捕获开启**：语音键在报告层被清掉/替换，可能完全没有 `suppressor_ask`；
+    以 `voice_attempt path=report_layer`、`audio_session begin/finish passed`、
+    `f5_leaked=0`、可见出字为准；记事本不出现时间戳。豆包在 `voice_verify` 采样窗内
+    可能报 `verdict=not_reacted`，以 `voice_heal ... skipped=reacted_late` 和可见出字
+    作为迟到反应的正面证据。
+  - **增强捕获关闭**：F5 走键盘路径，预期 `suppressor_ask dir=down swallow=1
+    remote_present=1`；语音正常，记事本不出现时间戳。
 
 每组之间不要重装、不要重启应用或助教；A/B 交错做（A 一次、B 一次）以排除"时间窗口"这种
 混淆变量——10-28 那轮就是 A/B 在 3 秒内交替、结果同样交替，才把"版本"排除掉的。
@@ -150,14 +157,17 @@ Get-Content $log -Tail 4000 |
 - **passed**：A 组 5/5 `reacted=true`（`verdict=reacted`），`f5_edges` 随按住
   递增且 `f5_leaked=0`，C 组手按 F5 能在 `suppressor_ask dir=down` 里看到（非会话期应为
   `swallow=0 hold=2`，即放行进 OS——这是正确行为，不是缺陷）；D 组遥控器不在位时实体
-  F5 为 `swallow=0 remote_present=0`，唤醒遥控器后首条语音键为 `swallow=1
-  remote_present=1` 且无时间戳。
-  **健康机器上 `voice_heal` 必须零出现**（一条救回动作都不该触发）；出现即说明判据
-  又跑去读 `mic` 了，是回归。
+  F5 为 `swallow=0 remote_present=0`；唤醒遥控器后增强捕获开启时以
+  `voice_attempt path=report_layer` + `audio_session passed` + `f5_leaked=0` + 可见出字为准，
+  增强捕获关闭时为 `swallow=1 remote_present=1`，两种状态都不得出现时间戳。
+  **健康机器上 `voice_heal` 不得执行实际救回动作**；`voice_heal ... skipped=reacted_late`
+  表示采样窗后才反应、没有执行动作，是正常收尾。
 - **failed**：A 组出现 `verdict=not_reacted`，并且 F5 一支能落到唯一一行
   （即断点被判据唯一确定）。这种情况下把该行连同 5 行上下文一起归档。
   D 组出现 `link_guard=true remote_present=0` 但 `swallow=1`，或遥控器明显不在位时
   `remote_present=1`（设备在场信号滞后/未解绑），按 issue #368 回归处理。
+  增强捕获开启时没有 `suppressor_ask` **不是**失败；但若 `f5_leaked>0` 或可见时间戳，
+  仍按失败处理。
 - **deferred**：C 组手按 F5 在抑制器里也看不到任何边沿 ⇒ 说明"钩子死了"，A 组结果不具
   诊断意义，先修链路再重测。
 
