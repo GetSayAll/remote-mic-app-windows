@@ -68,9 +68,10 @@ suppressor_ask dir=up   swallow=<0|1> hold=<0|1|2> remote_present=<0|1>
 suppressor_stats seen=<n> swallowed=<n> leaked=<n> waited_late=<n> raw_remote_f5=<n> link_guard=<bool> remote_present=<bool>
 ```
 
-`remote_present` 来自 Raw Input 监听器的设备在场信号（`key_gate::listener_active()`）：
-遥控器 HID 接口不在位（Awaiting / 移除 / 监听器停止）时为 0。`link_guard=true`
-但 `remote_present=0` 时，实体 F5 必须 `swallow=0`（issue #368）。
+`remote_present` 来自 Raw Input 监听器的设备在场信号（`key_gate::listener_active()`），
+在 60ms 有界等待结束后采样，反映实际裁决时的状态。遥控器 HID 接口不在位
+（Awaiting / 移除 / 监听器停止）时为 0。在无会话、无武装、无按住锁存的前提下，
+`link_guard=true` 但 `remote_present=0` 时，实体 F5 必须 `swallow=0`（issue #368）。
 
 失败后（`verdict=not_reacted`）会在会话结束时看到救回动作，逐级升级：
 

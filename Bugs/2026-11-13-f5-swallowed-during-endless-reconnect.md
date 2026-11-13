@@ -36,8 +36,9 @@
   - 三个决策入口（`swallow_ready`、`F5Up`、`F5Down`）统一使用 effective 值；
     `latch_only` 同步改用 effective 值，避免日志把“相位在保护但设备不在位”
     误报成锁存。
-  - `suppressor_ask` 与 `suppressor_stats` 新增 `remote_present=0|1`，下一次
-    现场日志可直接区分“设备不在位放行”与“设备在位吞下”。
+  - `suppressor_ask` 与 `suppressor_stats` 新增 `remote_present=0|1`
+    （`suppressor_ask` 在 60ms 有界等待结束后采样，反映实际裁决时的状态），
+    下一次现场日志可直接区分“设备不在位放行”与“设备在位吞下”。
   - 相位集合保持不变（仍含 `Reconnecting`）；Raw Input 绑定到遥控器 HID 时
     `listener_active=true`，设备缺位（Awaiting）、移除或监听器停止时为 false。
 - 验证：

@@ -65,8 +65,9 @@ suppressor_stats seen=<n> swallowed=<n> leaked=<n> waited_late=<n> raw_remote_f5
   "额外按键"类拒绝（表现为本次按住整段无听写）。
 - 判据四（仅基线组）：`bumps_ok` 在跨越 ≥30 个 10s 周期的闲置后确实增长，证明重装真的在执行。
 - `voice_f5_guard active=...` 用于确认 BLE 链路转换期的守卫状态符合预期；
-  `remote_present` 是 Raw Input 监听器的设备在场信号，`link_guard=true
-  remote_present=false` 时实体 F5 必须放行（issue #368，见
+  `remote_present` 是 Raw Input 监听器的设备在场信号（60ms 等待结束后采样）。
+  在无会话、无武装、无按住锁存的前提下，`link_guard=true remote_present=false`
+  时实体 F5 必须放行（issue #368，见
   `Bugs/2026-11-13-f5-swallowed-during-endless-reconnect.md`）。
 
 ## 用例矩阵（两组各跑一遍，逐条记录）

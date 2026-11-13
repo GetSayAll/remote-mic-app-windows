@@ -298,13 +298,6 @@ mod windows_impl {
                 Some(swallow)
             }
             HostSuppressorMessage::F5Down => {
-                // `remote_present` 记录按下沿到达时的设备在场状态；设备若在
-                // 60ms 有界等待内才到达，由 `waited_late=1` 体现，最终仍可能吞下。
-                let remote_present = crate::key_gate::listener_active();
-                let link_guard =
-                    link_guard_effective(LINK_GUARD_ACTIVE.load(Ordering::Relaxed), remote_present);
-                // 诊断：本条 DOWN 沿是否仅靠按住锁存吞下（会话/建链/武装都已失效）。
-                let latch_only = hold_latched() && !session_active() && !link_guard && !armed();
                 // DOWN 沿：先试武装状态，未武装则 60ms 有界等待。
                 let waited = !swallow_ready();
                 let swallowed = if !waited {
@@ -321,6 +314,14 @@ mod windows_impl {
                     }
                     armed_late
                 };
+                // 等待结束后再采样：设备/武装可能在 60ms 内才到达。必须在
+                // LAST_SWALLOWED_DOWN_MS 更新之前计算，避免把本次吞下的沿算进
+                // hold_latched；这样 remote_present/latch_only 反映实际裁决时的状态。
+                let remote_present = crate::key_gate::listener_active();
+                let link_guard =
+                    link_guard_effective(LINK_GUARD_ACTIVE.load(Ordering::Relaxed), remote_present);
+                // 诊断：本条 DOWN 沿是否仅靠按住锁存吞下（会话/建链/武装都已失效）。
+                let latch_only = hold_latched() && !session_active() && !link_guard && !armed();
                 if waited && swallowed {
                     F5_DOWN_WAITED_ARMED_LATE.fetch_add(1, Ordering::Relaxed);
                 }
