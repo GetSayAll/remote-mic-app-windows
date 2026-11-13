@@ -131,19 +131,13 @@ mod windows_impl {
         link_guard && remote_present
     }
 
-    fn effective_link_guard() -> bool {
-        link_guard_effective(
-            LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
-            crate::key_gate::listener_active(),
-        )
-    }
-
     fn swallow_ready() -> bool {
         decide(
             VK_F5,
             false,
             session_active(),
-            effective_link_guard(),
+            LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
+            crate::key_gate::listener_active(),
             armed() || hold_latched(),
             HOLD_NONE,
         )
@@ -223,11 +217,16 @@ mod windows_impl {
     /// UP 沿只按配对状态裁决（会话/武装不参与）：本次按住的 DOWN 沿全部被
     /// 吞下（hold==HOLD_SWALLOWED_ALL）才吞 UP，防"DOWN 泄漏 + UP 吞下"粘键；
     /// 配对未知（钩子中途启动）与已泄漏一律放行 UP（宁可送孤立 UP，不留粘键）。
+    ///
+    /// DOWN 沿的 `link_guard` 必须叠加 `remote_present`：`Reconnecting` 可无限
+    /// 持续，只有 Raw Input 监听器绑定到遥控器 HID 设备时才能把 F5 当成遥控器
+    /// 语音键（issue #368）。
     pub fn decide(
         vk_code: u32,
         is_key_up: bool,
         session: bool,
         link_guard: bool,
+        remote_present: bool,
         armed_now: bool,
         hold_pairing: u32,
     ) -> bool {
@@ -237,7 +236,7 @@ mod windows_impl {
         if is_key_up {
             return hold_pairing == HOLD_SWALLOWED_ALL;
         }
-        session || link_guard || armed_now
+        session || link_guard_effective(link_guard, remote_present) || armed_now
     }
 
     /// 纯状态转移：DOWN 沿裁决后更新配对状态。任一 DOWN 沿泄漏（含 typematic
@@ -284,7 +283,8 @@ mod windows_impl {
                     VK_F5,
                     true,
                     session_active(),
-                    link_guard_effective(LINK_GUARD_ACTIVE.load(Ordering::Relaxed), remote_present),
+                    LINK_GUARD_ACTIVE.load(Ordering::Relaxed),
+                    remote_present,
                     armed(),
                     hold,
                 );
@@ -476,9 +476,11 @@ pub use windows_impl::{
 mod tests {
     #[test]
     fn only_armed_session_or_link_guard_f5_down_is_swallowed() {
-        // DOWN 沿：非 F5 一律透传；F5 仅在会话、建链保护或设备归因武装时吞。
+        // DOWN 沿：非 F5 一律透传；F5 仅在会话、建链保护（且遥控器设备在位）
+        // 或设备归因武装时吞。
         assert!(!super::decide(
             0x41,
+            false,
             false,
             false,
             false,
@@ -487,6 +489,7 @@ mod tests {
         ));
         assert!(!super::decide(
             0x41,
+            true,
             true,
             true,
             true,
@@ -499,10 +502,31 @@ mod tests {
             false,
             false,
             false,
+            false,
             super::HOLD_NONE
         ));
         assert!(super::decide(
             0x74,
+            false,
+            true,
+            false,
+            false,
+            false,
+            super::HOLD_NONE
+        ));
+        assert!(super::decide(
+            0x74,
+            false,
+            false,
+            true,
+            true,
+            false,
+            super::HOLD_NONE
+        ));
+        // issue #368：相位在保护但遥控器 HID 不在位 → 实体 F5 必须放行。
+        assert!(!super::decide(
+            0x74,
+            false,
             false,
             true,
             false,
@@ -512,13 +536,6 @@ mod tests {
         assert!(super::decide(
             0x74,
             false,
-            false,
-            true,
-            false,
-            super::HOLD_NONE
-        ));
-        assert!(super::decide(
-            0x74,
             false,
             false,
             false,
@@ -550,10 +567,12 @@ mod tests {
             false,
             false,
             false,
+            false,
             super::HOLD_SWALLOWED_ALL
         ));
         assert!(!super::decide(
             0x74,
+            true,
             true,
             true,
             true,
@@ -566,10 +585,12 @@ mod tests {
             true,
             true,
             true,
+            true,
             super::HOLD_NONE
         ));
         assert!(!super::decide(
             0x41,
+            true,
             true,
             true,
             true,

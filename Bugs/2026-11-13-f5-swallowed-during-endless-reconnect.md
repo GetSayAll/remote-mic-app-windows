@@ -33,8 +33,9 @@
   - `crates/sayall-windows/src/key_suppressor.rs` 新增纯判定
     `link_guard_effective(link_guard, remote_present)`：`link_guard` 必须叠加
     Raw Input 监听器的设备在场信号 `key_gate::listener_active()` 才生效。
-  - 三个决策入口（`swallow_ready`、`F5Up`、`F5Down`）统一使用 effective 值；
-    `latch_only` 同步改用 effective 值，避免日志把“相位在保护但设备不在位”
+  - `decide()` 显式接收 `remote_present` 并在内部组合 effective 值，三个决策
+    入口（`swallow_ready`、`F5Up`、`F5Down`）都传入 Raw Input 设备在场信号；
+    `latch_only` 同步使用 effective 值，避免日志把“相位在保护但设备不在位”
     误报成锁存。
   - `suppressor_ask` 与 `suppressor_stats` 新增 `remote_present=0|1`
     （`suppressor_ask` 在 60ms 有界等待结束后采样，反映实际裁决时的状态），
