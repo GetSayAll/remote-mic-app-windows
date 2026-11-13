@@ -22,7 +22,7 @@
   - 新增 `ime::activation_result_tests::diagnostic_tokens_cover_timeout_unverified_and_superseded`：passed。
   - 新增 `ime::activation_result_tests::timeout_and_unverified_are_not_reported_as_activation_failure`：passed。
   - 新增 `ime::activation_result_tests::newer_generation_supersedes_older_and_invalidate_expires_everything`：passed。
-  - `cargo test -p sayall-windows --lib`：553 passed / 0 failed / 17 ignored。
+  - `cargo test -p sayall-windows --lib`：554 passed / 0 failed / 17 ignored。
   - `cargo test -p sayall-windows-app`：218 passed / 0 failed / 2 ignored。
   - `cargo fmt --all -- --check`：passed。
   - `cargo check --workspace`：passed。
