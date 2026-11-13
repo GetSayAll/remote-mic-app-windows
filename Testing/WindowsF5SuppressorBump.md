@@ -52,10 +52,10 @@
 ## 观测点（每次会话都能读到）
 
 默认诊断日志 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`，每次语音会话开始会落一行
-快照（`key_suppressor.rs:398-406`）：
+快照（`key_suppressor.rs` 的 `set_session_active`）：
 
 ```text
-suppressor_stats seen=<n> swallowed=<n> leaked=<n> waited_late=<n> raw_remote_f5=<n> link_guard=<bool> bumps_ok=<n> bumps_failed=<n>
+suppressor_stats seen=<n> swallowed=<n> leaked=<n> waited_late=<n> raw_remote_f5=<n> link_guard=<bool> remote_present=<bool> bumps_ok=<n> bumps_failed=<n>
 ```
 
 - 判据一：`seen == swallowed` 且 `leaked=0`（增量口径：本次会话相对上次的差值）。
@@ -64,7 +64,11 @@ suppressor_stats seen=<n> swallowed=<n> leaked=<n> waited_late=<n> raw_remote_f5
 - 判据三：焦点应用（记事本）**不出现** F5 的时间戳插入或功能键动作；微信输入法不出现
   "额外按键"类拒绝（表现为本次按住整段无听写）。
 - 判据四（仅基线组）：`bumps_ok` 在跨越 ≥30 个 10s 周期的闲置后确实增长，证明重装真的在执行。
-- `voice_f5_guard active=...` 用于确认 BLE 链路转换期的守卫状态符合预期。
+- `voice_f5_guard active=...` 用于确认 BLE 链路转换期的守卫状态符合预期；
+  `remote_present` 是 Raw Input 监听器的设备在场信号（60ms 等待结束后采样）。
+  在无会话、无武装、无按住锁存的前提下，`link_guard=true remote_present=false`
+  时实体 F5 必须放行（issue #368，见
+  `Bugs/2026-11-13-f5-swallowed-during-endless-reconnect.md`）。
 
 ## 用例矩阵（两组各跑一遍，逐条记录）
 
