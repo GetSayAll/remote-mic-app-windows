@@ -37,8 +37,9 @@
 - `pnpm test` passed：688 passed | 10 skipped。
 - `pnpm build`（`vue-tsc --noEmit` + `vite build`）passed。
 - 新增回归用例：微信 `recorded_point` 档案优先于预设默认；预置微信可学习点击位置并按预设 id 落盘；预置目标显示摘要与「去配置」；旧 `recorded_point` 档案在编辑器里可见可执行。
-- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `6AEA810FD7FDBB3C4D6017CA4D2979D1FA064CEE6B37E726916CAAA379C6B902`（本地测试密钥签名，不可发布）；前端嵌入校验 18/18 passed。未自动安装。
-- 真实微信目视确认：**deferred**。需要安装含本修复的本地测试包，在微信 4.x 里记录一个群聊输入框位置，确认「打开微信 → 聚焦到该群」实际点击落点正确。
+- 本地测试包（基于 `origin/main` `ac2e7e3` + 修复提交 `aac41fa`）：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `C1A7E300BBDEFEACB5C92BC9AC870E2E8E2B432145291B9B2B8A28579D69B50C`（本地测试密钥签名，不可发布）；前端嵌入校验 18/18 passed。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐，app exe 仅 3 字节 UNK→NSS 差异，内嵌修订号 `aac41fa0` count=1；窗口截图确认 1.9.1 连接页正常，不是目录列表。
+- 真实微信目视确认：**deferred**。需要在本机微信 4.x 里记录一个群聊输入框位置，确认「打开微信 → 聚焦到该群」实际点击落点正确。
 
 ## 隐私检查
 
