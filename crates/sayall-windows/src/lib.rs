@@ -973,6 +973,9 @@ impl WindowsPlatform {
         // 诊断时间基线（2026-10-09）：失败样本全部来自"切完工具、快速切到目标
         // 窗口"，按下时"距选工具多久"由此起算并进 `voice_attempt`。
         ime::note_tool_select();
+        // 工具变了：让仍在跑的旧激活在下一个检查点退出，避免超时后的迟到
+        // 切换覆盖新选择（Issue #367 的 readback/迟到激活后续）。
+        ime::invalidate_activation_generation();
         *lock(&self.voice_input_tool) = tool;
         let Some(tool) = tool else {
             *lock(&self.ime_align_pending) = None;

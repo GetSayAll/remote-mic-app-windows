@@ -2623,9 +2623,14 @@ fn handle_control(
                         tool,
                         crate::ime::ImeSwitchScope::VoicePress,
                     ) {
-                        Ok(crate::ime::ImeActivation::Switched) => {
+                        Ok(
+                            crate::ime::ImeActivation::Switched
+                            | crate::ime::ImeActivation::SwitchedUnverified,
+                        ) => {
                             // 竞态标注（2026-10-03）：合成已先于切换发出，本按赶不上
                             // ——按设计为下一次按下生效；换工具来源已由"选中即对齐"覆盖。
+                            // SwitchedUnverified 也按“切过”处理：读回不可靠，不能据此
+                            // 判定没切；后续读回探针会给实际状态。
                             gatt_note(format!(
                                 "voice_hold action=switch_after_chord session={session_id} note=本按的合成早于切换完成，按下一次生效"
                             ));

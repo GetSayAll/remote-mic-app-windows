@@ -1,0 +1,33 @@
+# 输入法激活读回误报与 500ms 超时后的迟到激活（Issue #367 后续）
+
+- 发现日期：2026-11-13
+- 状态：已修复，等待真机验证
+- 影响范围：Windows 1.9.0 / 1.9.1；微信输入法 / 豆包输入法的 TSF 激活路径；按下语音键、工具选择对齐与救回对齐
+- 功能点：TSF 会话激活（`crates/sayall-windows/src/ime.rs`）
+- 现象：`ime_activation outcome=failed` 与实际状态矛盾（切换已生效）；500ms 有界等待超时后调用方按失败返回并可能写入 `last_error`；旧 STA 线程在超时后继续重试、读回、做焦点往返，可能干扰更新的选择。
+- 复现条件：冷切换（微信输入法冷启动）耗时接近/超过 500ms；或 `GetActiveProfile` 在临时 STA 线程上看不到桌面级切换。
+- 正常预期：超时是“未决”，不是失败；`ActivateProfile` 返回成功但读回不可用是“已切换未验证”，不是激活失败；新请求发生后旧代次不再做迟到副作用；日志能一次拉取区分这几种状态。
+- 证据：Issue #367 现场日志 `ime_activation tool=wechat scope=tool_select outcome=failed elapsed_ms=509 last_switch_age_ms=457 fg_hkl=0x08040804`：`last_switch_age_ms=457` 证明 `ActivateProfile` 已成功返回，`fg_hkl` 证明前台线程已切换；失败标签来自读回/超时。`GetActiveProfile` 在新建 STA 线程上读到的是本进程会话（`ime.rs` 的 `should_activate` 注释已记录该假阳性）。
+- 根因：
+  - 调用方把 `recv_timeout` 超时直接转成 `Err`，置 `last_error`；
+  - STA 线程把“读回不是目标”直接转成 `Err`，没有区分 `ActivateProfile` 失败与读回不可用；
+  - 每次激活互不关联，超时后旧线程仍会重试、读回、做 `post_switch_rebind_safeguard` 焦点往返，可能覆盖更新的选择。
+- 修复：
+  - 新增 `ImeActivation::SwitchedUnverified`、`TimedOut`、`Superseded`；`activation_outcome_token` / `activation_diagnostics` 统一日志与错误码：`verify_unavailable`、`activation_timeout`、`superseded`。
+  - 500ms 超时返回 `Ok(TimedOut)`，不再写 `last_error`；超时分支立即丢弃接收端，STA 线程随后的结果发送必定失败，从而稳定补一条 `ime_activation_worker` 最终结果日志作为 ground truth。
+  - 读回两次仍不一致返回 `Ok(SwitchedUnverified)`，仍保留 500/1500/3000ms 读回探针；真正的 `ActivateProfile` 失败才返回 `Err`。
+  - 每次激活分配 generation；旧线程在 `before_query`、`before/after ActivateProfile`、重绑等待、重试、读回探针和焦点往返前检查代次，过期即返回 `Superseded`，不再做迟到副作用。工具选择变化时 `invalidate_activation_generation()` 让旧线程尽快退出。
+  - 新增全局 `ACTIVATION_LOCK` 串行化会话激活的 `ActivateProfile`（仅 `sta_ensure_ime`）：旧调用完成后新调用才执行，避免旧调用在阻塞中迟到完成、把桌面切回旧目标；焦点往返在锁外执行，不阻塞后续切换。若 `ActivateProfile` 永久挂起，后续对齐会排队，但调用方仍有 500ms 超时，不阻塞语音。
+- 验证：
+  - 新增 `ime::activation_result_tests::diagnostic_tokens_cover_timeout_unverified_and_superseded`：passed。
+  - 新增 `ime::activation_result_tests::timeout_and_unverified_are_not_reported_as_activation_failure`：passed。
+  - 新增 `ime::activation_result_tests::newer_generation_supersedes_older_and_invalidate_expires_everything`：passed。
+  - `cargo test -p sayall-windows --lib`：554 passed / 0 failed / 17 ignored。
+  - `cargo test -p sayall-windows-app`：218 passed / 0 failed / 2 ignored。
+  - `cargo fmt --all -- --check`：passed。
+  - `cargo check --workspace`：passed。
+  - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
+  - 真机冷切换（微信输入法冷启动 >500ms）、超时后 worker 完成日志、连续切换/快速选择、RC001/RC003：deferred。
+- 已知边界：本次只改“切换后读回”和超时/迟到副作用；`should_activate` 的预检查 `active_is_target` 仍可能在新 STA 线程上假阳性（本该切却走 AlreadyActive 快速路径）。该问题需要单独的真机实验与延迟权衡，不混入本次收口。
+- 已知边界：`cycle_wetype_profile`（休眠唤醒）不取 `ACTIVATION_LOCK`，也不检查代次。它的两步切换若与新选择交错，第二步“切回 WeType”仍可能落在新选择之后覆盖它；不取锁只是避免“排队后必定覆盖”，并不消除覆盖。需要独立修复（例如 cycle 开始时取代次，第二步前发现过期就放弃）。
+- 隐私检查：本记录未包含个人路径、设备身份、语音内容或凭据。
