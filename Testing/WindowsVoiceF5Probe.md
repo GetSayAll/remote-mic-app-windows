@@ -25,7 +25,7 @@
    （F5 进系统时记事本会插入时间/日期或触发功能键）。
 4. 准备一份干净的诊断日志：记下开始测试的时间点，之后只取这一段。
 
-## 复现步骤（3 轮，每轮 3~5 按）
+## 复现步骤（4 轮，每轮 3~5 按）
 
 - **A 组（报障场景）**：焦点放到微信输入框 → 按住遥控语音键 1.5~2 秒 → 松开，重复 5 次。
   预期：微信出现语音条并出字。
@@ -33,6 +33,11 @@
   预期：同样出语音条。
 - **C 组（反向对照，判钩子死活）**：焦点仍留在微信，**用键盘手按一次 F5**
   （物理键盘，不是遥控器）。这一步不验证功能，只回答"F5 抑制器这条链现在能不能收到键"。
+- **D 组（无限重连期，issue #368）**：关闭/移开遥控器，重启应用或等待日志出现
+  `ble_reconnect phase=scheduled` 且 `voice_f5_guard active=true`；此时不唤醒遥控器，
+  用实体键盘按 F5 5 次。预期：`suppressor_ask dir=down swallow=0 ... remote_present=0`，
+  前台应用执行 F5。随后唤醒遥控器并按住语音键一次。预期：`swallow=1`、
+  `remote_present=1`、语音会话正常，记事本不出现时间戳。
 
 每组之间不要重装、不要重启应用或助教；A/B 交错做（A 一次、B 一次）以排除"时间窗口"这种
 混淆变量——10-28 那轮就是 A/B 在 3 秒内交替、结果同样交替，才把"版本"排除掉的。
@@ -54,6 +59,18 @@ voice_verify session=<n> tool=wechat marker=wetype at_ms=800
   f5_edges=<n> f5_leaked=<n> f5_key_down=<true|false>
 voice_verify session=<n> ... at_ms=2500 ...
 ```
+
+F5 抑制器每次裁决落 `suppressor_ask`，语音会话开始落 `suppressor_stats`：
+
+```text
+suppressor_ask dir=down swallow=<0|1> waited_late=<0|1> hold=<0|1|2> latch_only=<0|1> remote_present=<0|1>
+suppressor_ask dir=up   swallow=<0|1> hold=<0|1|2> remote_present=<0|1>
+suppressor_stats seen=<n> swallowed=<n> leaked=<n> waited_late=<n> raw_remote_f5=<n> link_guard=<bool> remote_present=<bool>
+```
+
+`remote_present` 来自 Raw Input 监听器的设备在场信号（`key_gate::listener_active()`）：
+遥控器 HID 接口不在位（Awaiting / 移除 / 监听器停止）时为 0。`link_guard=true`
+但 `remote_present=0` 时，实体 F5 必须 `swallow=0`（issue #368）。
 
 失败后（`verdict=not_reacted`）会在会话结束时看到救回动作，逐级升级：
 
@@ -131,17 +148,22 @@ Get-Content $log -Tail 4000 |
 
 - **passed**：A 组 5/5 `reacted=true`（`verdict=reacted`），`f5_edges` 随按住
   递增且 `f5_leaked=0`，C 组手按 F5 能在 `suppressor_ask dir=down` 里看到（非会话期应为
-  `swallow=0 hold=2`，即放行进 OS——这是正确行为，不是缺陷）。
+  `swallow=0 hold=2`，即放行进 OS——这是正确行为，不是缺陷）；D 组遥控器不在位时实体
+  F5 为 `swallow=0 remote_present=0`，唤醒遥控器后首条语音键为 `swallow=1
+  remote_present=1` 且无时间戳。
   **健康机器上 `voice_heal` 必须零出现**（一条救回动作都不该触发）；出现即说明判据
   又跑去读 `mic` 了，是回归。
 - **failed**：A 组出现 `verdict=not_reacted`，并且 F5 一支能落到唯一一行
   （即断点被判据唯一确定）。这种情况下把该行连同 5 行上下文一起归档。
+  D 组出现 `link_guard=true remote_present=0` 但 `swallow=1`，或遥控器明显不在位时
+  `remote_present=1`（设备在场信号滞后/未解绑），按 issue #368 回归处理。
 - **deferred**：C 组手按 F5 在抑制器里也看不到任何边沿 ⇒ 说明"钩子死了"，A 组结果不具
   诊断意义，先修链路再重测。
 
 ## 边界
 
-- 本手册只做取证，不改语音路径；`f5_edges`/`f5_key_down` 是诊断读数，不参与任何决策。
+- 本手册只做取证，不改语音路径；`f5_edges`/`f5_key_down`/`remote_present` 是诊断读数，
+  `remote_present` 同时参与 issue #368 的 `link_guard` 门禁。
 - 仿真构建（`runtime-simulation`）无法产生真实 HID 报告与真实输入法会话，本手册结论
   **不能**由仿真或单元测试代替。
 - `fg_hkl` 是十六进制 HKL，`fg_class`/`fg_focus` 是类名的稳定哈希：日志里不含明文窗口类名、
@@ -149,6 +171,8 @@ Get-Content $log -Tail 4000 |
 
 ## 关联材料
 
+- `Bugs/2026-11-13-f5-swallowed-during-endless-reconnect.md`（issue #368：无限重连期
+  实体 F5 被吞）
 - `Bugs/2026-10-28-voice-no-response-when-target-behind.md`（本次现场与判读）
 - `Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md`（按键宿主进程的由来）
 - `Bugs/2026-09-04-wetype-zero-gap-injection.md`（F5 泄漏 → 和弦被拒）
