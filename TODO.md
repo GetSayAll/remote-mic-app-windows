@@ -444,6 +444,7 @@
 ### 2026-09-05 IME 专项
 
 - **语音"无法唤起"根因 = 会话活动输入法不是微信输入法**（WeType 语音热键仅在自身活跃时生效；焦点无关，桌面/资源管理器聚焦 6/6 照常开麦）。修复（ime.rs）：注入和弦前用公开 TSF API 会话级激活 WeType（TF_IPPMF_FORSESSION，零延迟 3/3 实证），失败不阻断。参考 macOS 版 PreferredInputSourceMonitor 职责设计。
+- **2026-11-13 Issue #367：启动恢复不得自动切输入法**。`TF_IPPMF_FORSESSION` 的官方语义是“当前桌面的所有线程”，不是应用会话；旧启动恢复复用 `set_voice_input_tool`，主窗口首次失焦就把任务栏、开始菜单、搜索及同桌面其他进程切到微信输入法。新增 `restore_voice_input_tool`（只恢复按下语音键时的兜底目标，不布防、不切）；启动恢复、向导第④步暂存、老配置推断改走它，用户显式选择仍保留“选中即对齐”。自动化 passed：`sayall-windows` 552 passed / 17 ignored（含 `restoring_voice_tool_clears_pending_alignment`）、`sayall-windows-app` 218 passed / 2 ignored、前端 683 passed / 10 skipped、`pnpm build`、`cargo fmt --all -- --check`、`cargo check -p sayall-windows-app --features runtime-simulation`。真机登录复现与 RC001/RC003 语音首按 deferred。记录：`Bugs/2026-11-13-ime-startup-session-wide-switch.md`。
 
 ### 2026-09-05 性能已知项（评估归档，供后续修复）
 

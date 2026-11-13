@@ -21,8 +21,11 @@
 //!
 //! 方案（参考 macOS 版 PreferredInputSourceMonitor 的"保证语音工具是活动
 //! 输入源"职责设计）：注入和弦前，在临时 STA 线程上用公开 TSF API
-//! （ITfInputProcessorProfileMgr + TF_IPPMF_FORSESSION 会话级标志——只影响
-//! 当前应用会话，不改其他应用的输入法记忆）确保 WeType 为当前会话输入法。
+//! （ITfInputProcessorProfileMgr + TF_IPPMF_FORSESSION；官方语义是
+//! “Activate this profile for all threads in the current desktop”——作用于
+//! **当前桌面的所有线程**，包括任务栏、开始菜单、搜索与其他进程，不是仅本应用）
+//! 确保 WeType 为当前会话输入法。因此该调用只能由用户显式触发（按下语音键或
+//! 主动选择工具）；启动恢复不得触发（Issue #367）。
 //!
 //! 护栏：激活失败或超时只记录提示并按原行为注入（绝不比现状更差）；幂等
 //! ——WeType 已活跃时重复激活无害；STA 线程一次性的（创建→调用→退出，

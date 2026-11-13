@@ -85,6 +85,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// 输入法切进当前会话（`ime::ensure_session_ime`），并在选中时尝试立即对齐
     /// 系统输入法（见 `WindowsPlatform::set_voice_input_tool`，2026-10-03）。
     fn set_voice_input_tool(&self, _tool: Option<VoiceInputTool>) {}
+    /// 启动/迁移恢复输入工具：只恢复“按下时兜底切换”的目标，不触发
+    /// “选中即对齐”（`TF_IPPMF_FORSESSION` 会切换整个桌面，Issue #367）。
+    fn restore_voice_input_tool(&self, _tool: Option<VoiceInputTool>) {}
     /// 工具选择后的一次性输入法对齐：本应用窗口失去焦点时调用
     /// （`WindowEvent::Focused(false)`，见 `WindowsPlatform::align_ime_after_tool_selection`）。
     /// 未布防（用户没刚选过工具）时是 no-op。
@@ -329,6 +332,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
         WindowsPlatform::set_voice_input_tool(self, tool)
+    }
+
+    fn restore_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+        WindowsPlatform::restore_voice_input_tool(self, tool)
     }
 
     fn align_ime_after_tool_selection(&self) {
@@ -1110,6 +1117,10 @@ mod simulation {
         }
 
         fn set_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
+            *lock(&self.voice_input_tool) = tool;
+        }
+
+        fn restore_voice_input_tool(&self, tool: Option<VoiceInputTool>) {
             *lock(&self.voice_input_tool) = tool;
         }
 
