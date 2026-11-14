@@ -302,9 +302,8 @@ describe("APP adaptation page", () => {
 
     expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
       "只打开 APP",
-      "自动选择输入框 Windows 默认",
-      "使用 APP 快捷键聚焦",
       "打开后自动聚焦",
+      "使用 APP 快捷键聚焦",
       "记录点击位置 界面不暴露输入框时",
     ]);
     expect(wrapper.find(".detail-panel").text()).toContain("点击位置");
@@ -321,6 +320,13 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
     expect(wrapper.find(".app-row-status").text()).toBe("自动选择 · 预置可用");
     expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
+      "自动选择输入框 预置可用",
+      "只打开 APP",
+      "打开后自动聚焦",
+      "使用 APP 快捷键聚焦",
+      "记录点击位置 界面不暴露输入框时",
+    ]);
     expect(wrapper.find(".focus-option.selected").text()).toContain("自动选择输入框");
     expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
 
@@ -560,8 +566,8 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage();
     await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "改用 APP 快捷键聚焦")!
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("使用 APP 快捷键聚焦"))!
       .trigger("click");
     await flushPromises();
     await wrapper.findAll("button").find((button) => button.text() === "录入快捷键")!.trigger("click");
@@ -597,8 +603,8 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage();
     await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "改用 APP 快捷键聚焦")!
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("使用 APP 快捷键聚焦"))!
       .trigger("click");
     await flushPromises();
     await wrapper.findAll("button").find((button) => button.text() === "录入快捷键")!.trigger("click");

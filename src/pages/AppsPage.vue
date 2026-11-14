@@ -532,6 +532,7 @@ onUnmounted(() => {
           :target="selectedRow.target"
           :profile="selectedProfile"
           :fallback="fallbackProfile"
+          :allow-auto-composer="selectedIsPreset"
           :disabled="!selectedRow.installed"
           :save="(profile) => saveProfile(selectedRow!, profile)"
           @notice="showNotice"
@@ -687,7 +688,11 @@ onUnmounted(() => {
 
 <style scoped>
 .apps-page {
-  padding-bottom: 24px;
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 12px;
+  display: flex;
+  flex-direction: column;
 }
 .apps-page .page-header h1 {
   font-size: 24px;
@@ -746,8 +751,10 @@ onUnmounted(() => {
 }
 .master-detail {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .panel {
   border: 1px solid var(--border);
@@ -761,6 +768,9 @@ onUnmounted(() => {
   padding: 12px;
   display: flex;
   flex-direction: column;
+  height: calc(100vh - 150px);
+  max-height: 100%;
+  min-height: 0;
 }
 .list-title {
   margin: 0 0 9px 2px;
@@ -770,6 +780,10 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 .app-row {
   display: flex;
@@ -837,7 +851,9 @@ onUnmounted(() => {
 }
 .add-app {
   min-height: 32px;
-  margin-top: 8px;
+  margin-top: auto;
+  margin-bottom: 2px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -858,10 +874,12 @@ onUnmounted(() => {
 .detail-panel {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
 }
 .app-head {
   display: flex;

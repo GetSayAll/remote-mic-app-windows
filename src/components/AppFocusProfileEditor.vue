@@ -25,9 +25,11 @@ const props = withDefaults(
     profile: AppFocusProfile | null;
     fallback?: AppFocusProfile | null;
     disabled?: boolean;
+    /** 只有预设应用才提供「自动选择输入框」；自定义应用隐藏。 */
+    allowAutoComposer?: boolean;
     save: (profile: AppFocusProfile | null) => Promise<boolean>;
   }>(),
-  { fallback: null, disabled: false },
+  { fallback: null, disabled: false, allowAutoComposer: false },
 );
 
 const emit = defineEmits<{ notice: [message: string, tone?: "success" | "error"] }>();
@@ -64,9 +66,16 @@ const pointBusy = computed(
   () => pointState.value === "opening" || pointState.value === "recording",
 );
 const controlsDisabled = computed(() => props.disabled || busy.value);
-// 与普通 APP 一致：五种策略都可选。预置应用默认策略会显示为选中态，
-// 同时允许用户重新学习覆盖。
-const primaryOptions = computed(() => FOCUS_STRATEGY_OPTIONS);
+// 顺序按产品编号：自动选择(0) → 只打开(1) → 打开后自动聚焦(2) →
+// APP 快捷键(3) → 记录点击位置(4)。自动选择只给预设应用。
+const primaryOptions = computed(() =>
+  FOCUS_STRATEGY_OPTIONS.filter(
+    (option) =>
+      option.value !== "auto_composer" ||
+      props.allowAutoComposer ||
+      strategy.value === "auto_composer",
+  ),
+);
 const shortcut = computed(() => effective.value.shortcut);
 
 function notice(message: string, tone: "success" | "error" = "success"): void {
@@ -393,9 +402,6 @@ onUnmounted(() => {
   <section class="section-card focus-editor" :aria-busy="busy || learnBusy || pointBusy">
     <div class="section-head">
       <h3>{{ t("聚焦方式") }}</h3>
-      <span v-if="props.fallback" class="preset-source">
-        {{ props.profile ? t("已自定义") : t("预置可用") }}
-      </span>
       <span class="spacer"></span>
     </div>
 
@@ -429,7 +435,7 @@ onUnmounted(() => {
         </svg>
         <span class="option-label">
           {{ t(option.label) }}
-          <small v-if="option.value === 'auto_composer'">{{ t("Windows 默认") }}</small>
+          <small v-if="option.value === 'auto_composer'">{{ t("预置可用") }}</small>
           <small v-else-if="option.value === 'recorded_point'">{{ t("界面不暴露输入框时") }}</small>
         </span>
       </button>
@@ -551,13 +557,6 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <div v-if="strategy !== 'app_shortcut'" class="fallback-row">
-      <span>{{ t("这个 APP 有自带的聚焦快捷键？也可以用它代替学习。") }}</span>
-      <button class="quiet" type="button" :disabled="controlsDisabled" @click="selectStrategy('app_shortcut')">
-        {{ t("改用 APP 快捷键聚焦") }}
-      </button>
-    </div>
-
     <div class="focus-footer">
       <button class="primary" type="button" :disabled="props.disabled" @click="testFocus">
         {{ t("测试打开与聚焦") }}
@@ -586,14 +585,6 @@ onUnmounted(() => {
 }
 .section-head .spacer {
   flex: 1 1 auto;
-}
-.preset-source {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--success-surface);
-  color: var(--success-text);
-  font-size: 10.5px;
-  font-weight: 600;
 }
 .option-grid {
   display: grid;
@@ -790,20 +781,6 @@ button:disabled {
 }
 .shortcut-message.error {
   color: var(--error-text);
-}
-.fallback-row {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  margin-top: 7px;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.35;
-}
-.fallback-row .quiet {
-  white-space: normal;
-  text-align: left;
 }
 .focus-footer {
   display: flex;
