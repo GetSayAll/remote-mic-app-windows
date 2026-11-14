@@ -792,8 +792,10 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-self: flex-start;
-  height: auto;
+  height: calc(100vh - 150px);
+  max-height: calc(100vh - 150px);
   min-height: 0;
+  overflow: hidden;
 }
 .list-title {
   margin: 0 0 9px 2px;
@@ -803,9 +805,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: calc(100vh - 250px);
   overflow-y: auto;
   padding-right: 2px;
 }
