@@ -398,6 +398,9 @@ onUnmounted(() => {
   <section class="section-card focus-editor" :aria-busy="busy || learnBusy || pointBusy">
     <div class="section-head">
       <h3>{{ t("聚焦方式") }}</h3>
+      <span v-if="props.allowAutoComposer && strategy === 'auto_composer'" class="focus-status">
+        {{ t("预置可用") }}
+      </span>
       <span class="spacer"></span>
     </div>
 
@@ -429,10 +432,7 @@ onUnmounted(() => {
         <svg v-else class="radio-icon" viewBox="0 0 16 16" aria-hidden="true">
           <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.2" />
         </svg>
-        <span class="option-label">
-          {{ t(option.label) }}
-          <small v-if="option.value === 'auto_composer'">{{ t("预置可用") }}</small>
-        </span>
+        <span class="option-label">{{ t(option.label) }}</span>
       </button>
     </div>
 
@@ -541,12 +541,9 @@ onUnmounted(() => {
       <div v-if="capturing" class="capture-display">
         {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : t("请按下快捷键组合") }}
       </div>
-      <div class="shortcut-footer">
-        <span v-if="shortcutMessage" class="shortcut-message" :class="shortcutTone">
-          {{ shortcutMessage }}
-        </span>
-        <span class="spacer"></span>
-      </div>
+      <p v-if="shortcutMessage" class="shortcut-message" :class="shortcutTone">
+        {{ shortcutMessage }}
+      </p>
     </template>
 
     <div class="focus-footer">
@@ -615,14 +612,6 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-}
-.option-label small {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 400;
-}
-.focus-option.selected .option-label small {
-  color: color-mix(in srgb, var(--accent) 70%, var(--muted));
 }
 .radio-icon {
   width: 15px;
@@ -753,17 +742,13 @@ button:disabled {
   font-family: Consolas, monospace;
   font-size: 12px;
 }
-.shortcut-footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  margin-top: 8px;
-}
-.shortcut-footer .spacer {
-  flex: 1 1 auto;
+.focus-status {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--success-text);
 }
 .shortcut-message {
+  margin: 6px 0 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--muted);

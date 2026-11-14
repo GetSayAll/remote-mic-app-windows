@@ -11,6 +11,7 @@ import {
   getCombinedActions,
   learnScrollRegion,
   listPresetApps,
+  resolvePresetTarget,
   saveButtonMappings,
   testScrollRegion,
   type AppFocusProfile,
@@ -60,6 +61,7 @@ const addError = ref<string | null>(null);
 const confirmDelete = ref(false);
 const notice = ref<{ text: string; tone: "success" | "error" } | null>(null);
 const appIcons = ref<Record<string, string>>({});
+const resolvedPresetIds = ref<Record<string, string>>({});
 const iconRequests = new Set<string>();
 const scrollLearning = ref(false);
 const scrollTesting = ref<ScrollCommand | null>(null);
@@ -75,6 +77,7 @@ const rows = computed(() =>
     mappings.value.focusProfiles,
     presetApps.value,
     props.initialTarget ? [props.initialTarget] : [],
+    resolvedPresetIds.value,
   ),
 );
 const selectedRow = computed<AppAdaptationRow | null>(
@@ -225,6 +228,24 @@ async function loadIcons(): Promise<void> {
   }
 }
 
+/** AppsFolder 目标无法在前端按路径匹配预设，加载时让后端按真实 exe 补齐。 */
+async function resolvePresetIds(apps: readonly CustomAppPick[]): Promise<void> {
+  const entries = await Promise.all(
+    apps.map(async (app) => {
+      try {
+        return [app.path, await resolvePresetTarget(app.path)] as const;
+      } catch {
+        return [app.path, null] as const;
+      }
+    }),
+  );
+  const next: Record<string, string> = {};
+  for (const [path, presetId] of entries) {
+    if (presetId) next[path.toLocaleLowerCase()] = presetId;
+  }
+  resolvedPresetIds.value = next;
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   loadError.value = null;
@@ -239,6 +260,7 @@ async function load(): Promise<void> {
     mappings.value = saved;
     presetApps.value = presets;
     macroDefinitions.value = macros;
+    void resolvePresetIds(saved.applications ?? []);
     selectedTarget.value = nextSelectedTarget(
       rows.value,
       props.initialTarget ?? appsViewSession.selectedTarget,
@@ -272,6 +294,7 @@ async function persist(next: ButtonMappings): Promise<boolean> {
   try {
     mappings.value = await saveButtonMappings(mappingPayload(next));
     void loadIcons();
+    void resolvePresetIds(mappings.value.applications ?? []);
     return true;
   } catch (error) {
     console.warn("save app adaptation failed", error);
@@ -769,6 +792,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-self: flex-start;
+  height: fit-content;
   max-height: calc(100vh - 150px);
   min-height: 0;
 }
@@ -852,7 +876,7 @@ onUnmounted(() => {
 .add-app {
   min-height: 32px;
   margin-top: 8px;
-  margin-bottom: 2px;
+  margin-bottom: 0;
   flex: 0 0 auto;
   display: flex;
   align-items: center;

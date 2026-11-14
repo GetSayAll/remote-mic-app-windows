@@ -64,6 +64,22 @@ describe("app adaptation rows", () => {
     expect(rows[2]).toMatchObject({ preset: false });
   });
 
+  it("uses a backend-resolved preset id for AppsFolder targets", () => {
+    const target = "shell:AppsFolder\\Chrome";
+    const rows = buildAppRows(
+      [{ name: "Google Chrome", path: target }],
+      {},
+      PRESETS,
+      [],
+      { [target.toLocaleLowerCase()]: "chrome" },
+    );
+    expect(rows[0]).toMatchObject({
+      preset: true,
+      presetId: "chrome",
+      name: "Google Chrome",
+    });
+  });
+
   it("shows a navigated preset without adding it to the library", () => {
     const rows = buildAppRows(
       [{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }],

@@ -1653,6 +1653,12 @@ export async function getApplicationIcon(path: string): Promise<string | null> {
   return invoke<string | null>("get_application_icon", { path });
 }
 
+/** 应用库目标是否属于内置预设；AppsFolder 目标由后端解析真实 exe 后判断。 */
+export async function resolvePresetTarget(target: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>("resolve_preset_target", { target });
+}
+
 export async function listPresetApps(): Promise<PresetAppInfo[]> {
   if (!isTauriRuntime()) {
     // 浏览器预览：展示完整预设表（仅渲染验证）。

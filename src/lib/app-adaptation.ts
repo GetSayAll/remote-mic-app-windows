@@ -71,6 +71,7 @@ export function buildAppRows(
   _profiles: Record<string, AppFocusProfile> | undefined,
   presetApps: readonly PresetAppInfo[],
   extraTargets: readonly string[] = [],
+  resolvedPresetIds: Readonly<Record<string, string>> = {},
 ): AppAdaptationRow[] {
   const rows: AppAdaptationRow[] = [];
   const seen = new Set<string>();
@@ -78,10 +79,22 @@ export function buildAppRows(
   const presetForTarget = (target: string): PresetAppInfo | undefined => {
     const key = keyOf(target);
     if (!key) return undefined;
-    return presetApps.find(
+    const exact = presetApps.find(
       (preset) =>
         keyOf(preset.id) === key ||
         Boolean(preset.path && keyOf(preset.path) === key),
+    );
+    if (exact) return exact;
+    // AppsFolder 目标（如 Chrome / WorkBuddy）在前端没有 exe 路径可比；
+    // 后端按注册项解析真实可执行文件后返回预设 id。
+    const resolvedId = resolvedPresetIds[key];
+    if (!resolvedId) return undefined;
+    return (
+      presetApps.find((preset) => keyOf(preset.id) === keyOf(resolvedId)) ?? {
+        id: resolvedId,
+        name: resolvedId,
+        installed: true,
+      }
     );
   };
 

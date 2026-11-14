@@ -13,6 +13,7 @@ import {
   learnFocusTarget,
   learnScrollRegion,
   listPresetApps,
+  resolvePresetTarget,
   saveButtonMappings,
   scanRegisteredApps,
   startShortcutCapture,
@@ -46,6 +47,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getApplicationIcon: vi.fn(async (path: string) =>
       path.toLowerCase().endsWith("cursor.exe") ? "data:image/png;base64,AAAA" : null,
     ),
+    resolvePresetTarget: vi.fn(async () => null),
     listPresetApps: vi.fn(async () => [
       { id: "notepad", name: "记事本", installed: true, path: "C:\\Windows\\System32\\notepad.exe" },
       {
@@ -115,6 +117,7 @@ async function mountPage(props: Record<string, unknown> = {}) {
 describe("APP adaptation page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(resolvePresetTarget).mockResolvedValue(null);
     appsViewSession.selectedTarget = null;
     configureMappings({});
   });
@@ -359,13 +362,14 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".app-row-status").text()).toBe("自动选择 · 预置可用");
     expect(wrapper.find(".focus-editor").exists()).toBe(true);
     expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
-      "自动选择输入框 预置可用",
+      "自动选择输入框",
       "只打开 APP",
       "打开后自动聚焦",
       "使用 APP 快捷键聚焦",
       "记录点击位置",
     ]);
     expect(wrapper.find(".focus-option.selected").text()).toContain("自动选择输入框");
+    expect(wrapper.find(".focus-status").text()).toBe("预置可用");
     expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
 
     const pointOption = wrapper
@@ -392,6 +396,29 @@ describe("APP adaptation page", () => {
     expect(saved.focusProfiles.wechat?.point?.xRatio).toBe(0.5);
     expect(wrapper.find(".app-row-status").text()).toContain("点击位置");
     vi.useRealTimers();
+  });
+
+  it("shows the preset badge beside the heading only for auto selection", async () => {
+    const target = "shell:AppsFolder\\WorkBuddy.WorkBuddy";
+    vi.mocked(resolvePresetTarget).mockImplementation(async (value) =>
+      value === target ? "workbuddy" : null,
+    );
+    configureMappings({
+      applications: [{ name: "WorkBuddy", path: target }],
+    });
+    const wrapper = await mountPage();
+
+    expect(wrapper.findAll(".focus-option").map((button) => button.text())).toContain(
+      "自动选择输入框",
+    );
+    expect(wrapper.find(".focus-status").text()).toBe("预置可用");
+
+    await wrapper
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("只打开 APP"))!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".focus-status").exists()).toBe(false);
   });
 
   it("lets a preset override and restore its preset scroll region", async () => {

@@ -248,20 +248,51 @@ pub fn preset_app(id: &str) -> Option<&'static PresetApp> {
     PRESET_APPS.iter().find(|app| app.id == id)
 }
 
-/// 手动添加到应用库的预设：target 既可以是预设 id，也可以是**探测到的**预设路径。
+/// 手动添加到应用库的预设：target 可以是预设 id、**探测到的**预设路径，
+/// 或解析到同一可执行文件的 AppsFolder 注册目标。
 ///
-/// 只按探测结果精确匹配，避免把 `C:\Tools\notepad.exe` 这类同名自定义程序误认成预设。
+/// 只按可执行文件精确匹配，避免把 `C:\Tools\notepad.exe` 这类同名自定义程序
+/// 误认成预设；AppsFolder 目标先解析真实 exe 再比对预设路径。
 fn preset_app_for_target_in(target: &str, presets: &[PresetAppInfo]) -> Option<&'static PresetApp> {
-    preset_app(target).or_else(|| {
+    if let Some(app) = preset_app(target) {
+        return Some(app);
+    }
+    let target = target.trim();
+    let by_path = |path: &str| {
         presets
             .iter()
             .find(|info| {
                 info.path
                     .as_deref()
-                    .is_some_and(|path| path.eq_ignore_ascii_case(target.trim()))
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(path))
             })
             .and_then(|info| preset_app(&info.id))
-    })
+    };
+    if let Some(app) = by_path(target) {
+        return Some(app);
+    }
+    #[cfg(windows)]
+    if crate::registered_apps::is_registered_target(target) {
+        if let Some(resolved) = crate::registered_apps::resolve_registered_executable_path(target) {
+            if let Some(app) = by_path(&resolved) {
+                return Some(app);
+            }
+        }
+    }
+    // Store 预设（如 ChatGPT）没有可比较的路径，只接受已知的完整 AUMID。
+    presets
+        .iter()
+        .find(|info| {
+            preset_aumid(&info.id).is_some_and(|aumid| {
+                format!("shell:AppsFolder\\{aumid}").eq_ignore_ascii_case(target)
+            })
+        })
+        .and_then(|info| preset_app(&info.id))
+}
+
+/// 应用库 target 是否属于某个内置预设；供 APP 适配页在加载时补齐预设标记。
+pub fn preset_id_for_target(target: &str) -> Option<&'static str> {
+    preset_app_for_target_in(target, cached_preset_apps()).map(|app| app.id)
 }
 
 /// 当前进程的预设探测快照：UI 首次列预设时填充，运行时路径匹配复用。
