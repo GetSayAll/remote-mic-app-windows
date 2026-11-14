@@ -792,8 +792,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-self: flex-start;
-  height: fit-content;
-  max-height: calc(100vh - 150px);
+  height: auto;
   min-height: 0;
 }
 .list-title {
@@ -806,6 +805,7 @@ onUnmounted(() => {
   gap: 5px;
   flex: 0 1 auto;
   min-height: 0;
+  max-height: calc(100vh - 250px);
   overflow-y: auto;
   padding-right: 2px;
 }
