@@ -177,7 +177,20 @@ describe("组合动作页 · 库浏览", () => {
     expect(heading.find("h1").text()).toBe("组合动作");
     expect(heading.find(".count-badge").text()).toBe("1");
     expect(wrapper.text()).not.toContain("我的组合动作");
-    expect(wrapper.find(".library-pane .search-input").exists()).toBe(false);
+    expect(wrapper.find(".library-pane .search-input").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("搜索清除按钮有独立的大点击区，点击后恢复完整列表", async () => {
+    const wrapper = await mountPage();
+    await wrapper.find(".search-input").setValue("786");
+    const clear = wrapper.find(".search-clear");
+    expect(clear.exists()).toBe(true);
+    expect(clear.attributes("aria-label")).toBe("清除搜索");
+    expect((clear.element as HTMLButtonElement).type).toBe("button");
+    await clear.trigger("click");
+    expect((wrapper.find(".search-input").element as HTMLInputElement).value).toBe("");
+    expect(wrapper.find(".search-clear").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -697,7 +710,10 @@ describe("组合动作页 · 编辑向导", () => {
           long: { type: "disabled" },
         },
       },
-      applications: [{ name: "Cursor", path: target }],
+      applications: [
+        { name: "Cursor", path: target },
+        { name: "Chrome 浏览器", path: "chrome" },
+      ],
       focusProfiles: {
         [target]: {
           strategy: "recorded_element",
@@ -741,6 +757,15 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
       { page: "apps", params: { appTarget: target } },
     ]);
+
+    // 目标 APP 组内选中预设目标时，组保持展开（2026-11-14 用户反馈）。
+    const chromeChip = body
+      .find(".custom-app-group")
+      .findAll(".chip")
+      .find((chip) => chip.text().includes("Chrome 浏览器"))!;
+    await chromeChip.trigger("click");
+    await flushPromises();
+    expect(body.find(".custom-app-group").exists()).toBe(true);
   });
 
   it("预置微信显示已记录的点击位置并可去配置", async () => {

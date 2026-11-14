@@ -774,7 +774,7 @@ onUnmounted(() => {
 }
 .master-detail {
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   gap: 14px;
   flex: 1 1 auto;
   min-height: 0;

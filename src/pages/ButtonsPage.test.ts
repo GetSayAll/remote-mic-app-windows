@@ -1779,6 +1779,8 @@ describe("buttons mapping page", () => {
           strategy: "app_shortcut",
           recorded: {
             controlType: "Edit",
+            automationId: "",
+            className: "",
             normalizedRect: { x: 0.3, y: 0.8, width: 0.6, height: 0.08 },
           },
         },

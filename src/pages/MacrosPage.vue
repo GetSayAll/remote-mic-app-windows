@@ -106,6 +106,7 @@ const loading = ref(cachedDefinitions === null);
 const definitions = ref<MacroDefinition[]>(cachedDefinitions ?? []);
 const selectedMacroId = ref<string | null>(cachedDefinitions?.[0]?.macroId ?? null);
 if (cachedDefinitions) registerMacroNames(cachedDefinitions);
+const search = ref("");
 const statusMessage = ref("");
 const statusKind = ref<"info" | "success" | "error">("info");
 
@@ -138,6 +139,12 @@ let testPollTimer: ReturnType<typeof setInterval> | undefined;
 const selectedDefinition = computed(
   () => definitions.value.find((item) => item.macroId === selectedMacroId.value) ?? null,
 );
+
+const filteredDefinitions = computed(() => {
+  const keyword = search.value.trim().toLowerCase();
+  if (!keyword) return definitions.value;
+  return definitions.value.filter((item) => item.name.toLowerCase().includes(keyword));
+});
 
 const draftValid = computed(() => {
   const value = draft.value;
@@ -1114,8 +1121,8 @@ const focusScrollStatus = computed(() => {
   return t("需学习");
 });
 
-watch([selectedStepId, focusTarget], () => {
-  // 换步骤/换目标后按目标类型重新决定目标 APP 组是否展开。
+watch(selectedStepId, () => {
+  // 换步骤后按目标类型重新决定目标 APP 组是否展开；同一目标组内的选择不收起。
   focusCustomAppsOpen.value = null;
 });
 
@@ -1334,9 +1341,27 @@ watch(
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
       <aside class="library-pane">
+        <div class="search-field">
+          <input
+            v-model="search"
+            class="search-input"
+            type="search"
+            :placeholder="t('搜索组合动作')"
+            :aria-label="t('搜索组合动作')"
+          />
+          <button
+            v-if="search"
+            class="search-clear"
+            type="button"
+            :aria-label="t('清除搜索')"
+            @click="search = ''"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
         <div class="macro-list" role="listbox" :aria-label="t('组合动作列表')">
           <button
-            v-for="definition in definitions"
+            v-for="definition in filteredDefinitions"
             :key="definition.macroId"
             type="button"
             class="macro-item"
@@ -2074,6 +2099,36 @@ watch(
   border-radius: 99px;
   padding: 3px 8px;
 }
+.search-field {
+  position: relative;
+}
+.search-field .search-input {
+  box-sizing: border-box;
+  min-height: 32px;
+  padding-right: 38px;
+}
+.search-input::-webkit-search-cancel-button {
+  display: none;
+  -webkit-appearance: none;
+}
+.search-clear {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  bottom: 2px;
+  width: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+.search-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.search-input,
 .text-input {
   width: 100%;
   border: 1px solid var(--border-strong);
