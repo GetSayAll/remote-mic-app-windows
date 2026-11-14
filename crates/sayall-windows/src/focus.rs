@@ -488,43 +488,22 @@ pub struct AppFocusProfile {
 }
 
 impl AppFocusProfile {
-    /// 规范化：字段与策略保持自洽。
+    /// 规范化：保留策略与所有有效载荷。
     ///
-    /// **策略本身永远保留**，只清掉与策略不符或无效的载荷（2026-10-15 现场：
-    /// 用户点了「用应用快捷键聚焦 / 聚焦已记录的输入框 / 记录点击位置」但还没录入
-    /// 数据时，早前实现把整条档案丢弃，保存回读后选中态退回「只打开应用」、
-    /// 「测试打开与聚焦」一直禁用——表现就是"这几个按钮点不动"）。
-    /// 载荷缺失改由执行期给出明确原因（未录入快捷键 / 还没有学习过输入框 /
-    /// 还没有记录点击位置）。
+    /// **策略只决定执行哪条载荷**，不再清掉其他策略的载荷（2026-11-14：用户切换
+    /// 聚焦方式时，已学习的输入框/点击位置必须保留，切回来无需重新学习）。
+    /// 策略本身永远保留；载荷缺失或无效时，执行期给出明确原因（未录入快捷键 /
+    /// 还没有学习过输入框 / 还没有记录点击位置）。
     pub fn normalized(mut self) -> Self {
-        match self.strategy {
-            FocusStrategy::OpenOnly | FocusStrategy::AutoComposer => {
-                self.shortcut = None;
-                self.recorded = None;
-                self.point = None;
-            }
-            FocusStrategy::AppShortcut => {
-                self.recorded = None;
-                self.point = None;
-                let has_keys = self
-                    .shortcut
-                    .as_ref()
-                    .is_some_and(|chord| !chord.keys.is_empty());
-                if !has_keys {
-                    self.shortcut = None;
-                }
-            }
-            FocusStrategy::RecordedElement => {
-                self.shortcut = None;
-                self.point = None;
-                self.recorded = self.recorded.and_then(|target| target.normalized());
-            }
-            FocusStrategy::RecordedPoint => {
-                self.shortcut = None;
-                self.recorded = None;
-                self.point = self.point.and_then(|point| point.normalized());
-            }
+        let has_keys = self
+            .shortcut
+            .as_ref()
+            .is_some_and(|chord| !chord.keys.is_empty());
+        if !has_keys {
+            self.shortcut = None;
         }
+        self.recorded = self.recorded.and_then(|target| target.normalized());
+        self.point = self.point.and_then(|point| point.normalized());
         self
     }
 }
@@ -920,51 +899,63 @@ mod tests {
     }
 
     #[test]
-    fn profile_clears_payload_that_does_not_match_its_strategy() {
-        // app_shortcut 没给快捷键 → 策略保留，载荷清空（执行期报"未录入快捷键"）
+    fn profile_preserves_valid_payloads_for_other_strategies() {
+        let shortcut = KeyChord {
+            keys: vec![crate::send_input::KeyCode::RightAlt],
+        };
+        let recorded = RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            automation_id: "chat-input".to_owned(),
+            ..Default::default()
+        };
+        let point = RecordedPoint {
+            x_ratio: 0.5,
+            y_ratio: 0.9,
+            window_width: 1200,
+            window_height: 800,
+            ..Default::default()
+        };
+        for strategy in [
+            FocusStrategy::OpenOnly,
+            FocusStrategy::AutoComposer,
+            FocusStrategy::AppShortcut,
+            FocusStrategy::RecordedElement,
+            FocusStrategy::RecordedPoint,
+        ] {
+            let normalized = AppFocusProfile {
+                strategy,
+                shortcut: Some(shortcut.clone()),
+                recorded: Some(recorded.clone()),
+                point: Some(point.clone()),
+            }
+            .normalized();
+            assert_eq!(normalized.strategy, strategy);
+            assert!(normalized.shortcut.is_some(), "valid shortcut must survive");
+            assert!(
+                normalized.recorded.is_some(),
+                "valid recorded target must survive"
+            );
+            assert!(normalized.point.is_some(), "valid point must survive");
+        }
+
+        // Empty/invalid payloads are still dropped, but the strategy survives.
         let invalid = AppFocusProfile {
             strategy: FocusStrategy::AppShortcut,
-            ..Default::default()
+            shortcut: Some(KeyChord { keys: Vec::new() }),
+            recorded: Some(RecordedFocusTarget::default()),
+            point: Some(RecordedPoint {
+                x_ratio: 1.5,
+                y_ratio: 0.9,
+                window_width: 1200,
+                window_height: 800,
+                ..Default::default()
+            }),
         }
         .normalized();
         assert_eq!(invalid.strategy, FocusStrategy::AppShortcut);
         assert!(invalid.shortcut.is_none());
-
-        // recorded_element 没给记录 → 同样保留策略
-        let invalid = AppFocusProfile {
-            strategy: FocusStrategy::RecordedElement,
-            ..Default::default()
-        }
-        .normalized();
-        assert_eq!(invalid.strategy, FocusStrategy::RecordedElement);
         assert!(invalid.recorded.is_none());
-
-        // open_only 永远可用（忽略附带字段）
-        let open = AppFocusProfile {
-            strategy: FocusStrategy::OpenOnly,
-            shortcut: Some(KeyChord {
-                keys: vec![crate::send_input::KeyCode::RightAlt],
-            }),
-            ..Default::default()
-        }
-        .normalized();
-        assert_eq!(open.strategy, FocusStrategy::OpenOnly);
-        assert!(open.shortcut.is_none());
-        assert!(open.recorded.is_none());
-
-        // auto_composer 同样忽略附带字段（预设应用的隐式策略）。
-        let auto = AppFocusProfile {
-            strategy: FocusStrategy::AutoComposer,
-            shortcut: Some(KeyChord {
-                keys: vec![crate::send_input::KeyCode::RightAlt],
-            }),
-            ..Default::default()
-        }
-        .normalized();
-        assert_eq!(auto.strategy, FocusStrategy::AutoComposer);
-        assert!(auto.shortcut.is_none());
-        assert!(auto.recorded.is_none());
-        assert!(auto.point.is_none());
+        assert!(invalid.point.is_none());
     }
 
     #[test]
@@ -1268,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_point_profile_requires_point_and_clears_other_fields() {
+    fn recorded_point_profile_preserves_other_valid_payloads() {
         let mut profile = AppFocusProfile {
             strategy: FocusStrategy::RecordedPoint,
             point: Some(RecordedPoint {
@@ -1286,17 +1277,24 @@ mod tests {
             ..Default::default()
         };
         let normalized = profile.clone().normalized();
-        assert!(normalized.recorded.is_none(), "非当前策略的字段应被清空");
+        assert!(
+            normalized.recorded.is_some(),
+            "other valid payloads must survive a strategy switch"
+        );
         assert!(normalized.shortcut.is_none());
-        assert!(normalized.point.is_some(), "当前策略的载荷必须保留");
+        assert!(
+            normalized.point.is_some(),
+            "current strategy payload must survive"
+        );
 
-        // 缺 point：策略保留、载荷为空（执行期报"还没有记录点击位置"）
+        // Missing point: strategy survives, current payload is empty, other payloads stay.
         profile.point = None;
         let normalized = profile.clone().normalized();
         assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
         assert!(normalized.point.is_none());
+        assert!(normalized.recorded.is_some());
 
-        // 越界比例同样清空载荷
+        // Out-of-range point is dropped; the recorded target is still preserved.
         profile.point = Some(RecordedPoint {
             x_ratio: 1.5,
             y_ratio: 0.9,
@@ -1307,6 +1305,7 @@ mod tests {
         let normalized = profile.normalized();
         assert_eq!(normalized.strategy, FocusStrategy::RecordedPoint);
         assert!(normalized.point.is_none());
+        assert!(normalized.recorded.is_some());
     }
 
     #[test]

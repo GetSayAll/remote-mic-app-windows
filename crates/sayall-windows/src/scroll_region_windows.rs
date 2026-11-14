@@ -9,6 +9,7 @@
 
 #[cfg(windows)]
 mod imp {
+    use std::mem::size_of;
     use std::time::{Duration, Instant};
 
     use windows::core::{Interface, BSTR};
@@ -22,10 +23,13 @@ mod imp {
         UIA_ScrollPatternId, UIA_ScrollPatternNoScroll, UIA_TableControlTypeId,
         UIA_TreeControlTypeId, UIA_CONTROLTYPE_ID,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+        VK_LBUTTON,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowThreadProcessId, PostMessageW, ShowWindow, WindowFromPoint, SW_RESTORE,
-        WM_MOUSEWHEEL,
+        GetPhysicalCursorPos, GetWindowThreadProcessId, PostMessageW, SetCursorPos, ShowWindow,
+        WindowFromPoint, SW_RESTORE, WM_MOUSEWHEEL,
     };
 
     use crate::focus::NormalizedRect;
@@ -101,8 +105,7 @@ mod imp {
     fn physical_cursor() -> Option<(f64, f64)> {
         use windows::Win32::Foundation::POINT;
         let mut point = POINT::default();
-        unsafe { windows::Win32::UI::WindowsAndMessaging::GetPhysicalCursorPos(&mut point) }
-            .ok()?;
+        unsafe { GetPhysicalCursorPos(&mut point) }.ok()?;
         Some((f64::from(point.x), f64::from(point.y)))
     }
 
@@ -316,6 +319,44 @@ mod imp {
             .filter(|value| value.is_finite())
     }
 
+    /// 真实滚轮输入：把物理光标临时移到区域中心，发送 `SendInput` 滚轮后恢复。
+    ///
+    /// Chromium/Electron（2026-11-14 DimAgent 实测）不处理发给渲染子窗口的
+    /// `WM_MOUSEWHEEL`，只认真实滚轮输入。发送前若左键按住则放弃，避免拖动中
+    /// 移动光标；返回是否成功提交以及光标是否恢复。
+    fn wheel_input(center: (f64, f64), delta: i16, notches: i32) -> Option<bool> {
+        if left_button_down() {
+            return None;
+        }
+        let (saved_x, saved_y) = physical_cursor()?;
+        let x = center.0.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        let y = center.1.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        if unsafe { SetCursorPos(x, y) }.is_err() {
+            return None;
+        }
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    mouseData: delta as u32,
+                    dwFlags: MOUSEEVENTF_WHEEL,
+                    ..Default::default()
+                },
+            },
+        };
+        let mut sent = 0usize;
+        for _ in 0..notches {
+            let count = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) } as usize;
+            if count > 0 {
+                sent += 1;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let restored =
+            unsafe { SetCursorPos(saved_x.round() as i32, saved_y.round() as i32) }.is_ok();
+        (sent > 0).then_some(restored)
+    }
+
     fn wheel_scroll(
         hwnd: HWND,
         center: (f64, f64),
@@ -332,19 +373,46 @@ mod imp {
         } else {
             -120
         };
+        let before = pattern.and_then(vertical_percent);
+        // 优先真实滚轮输入：Chromium/Electron 的渲染子窗口会忽略 PostMessage。
+        // 只有光标定位或输入被拒绝时才退回旧的消息投递路径。
+        let wheel_input_result = wheel_input(center, delta, notches);
+        if let Some(restored) = wheel_input_result {
+            std::thread::sleep(Duration::from_millis(160));
+            let after = pattern.and_then(vertical_percent);
+            let moved = match (before, after) {
+                (Some(left), Some(right)) => (right - left).abs() >= PERCENT_EPSILON,
+                _ => false,
+            };
+            let at_edge = after.is_some_and(|value| {
+                matches!(command, ScrollCommand::PageUp | ScrollCommand::ToTop) && value <= 0.05
+                    || matches!(command, ScrollCommand::PageDown | ScrollCommand::ToBottom)
+                        && value >= 99.95
+            });
+            crate::ble::gatt_note(format!(
+                "scroll_execute method=wheel input=send_input command={} notches={notches} moved={moved} at_edge={at_edge} cursor_restored={restored} terminal_result=submitted",
+                command.as_str()
+            ));
+            return Ok(ScrollOutcome {
+                method: ScrollMethod::Wheel,
+                before_percent: before,
+                after_percent: after,
+                moved,
+                at_edge,
+            });
+        }
         let point = windows::Win32::Foundation::POINT {
             x: center.0.round() as i32,
             y: center.1.round() as i32,
         };
-        // 滚轮按光标位置路由；PostMessage 到命中的子窗口可在不移动光标的前提下
-        // 让 Chromium/Notepad 这类分层窗口收到滚轮。没有子窗口时退回顶层窗口。
+        // 回退：滚轮按光标位置路由；PostMessage 到命中的子窗口可在不移动光标的
+        // 前提下让部分分层窗口收到滚轮。没有子窗口时退回顶层窗口。
         let child = unsafe { WindowFromPoint(point) };
         let target = if child.is_invalid() { hwnd } else { child };
         let x = center.0.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16 as u16;
         let y = center.1.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16 as u16;
         let lparam = ((y as usize) << 16) | (x as usize);
         let wparam = ((delta as u16 as usize) << 16) & 0xffff_0000;
-        let before = pattern.and_then(vertical_percent);
         for _ in 0..notches {
             unsafe {
                 PostMessageW(
@@ -369,7 +437,7 @@ mod imp {
                     && value >= 99.95
         });
         crate::ble::gatt_note(format!(
-            "scroll_execute method=wheel command={} notches={notches} moved={moved} at_edge={at_edge} terminal_result=queued",
+            "scroll_execute method=wheel input=post_message command={} notches={notches} moved={moved} at_edge={at_edge} terminal_result=queued",
             command.as_str()
         ));
         Ok(ScrollOutcome {

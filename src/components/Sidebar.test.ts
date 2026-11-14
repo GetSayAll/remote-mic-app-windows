@@ -36,8 +36,8 @@ describe("sidebar", () => {
 
     expect(items.map((item) => item.text())).toEqual([
       "按键",
-      // 2026-11-09：APP 适配紧跟在按键之后（对齐 Mac）。
-      "APP 适配",
+      // 2026-11-09：聚焦与翻页紧跟在按键之后（对齐 Mac）。
+      "聚焦与翻页",
       // 2026-10-25 用户指定：推荐放在连接上方。
       "组合动作",
       "推荐",
@@ -141,7 +141,7 @@ describe("sidebar", () => {
     const wrapper = mount(Sidebar, { props: { activePage: "settings" } });
     const publicEnglishLabels = new Set([
       "Buttons",
-      "Apps",
+      "Focus/Scroll",
       "Routines",
       "Picks",
       "Connection",
@@ -155,7 +155,7 @@ describe("sidebar", () => {
 
     expect(items.map((item) => item.text())).toEqual([
       "Buttons",
-      "Apps",
+      "Focus/Scroll",
       "Routines",
       "Picks",
       "Connection",

@@ -2765,7 +2765,7 @@ onUnmounted(() => {
               class="chip"
               :class="{ selected: selectedAction?.type === item.type }"
               type="button"
-              :title="t('使用 APP 适配里学习的滚动区域；没有记录时自动寻找可滚动容器')"
+              :title="t('使用聚焦与翻页里学习的滚动区域；没有记录时自动寻找可滚动容器')"
               @click="applyAction({ type: item.type })"
             >
               {{ t(item.label) }}

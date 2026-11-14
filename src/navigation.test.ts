@@ -26,8 +26,8 @@ describe("Windows navigation", () => {
       "settings",
       "profile",
     ]);
-    // 2026-11-09：APP 适配紧跟在按键之后（对齐 Mac SettingsSection.applications）。
-    expect(items[1].label).toBe("APP 适配");
+    // 2026-11-09：聚焦与翻页紧跟在按键之后（对齐 Mac SettingsSection.applications）。
+    expect(items[1].label).toBe("聚焦与翻页");
     expect(items[1].icon).toBe("apps");
     expect(items[3].label).toBe("推荐");
     expect(items[3].icon).toBe("sparkles");

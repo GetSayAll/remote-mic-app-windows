@@ -126,12 +126,12 @@ const deleteBlockedReason = computed<string | null>(() => {
   const row = selectedRow.value;
   if (!row || isPresetPlaceholder(row)) return null;
   if (bindings.value.length) {
-    return t("还有 {count} 处绑定在使用它，先解绑才能删除适配。", {
+    return t("还有 {count} 处绑定在使用它，先解绑才能删除设置。", {
       count: bindings.value.length,
     });
   }
   if (macroReferences.value.length) {
-    return t("还有 {count} 个组合动作在使用它，先移除引用才能删除适配。", {
+    return t("还有 {count} 个组合动作在使用它，先移除引用才能删除设置。", {
       count: macroReferences.value.length,
     });
   }
@@ -246,7 +246,7 @@ async function load(): Promise<void> {
     void loadIcons();
   } catch (error) {
     console.warn("load app adaptation page failed", error);
-    loadError.value = t("无法读取 APP 适配设置，请稍后重试。");
+    loadError.value = t("无法读取聚焦与翻页设置，请稍后重试。");
   } finally {
     loading.value = false;
   }
@@ -453,15 +453,15 @@ onUnmounted(() => {
   <section class="apps-page">
     <header class="page-header">
       <div>
-        <h1>{{ tPage("APP 适配") }}</h1>
-        <p class="page-subtitle">{{ t("输入框聚焦与翻页滚动按 APP 生效，APP 在前台即可使用。") }}</p>
+        <h1>{{ tPage("聚焦与翻页") }}</h1>
+        <p class="page-subtitle">{{ t("按 App 单独设置输入框聚焦与翻页滚动；只要该 App 在前台就能用，不会改变按键绑定。") }}</p>
       </div>
     </header>
 
     <p v-if="notice" class="page-notice" :class="notice.tone" role="status">{{ notice.text }}</p>
     <div v-if="loadError" class="card load-error" role="alert">{{ loadError }}</div>
 
-    <div v-if="loading" class="card loading-card" aria-busy="true">{{ t("正在读取 APP 适配设置…") }}</div>
+    <div v-if="loading" class="card loading-card" aria-busy="true">{{ t("正在读取聚焦与翻页设置…") }}</div>
 
     <article v-else-if="!rows.length" class="card empty-card">
       <span class="empty-icon" aria-hidden="true">
@@ -472,16 +472,16 @@ onUnmounted(() => {
           <path d="M17.3 13.8v7.4M13.6 17.5h7.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
         </svg>
       </span>
-      <h2>{{ t("还没有添加任何 APP") }}</h2>
+      <h2>{{ t("还没有添加任何 App") }}</h2>
       <p class="muted">
-        {{ t("添加后可以为它单独设置输入框聚焦；只要该 APP 在前台就能用。") }}
+        {{ t("添加后可以为它单独设置输入框聚焦与翻页滚动；这两项只要该 App 在前台就能用。") }}
       </p>
-      <button class="primary-button" type="button" @click="addError = null; addOpen = true">{{ t("添加 APP") }}</button>
+      <button class="primary-button" type="button" @click="addError = null; addOpen = true">{{ t("添加 App") }}</button>
     </article>
 
     <div v-else class="master-detail">
-      <section class="panel list-panel" :aria-label="t('已添加的 APP')">
-        <h2 class="list-title">{{ t("已添加的 APP") }}</h2>
+      <section class="panel list-panel" :aria-label="t('已添加的 App')">
+        <h2 class="list-title">{{ t("已添加的 App") }}</h2>
         <div class="app-list">
           <button
             v-for="row in rows"
@@ -503,17 +503,17 @@ onUnmounted(() => {
               <span class="app-row-name">{{ row.name }}</span>
               <span class="app-row-status">
                 {{ rowStatus(row) }}
-                <template v-if="!row.installed"> · {{ t("应用未找到") }}</template>
+                <template v-if="!row.installed"> · {{ t("App 未找到") }}</template>
               </span>
             </span>
           </button>
         </div>
         <button class="add-app" type="button" @click="addError = null; addOpen = true">
-          <span aria-hidden="true">＋</span>{{ t("添加 APP") }}
+          <span aria-hidden="true">＋</span>{{ t("添加 App") }}
         </button>
       </section>
 
-      <section v-if="selectedRow" class="panel detail-panel" :aria-label="t('{name} 的适配设置', { name: selectedRow.name })">
+      <section v-if="selectedRow" class="panel detail-panel" :aria-label="t('{name} 的设置', { name: selectedRow.name })">
         <div class="app-head">
           <div class="app-head-text">
             <h2>{{ selectedRow.name }}</h2>
@@ -521,11 +521,11 @@ onUnmounted(() => {
         </div>
 
         <p v-if="!selectedRow.installed" class="missing-note" role="status">
-          {{ t("应用未找到，请重新添加。") }}
+          {{ t("App 未找到，请重新添加。") }}
         </p>
 
         <p class="scope-note">
-          {{ t("输入框聚焦和上下翻页按 APP 单独设置：只要该 APP 在前台就能用，与「打开 App」动作无关。") }}
+          {{ t("输入框聚焦和上下翻页按 App 单独设置：只要该 App 在前台就能用，与「打开 App」动作无关。") }}
         </p>
 
         <AppFocusProfileEditor
@@ -553,7 +553,7 @@ onUnmounted(() => {
             {{
               selectedIsPreset && !selectedScrollRegion
                 ? t("预置滚动区域已可用；重新学习会覆盖预置区域。")
-                : t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。")
+                : t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点；必要时会短暂移动鼠标指针。")
             }}
           </p>
           <div class="scroll-learn-row">
@@ -618,11 +618,11 @@ onUnmounted(() => {
 
         <section class="section-card binding-card">
           <div class="section-head">
-            <h3>{{ t("绑定到它的按键") }}</h3>
+            <h3>{{ t("哪些按键会打开它") }}</h3>
             <span class="spacer"></span>
           </div>
           <p v-if="!bindings.length" class="hint">
-            {{ t("还没有按键绑定这个 APP，可在按键页的“打开 APP”里选择它。") }}
+            {{ t("还没有按键会打开这个 App，可在按键页的「打开 App」里选择它。") }}
           </p>
           <div v-else class="binding-list">
             <button
@@ -633,7 +633,7 @@ onUnmounted(() => {
               @click="goToBinding(binding.button, binding.trigger)"
             >
               <span class="binding-key">{{ buttonLabel(binding.button) }} · {{ buttonTriggerLabel(binding.trigger) }}</span>
-              <span class="binding-action">{{ t("打开 APP") }}</span>
+              <span class="binding-action">{{ t("打开 App") }}</span>
               <span class="spacer"></span>
               <span class="binding-go">{{ t("去按键页") }}</span>
             </button>
@@ -645,7 +645,7 @@ onUnmounted(() => {
               <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
               <template v-else>
                 <button class="danger-link" type="button" :disabled="saving" @click="confirmDelete = true">
-                  {{ t("删除这个 APP 的适配") }}
+                  {{ t("删除这个 App 的设置") }}
                 </button>
               </template>
             </div>
@@ -666,19 +666,19 @@ onUnmounted(() => {
     <div v-if="confirmDelete && selectedRow" class="dialog-backdrop" @click.self="confirmDelete = false">
       <section class="confirm-dialog" role="dialog" aria-modal="true" :aria-labelledby="'delete-app-title'">
         <h2 id="delete-app-title">
-          {{ isPresetPlaceholder(selectedRow) ? t("恢复「{name}」的默认聚焦？", { name: selectedRow.name }) : t("删除「{name}」的适配？", { name: selectedRow.name }) }}
+          {{ isPresetPlaceholder(selectedRow) ? t("恢复「{name}」的默认聚焦？", { name: selectedRow.name }) : t("删除「{name}」的设置？", { name: selectedRow.name }) }}
         </h2>
         <p class="muted">
           {{
             isPresetPlaceholder(selectedRow)
-              ? t("只会清除 SayAll 保存的显式聚焦设置；APP 本身不会被修改或卸载。")
-              : t("只会删除 SayAll 保存的适配设置（输入框学习记录、聚焦快捷键），不会卸载或改动 APP 本身。")
+              ? t("只会清除 SayAll 保存的显式聚焦设置；App 本身不会被修改或卸载。")
+              : t("只会删除 SayAll 保存的这个 App 的设置（输入框学习记录、聚焦快捷键），不会卸载或改动 App 本身。已绑定的按键会保留，但会变成「尚未选择 App」。")
           }}
         </p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" :disabled="saving" @click="confirmDelete = false">{{ t("取消") }}</button>
           <button class="danger-button" type="button" :disabled="saving" @click="deleteAdaptation">
-            {{ isPresetPlaceholder(selectedRow) ? t("恢复默认") : t("删除适配") }}
+            {{ isPresetPlaceholder(selectedRow) ? t("恢复默认") : t("删除设置") }}
           </button>
         </div>
       </section>
@@ -768,8 +768,8 @@ onUnmounted(() => {
   padding: 12px;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 150px);
-  max-height: 100%;
+  align-self: flex-start;
+  max-height: calc(100vh - 150px);
   min-height: 0;
 }
 .list-title {
@@ -780,7 +780,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding-right: 2px;
@@ -851,7 +851,7 @@ onUnmounted(() => {
 }
 .add-app {
   min-height: 32px;
-  margin-top: auto;
+  margin-top: 8px;
   margin-bottom: 2px;
   flex: 0 0 auto;
   display: flex;

@@ -121,10 +121,10 @@ describe("APP adaptation page", () => {
 
   it("shows the empty state and opens the existing app picker", async () => {
     const wrapper = await mountPage();
-    expect(wrapper.text()).toContain("还没有添加任何 APP");
+    expect(wrapper.text()).toContain("还没有添加任何 App");
     expect(wrapper.find(".list-panel").exists()).toBe(false);
 
-    await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "添加 App")!.trigger("click");
     await flushPromises();
     expect(wrapper.find(".registered-apps-dialog").exists()).toBe(true);
   });
@@ -143,7 +143,7 @@ describe("APP adaptation page", () => {
       },
     });
     const wrapper = await mountPage();
-    await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "添加 App")!.trigger("click");
     await flushPromises();
 
     await wrapper.get('.picker-row input[aria-label="Cursor"]').setValue(true);
@@ -197,7 +197,7 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage({ initialTarget: "notepad" });
     expect(wrapper.find(".app-row").exists()).toBe(true);
     expect(wrapper.find(".detail-panel").text()).toContain("记事本");
-    expect(wrapper.text()).not.toContain("还没有添加任何 APP");
+    expect(wrapper.text()).not.toContain("还没有添加任何 App");
     expect(saveButtonMappings).not.toHaveBeenCalled();
   });
 
@@ -223,6 +223,44 @@ describe("APP adaptation page", () => {
     expect(saved.applications).toEqual([{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }]);
     expect(saved.focusProfiles["C:\\Apps\\Cursor.exe"]?.strategy).toBe("recorded_element");
     expect(saved.focusProfiles["C:\\Other.exe"]?.strategy).toBe("app_shortcut");
+  });
+
+  it("keeps a learned input field when switching focus strategy", async () => {
+    const target = "C:\\Apps\\Cursor.exe";
+    configureMappings({
+      applications: [{ name: "Cursor", path: target }],
+      focusProfiles: {
+        [target]: {
+          strategy: "recorded_element",
+          recorded: {
+            controlType: "Edit",
+            automationId: "chat-input",
+            className: "RichEdit",
+          },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+
+    const option = wrapper
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("使用 APP 快捷键聚焦"))!;
+    await option.trigger("click");
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      focusProfiles: Record<
+        string,
+        {
+          strategy: string;
+          recorded?: { automationId: string };
+          point?: { xRatio: number };
+          shortcut?: { keys: string[] };
+        }
+      >;
+    };
+    expect(saved.focusProfiles[target]?.strategy).toBe("app_shortcut");
+    expect(saved.focusProfiles[target]?.recorded?.automationId).toBe("chat-input");
   });
 
   it("learns an input field and saves the structural record", async () => {
@@ -304,7 +342,7 @@ describe("APP adaptation page", () => {
       "只打开 APP",
       "打开后自动聚焦",
       "使用 APP 快捷键聚焦",
-      "记录点击位置 界面不暴露输入框时",
+      "记录点击位置",
     ]);
     expect(wrapper.find(".detail-panel").text()).toContain("点击位置");
     expect(wrapper.find(".focus-editor").text()).toContain("开始记录位置");
@@ -325,7 +363,7 @@ describe("APP adaptation page", () => {
       "只打开 APP",
       "打开后自动聚焦",
       "使用 APP 快捷键聚焦",
-      "记录点击位置 界面不暴露输入框时",
+      "记录点击位置",
     ]);
     expect(wrapper.find(".focus-option.selected").text()).toContain("自动选择输入框");
     expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
@@ -405,7 +443,7 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
 
     expect(wrapper.text()).toContain("还有 1 处绑定在使用它");
-    expect(wrapper.findAll("button").some((button) => button.text() === "删除这个 APP 的适配")).toBe(false);
+    expect(wrapper.findAll("button").some((button) => button.text() === "删除这个 App 的设置")).toBe(false);
     expect(wrapper.find(".binding-row").text()).toContain("确定");
   });
 
@@ -425,12 +463,12 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".binding-card .section-divider").exists()).toBe(true);
     expect(wrapper.find(".binding-card .danger-link").exists()).toBe(true);
     expect(wrapper.text()).not.toContain("0 处");
-    expect(wrapper.text()).not.toContain("只删除 SayAll 保存的适配");
-    await wrapper.findAll("button").find((button) => button.text() === "删除这个 APP 的适配")!.trigger("click");
+    expect(wrapper.text()).not.toContain("只删除 SayAll 保存的设置");
+    await wrapper.findAll("button").find((button) => button.text() === "删除这个 App 的设置")!.trigger("click");
     await flushPromises();
     expect(wrapper.find(".confirm-dialog").exists()).toBe(true);
 
-    await wrapper.findAll("button").find((button) => button.text() === "删除适配")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "删除设置")!.trigger("click");
     await flushPromises();
 
     const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
@@ -479,12 +517,12 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
     await wrapper
       .findAll("button")
-      .find((button) => button.text() === "删除这个 APP 的适配")!
+      .find((button) => button.text() === "删除这个 App 的设置")!
       .trigger("click");
     await flushPromises();
     await wrapper
       .findAll("button")
-      .find((button) => button.text() === "删除适配")!
+      .find((button) => button.text() === "删除设置")!
       .trigger("click");
     await flushPromises();
 
@@ -696,6 +734,6 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage();
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
-    expect(wrapper.text()).not.toContain("无法读取 APP 适配设置");
+    expect(wrapper.text()).not.toContain("无法读取聚焦与翻页设置");
   });
 });

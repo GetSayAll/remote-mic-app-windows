@@ -104,12 +104,14 @@ function clearLearnState(): void {
 function profileForStrategy(next: FocusStrategy): AppFocusProfile {
   const previous = effective.value;
   const profile: AppFocusProfile = { strategy: next };
-  if (next === "app_shortcut") {
-    const shortcut = previous.shortcut ?? props.fallback?.shortcut;
-    if (shortcut?.keys?.length) profile.shortcut = shortcut;
-  }
-  if (next === "recorded_element" && previous.recorded) profile.recorded = previous.recorded;
-  if (next === "recorded_point" && previous.point) profile.point = previous.point;
+  // 策略只决定执行哪条载荷；切换方式时保留已学习的输入框、点击位置和快捷键，
+  // 否则用户每次换方式都要重新学习（2026-11-14）。
+  const shortcut = previous.shortcut ?? props.fallback?.shortcut;
+  if (shortcut?.keys?.length) profile.shortcut = shortcut;
+  const recorded = previous.recorded ?? props.fallback?.recorded;
+  if (recorded) profile.recorded = recorded;
+  const point = previous.point ?? props.fallback?.point;
+  if (point) profile.point = point;
   return profile;
 }
 
@@ -325,12 +327,6 @@ async function clearShortcut(): Promise<void> {
   }
 }
 
-async function backToPrimary(): Promise<void> {
-  if (controlsDisabled.value) return;
-  if (await props.save(profileForStrategy("recorded_element"))) setShortcutMessage(null);
-  else setShortcutMessage(t("更新聚焦方式失败，请重试。"), "error");
-}
-
 function handleKeydown(event: KeyboardEvent): void {
   if (!capturing.value) return;
   event.preventDefault();
@@ -436,7 +432,6 @@ onUnmounted(() => {
         <span class="option-label">
           {{ t(option.label) }}
           <small v-if="option.value === 'auto_composer'">{{ t("预置可用") }}</small>
-          <small v-else-if="option.value === 'recorded_point'">{{ t("界面不暴露输入框时") }}</small>
         </span>
       </button>
     </div>
@@ -551,9 +546,6 @@ onUnmounted(() => {
           {{ shortcutMessage }}
         </span>
         <span class="spacer"></span>
-        <button class="quiet" type="button" :disabled="controlsDisabled" @click="backToPrimary">
-          {{ t("改回打开后自动聚焦") }}
-        </button>
       </div>
     </template>
 
