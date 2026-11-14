@@ -800,6 +800,22 @@ fn is_custom_path_target(target: &str) -> bool {
         && (lower.ends_with(".exe") || lower.ends_with(".lnk"))
 }
 
+/// 自定义目标在隐藏到托盘时，若能识别为某个预设应用，沿用该预设的隐藏窗口策略。
+///
+/// 典型是微信：自定义路径 `D:\\Apps\\Weixin\\Weixin.exe` 的 target 不一定与预设探测
+/// 路径相等，但可执行文件名仍是 `Weixin.exe`。仅凭 exe 名识别只用于隐藏窗口恢复策略
+/// 与托盘名称，不改变自定义目标的启动路径。
+#[cfg(windows)]
+fn preset_for_custom_hidden_target(target: &str, exe_name: &str) -> Option<&'static PresetApp> {
+    preset_app_for_target(target).or_else(|| {
+        PRESET_APPS.iter().find(|app| {
+            app.exe_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(exe_name))
+        })
+    })
+}
+
 /// 宿主注册的"同步自身窗口可见性缓存"回调（Tauri 层在启动时注入一次）。
 ///
 /// 为什么必须有它：为修"托盘里的窗口唤不回"，`show_and_force_foreground` 会用
@@ -1212,6 +1228,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                     visibility.largest_hidden,
                     arguments.as_deref(),
                     working_dir.as_deref(),
+                    preset_for_custom_hidden_target(id, &exe_name),
                 );
             }
             CustomRunningPlan::Launch => {}
@@ -1240,6 +1257,7 @@ fn delegate_custom_hidden_target(
     known_hidden: Option<isize>,
     arguments: Option<&str>,
     working_dir: Option<&str>,
+    preset: Option<&'static PresetApp>,
 ) -> Result<(), String> {
     let mut names = vec![exe_name.to_owned()];
     if let Some(stem) = exe_name
@@ -1248,6 +1266,18 @@ fn delegate_custom_hidden_target(
     {
         if !stem.is_empty() {
             names.push(stem.to_owned());
+        }
+    }
+    // 预设的托盘显示名（例如「微信」）不能从自定义路径推导；把它并入候选，
+    // 否则微信收在托盘时 matched=false，随后 relaunch 会新起登录小窗。
+    if let Some(app) = preset {
+        for name in app.shortcut_names {
+            if !names
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            {
+                names.push((*name).to_owned());
+            }
         }
     }
     // `.lnk` 的文件名就是用户看到的托盘名称（如“飞书”）；不含标题/个人信息。
@@ -1280,6 +1310,34 @@ fn delegate_custom_hidden_target(
             if focused { "passed" } else { "failed" }
         ));
         return Ok(());
+    }
+
+    // 微信 4.x 等预设在隐藏时重新拉起只会新起登录小窗，不能走通用 relaunch。
+    // 识别到预设后直接恢复已知隐藏主窗口，避免制造第二个实例。
+    if let Some(app) = preset.filter(|app| !app.relaunch_when_hidden) {
+        crate::ble::gatt_note(format!(
+            "app_launcher action=activate_or_launch target_kind=custom preset={} phase=relaunch_skipped reason=relaunch_pops_login_window",
+            app.id
+        ));
+        if let Some(hwnd) = known_hidden {
+            let activated = unsafe { win_impl::activate_known_window(hwnd) };
+            crate::ble::gatt_note(format!(
+                "app_launcher action=activate_or_launch target_kind=custom preset={} phase=hidden_fallback target=largest_hidden_window terminal_result={}",
+                app.id,
+                if activated { "passed" } else { "failed" }
+            ));
+            if activated {
+                let focused =
+                    wait_for_target_foreground(target, std::time::Duration::from_millis(400));
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=activate_or_launch target_kind=custom preset={} phase=hidden_foreground terminal_result={}",
+                    app.id,
+                    if focused { "passed" } else { "failed" }
+                ));
+                return Ok(());
+            }
+        }
+        return Err("应用窗口收在托盘，未能恢复主窗口；请从应用托盘图标打开".to_owned());
     }
 
     crate::ble::gatt_note(
@@ -3686,7 +3744,23 @@ pub(crate) mod tests {
         );
     }
 
-    /// custom `.exe` / `.lnk` 没有预设的 `relaunch_when_hidden` 元数据，但同样
+    /// 自定义路径的微信也必须识别成预设：隐藏到托盘时不能走 relaunch（会新起登录小窗）。
+    #[cfg(windows)]
+    #[test]
+    fn custom_weixin_target_uses_preset_hidden_policy() {
+        let app = preset_for_custom_hidden_target(r"D:\Custom\Weixin\Weixin.exe", "Weixin.exe")
+            .expect("Weixin.exe 应识别为微信预设");
+        assert_eq!(app.id, "wechat");
+        assert!(
+            !app.relaunch_when_hidden,
+            "微信重新拉起会弹登录小窗，必须沿用预设的跳过策略"
+        );
+        assert!(
+            preset_for_custom_hidden_target(r"D:\Custom\Tool.exe", "Tool.exe").is_none(),
+            "未知 exe 不应被误认成预设"
+        );
+    }
+
     /// 不能直接 `ShowWindow` 应用自己隐藏的主窗口：飞书 Electron 主窗口被外部
     /// 显示后会保留内部隐藏态，界面点击不进入应用（2026-11-12 本机复现）。
     #[cfg(windows)]
