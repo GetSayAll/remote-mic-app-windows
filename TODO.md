@@ -131,7 +131,7 @@
   - 自动化 passed（八轮修复后重跑）：`cargo test --workspace`（core 56 / windows 388 / app 131）、`cargo fmt --all -- --check`、vitest 421 passed | 10 skipped、`vue-tsc` + `vite build`。
   - **待办**：真机复验（RC001/RC003 全矩阵、微信「记录点击位置」的目视确认）仍 deferred。
   - 2026-11-13 修复 1.9 回归：预置应用（微信）显式聚焦档案重新优先于预设默认；「聚焦与翻页」页面恢复「记录点击位置」学习，组合动作页显示「去配置」。自动化见 `Bugs/2026-11-13-wechat-focus-learning-regression.md`；真实微信目视仍 deferred。
-  - 2026-11-14 用户反馈修复：移除按键页「筛选已添加应用」；组合动作库保留并恢复「搜索组合动作」及清除按钮；「添加 App」左栏占满可用高度，列表区在剩余空间滚动，底栏固定在窗口内，页面底 padding 4px、底栏 padding 4px（1066×800 实测按钮底 783px、窗口底 800px）；组合动作「目标 APP」组内选中预设或自定义目标后保持展开，切换步骤才重置；聚焦摘要始终显示「去配置」。AppsFolder 目标经 `resolve_preset_target` 解析预设 id 后，按键页与组合动作页都能读取同一份聚焦方式与翻页学习记录（目标键优先、预设 id 兜底）。自动化 passed：`pnpm test` 695 passed / 10 skipped、`pnpm build`、`cargo fmt --all -- --check`、`cargo test --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation`；真实 RC001/RC003 滚动与微信目视聚焦仍 deferred。
+  - 2026-11-14 用户反馈修复：移除按键页「筛选已添加应用」；组合动作库保留并恢复「搜索组合动作」及清除按钮；「添加 App」左栏占满可用高度，列表区在剩余空间滚动，底栏固定在窗口内，页面底 padding 8px、底栏 padding 8px（1066×800 实测按钮底 775px、窗口底 800px）；组合动作「目标 APP」组内选中预设或自定义目标后保持展开，切换步骤才重置；聚焦摘要始终显示「去配置」。AppsFolder 目标经 `resolve_preset_target` 解析预设 id 后，按键页与组合动作页都能读取同一份聚焦方式与翻页学习记录（目标键优先、预设 id 兜底）。自动化 passed：`pnpm test` 695 passed / 10 skipped、`pnpm build`、`cargo fmt --all -- --check`、`cargo test --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation`；真实 RC001/RC003 滚动与微信目视聚焦仍 deferred。
 - [ ] 增强捕获：换遥控器后**自动重选宿主**（2026-10-13 现场提出，助手侧已实现）：助手新增目标
   watchdog（每 2 秒复查 `rc003-target.ini`），目标地址变为另一支且宿主不同 ⇒ 记
   `[RETARGET] event=restart` 并重启自己（复用启动路径重新定位/注入）；应用侧在"报告层没生效 + 豆包"
