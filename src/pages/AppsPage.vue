@@ -713,7 +713,7 @@ onUnmounted(() => {
 .apps-page {
   height: 100%;
   min-height: 0;
-  padding-bottom: 4px;
+  padding-bottom: 8px;
   display: flex;
   flex-direction: column;
 }
@@ -788,7 +788,7 @@ onUnmounted(() => {
 .list-panel {
   width: 228px;
   flex: 0 0 228px;
-  padding: 12px 12px 4px;
+  padding: 12px 12px 8px;
   display: flex;
   flex-direction: column;
   align-self: stretch;
