@@ -62,3 +62,15 @@
 - 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `D58CAEB91808797619188B78B6ECB6E14FEE011787B4C105EFA58EF3F6B236FD`，大小 13485486 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `3CFB97EC71A072F07385C85D695FE856A4DD6A5A832F98492B636B2176769C37`，前端嵌入校验 18/18 passed（对 app exe 校验；NSIS 安装包经过压缩，不能直接做资源键阳性判据）。
 - 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 与构建产物仅 3 字节 UNK→NSS 差异；内嵌修订号 `f4ab08f` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-155725.png` 确认侧栏与页面标题为「聚焦与翻页」、「添加 App」和「删除这个 App 的设置」文案生效。
 - 真实遥控器按「向上/向下翻页」触发 DimAgent 滚动、以及微信目视聚焦仍为 **deferred**：需要 RC001/RC003 真机与用户在前台操作目标 App 确认最终用户可见结果。
+
+## 2026-11-14 追加：底栏、聚焦方式徽标与 AppsFolder 预设识别
+
+- 代码提交：`1017395`。
+- 左侧列表改为 `height: fit-content`：短列表不再被父容器拉伸，`添加 App` 距面板底部为 12px padding；长列表仍由 `max-height: calc(100vh - 150px)` 限制并滚动，按钮固定在列表末尾。浏览器实测 1150×1500：面板底部 694.1px、按钮底部 681.1px（13px）；1067×800 同样为 13px。
+- 快捷键策略的 `shortcut-footer` 只有移除「改回打开后自动聚焦」后留下的空行；现改为只在有 `shortcutMessage` 时渲染消息段落，不再保留 30px 空 footer。`测试打开与聚焦` 紧跟内容，聚焦卡片高度由 270px 降到 232px。
+- 「预置可用」从「自动选择输入框」选项内部移到「聚焦方式」标题右侧；仅当 `allowAutoComposer && strategy === "auto_composer"` 时显示，样式为 `font-size: 11.5px / weight 600 / var(--success-text)`，与滚动区域的「预置可用」计算色 `rgb(38, 113, 72)` 一致。自动选择以外的策略不显示。
+- Chrome / WorkBuddy 等应用库目标使用 `shell:AppsFolder\...`，前端按路径无法匹配预设。新增 `app_launcher::preset_id_for_target`（AppsFolder 目标先解析真实 exe，再与预设探测路径精确比对；Store 目标按已知 AUMID 匹配）与 Tauri 命令 `resolve_preset_target`；APP 适配页加载时把应用库目标解析为预设 id，再传给 `buildAppRows`。安装版已确认 Google Chrome / ChatGPT / Vokie 等行显示「预置可用」，Chrome 详情出现「自动选择输入框」选项；WorkBuddy 选中后同样出现该选项（其已有显式 recorded_element 档案，因此列表摘要仍显示「已记录输入框」）。
+- 验证：`cargo fmt --all -- --check` passed；`cargo test --workspace` passed（`sayall-windows` 556 passed / 17 ignored，`sayall-windows-app` 222 passed / 2 ignored）；`cargo check -p sayall-windows-app --features runtime-simulation` passed；`pnpm test` 692 passed / 10 skipped；`pnpm build` passed。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `1C0F015D7F2925956AE3939A1FDA703AC0F38A86B566AA42BAA8F9C724053468`，大小 13493599 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `9870F30BAC8D3C0DEB27CCE81607C8C87CEEEA3CB75D40DF9F88E52EC79F8A2C`；前端嵌入校验 18/18 passed。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `1017395` count=1；安装版截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-164340.png` 确认 Chrome / ChatGPT / Vokie 的预置状态与「聚焦方式」区域。
+- 仍未覆盖：真实遥控器翻页与真实微信目视聚焦（deferred，需真机前台操作）。
