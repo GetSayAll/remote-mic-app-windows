@@ -1751,6 +1751,57 @@ describe("buttons mapping page", () => {
     wrapper.unmount();
   });
 
+  it("AppsFolder 预设目标优先读取目标键下的显式记录", async () => {
+    const target = "shell:AppsFolder\\WorkBuddy.WorkBuddy";
+    vi.mocked(resolvePresetTarget).mockImplementation(async (value) =>
+      value === target ? "workbuddy" : null,
+    );
+    vi.mocked(listPresetApps).mockResolvedValueOnce([
+      {
+        id: "workbuddy",
+        name: "WorkBuddy",
+        installed: true,
+        path: "C:\\Program Files\\WorkBuddy\\WorkBuddy.exe",
+      },
+    ]);
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      applications: [{ name: "WorkBuddy", path: target }],
+      focusProfiles: {
+        [target]: {
+          strategy: "app_shortcut",
+          recorded: {
+            controlType: "Edit",
+            normalizedRect: { x: 0.3, y: 0.8, width: 0.6, height: 0.08 },
+          },
+        },
+      },
+      scrollRegions: {
+        [target]: {
+          controlType: "Window",
+          normalizedRect: { x: 0, y: 0, width: 1, height: 1 },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("聚焦：使用 APP 快捷键聚焦");
+    expect(summary.text()).toContain("翻页：已学习");
+    expect(summary.find(".link-button").text()).toBe("去配置");
+    wrapper.unmount();
+  });
+
   it("手动添加的预设显示预置能力，并保留去配置入口", async () => {
     const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     vi.mocked(listPresetApps).mockResolvedValueOnce([
