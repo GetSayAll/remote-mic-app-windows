@@ -7566,6 +7566,31 @@ mod tests {
         }
     }
 
+    /// 2026-11-14 用户现场：升级 1.9.2 时 `sayall-mcp.exe` 被 Codex/Claude Code
+    /// 持有的 MCP 服务锁住，安装器停在“无法打开要写入的文件”。MCP 不在主程序
+    /// 退出链路内，必须在覆盖文件前单独结束；安装和卸载两条路径都要做。
+    /// 这里只守护静态契约，真实现场由安装器测试/真机验收覆盖。
+    #[test]
+    fn installer_stops_mcp_server_before_overwriting_its_image() {
+        let stop = macro_body(INSTALLER_HOOKS, "SayAllStopMcp");
+        for token in ["FindProcessCurrentUser", "taskkill", "SAYALL_MCP_IMAGE"] {
+            assert!(stop.contains(token), "MCP 停止宏缺少 `{token}`");
+        }
+        assert!(
+            stop.contains("Abort"),
+            "MCP 进程在预算内未退出时必须中止安装，不能继续撞文件锁"
+        );
+        for (hook, expected) in [
+            ("NSIS_HOOK_PREINSTALL", "SayAllStopMcp install 1"),
+            ("NSIS_HOOK_PREUNINSTALL", "SayAllStopMcp uninstall 0"),
+        ] {
+            assert!(
+                macro_body(INSTALLER_HOOKS, hook).contains(&format!("!insertmacro {expected}")),
+                "`{hook}` 没有在覆盖 sayall-mcp.exe 前停止 MCP 服务"
+            );
+        }
+    }
+
     /// 2026-10-08 产品决定（用户明确）：**卸载不再弹窗**——删不掉的东西由提权助手先做
     /// 设备环释放锁、再删，仍删不掉的一律安排到重启后自动删除。这条断言防止有人
     /// 再把"未能立即删除"的提示加回来。
@@ -7879,9 +7904,16 @@ mod tests {
 
     /// 安装器钩子**不得**自己引入强杀。Tauri 模板在钩子之后跑
     /// `CheckIfAppIsRunning`；只要应用已退出，那一步自然落空。
+    ///
+    /// 唯一例外是独立的只读 MCP 服务：它不持有 BLE、音频或按键会话，且不在
+    /// 主程序退出链路内（2026-11-14 升级现场）。该例外必须**只存在于**
+    /// `SayAllStopMcp` 宏中；宏外出现任何强杀仍按原规则失败。
     #[test]
     fn installer_hook_never_force_kills_the_app() {
-        let code = strip_comments(INSTALLER_HOOKS).to_ascii_lowercase();
+        let mcp_stop = strip_comments(&macro_body(INSTALLER_HOOKS, "SayAllStopMcp"));
+        let code = strip_comments(INSTALLER_HOOKS)
+            .replace(&mcp_stop, "")
+            .to_ascii_lowercase();
         for token in [
             "killprocess",
             "terminateprocess",
@@ -7890,7 +7922,7 @@ mod tests {
         ] {
             assert!(
                 !code.contains(token),
-                "安装器钩子出现强杀 `{token}`：强杀会留下未关闭的 GATT 会话并楔死系统蓝牙栈"
+                "安装器钩子在 MCP 宏之外出现强杀 `{token}`：强杀会留下未关闭的 GATT 会话并楔死系统蓝牙栈"
             );
         }
     }

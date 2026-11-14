@@ -123,6 +123,53 @@
   Pop $R8
 !macroend
 
+; ── 停止 sayall-mcp.exe（2026-11-14 用户现场）────────────────────────────
+;
+; 现象：从 1.9.1 升级到 1.9.2 时停在“无法打开要写入的文件：
+; ...\sayall-mcp.exe”。MCP 是 Codex / Claude Code 等本机工具持有的只读记录
+; 服务，不由主程序退出信号管理；安装器覆盖它时被占用。
+;
+; 它是只读服务，不持有 BLE、音频或按键会话，关闭不会造成主程序那种链路残留。
+; 升级/卸载前只结束当前用户下这个明确命名的进程，再轮询确认文件锁释放；
+; 这样用户不需要手动找进程或点 Ignore。主程序仍按上面的优雅退出流程处理。
+!define SAYALL_MCP_IMAGE "sayall-mcp.exe"
+!define SAYALL_MCP_STOP_RETRIES 12
+!define SAYALL_MCP_STOP_INTERVAL_MS 250
+
+!macro SayAllStopMcp _uid _show_message
+  Push $R8
+  Push $R9
+  nsis_tauri_utils::FindProcessCurrentUser "${SAYALL_MCP_IMAGE}"
+  Pop $R8
+  ${If} $R8 = 0
+    DetailPrint "Stopping SayAll MCP server before updating ${SAYALL_MCP_IMAGE}..."
+    nsExec::Exec 'taskkill /F /IM "${SAYALL_MCP_IMAGE}"'
+    Pop $R9
+    StrCpy $R8 ${SAYALL_MCP_STOP_RETRIES}
+    sayall_mcp_wait_${_uid}:
+      nsis_tauri_utils::FindProcessCurrentUser "${SAYALL_MCP_IMAGE}"
+      Pop $R9
+      ${If} $R9 != 0
+        Goto sayall_mcp_done_${_uid}
+      ${EndIf}
+      Sleep ${SAYALL_MCP_STOP_INTERVAL_MS}
+      IntOp $R8 $R8 - 1
+      ${If} $R8 > 0
+        Goto sayall_mcp_wait_${_uid}
+      ${EndIf}
+      !if "${_show_message}" == "1"
+        ${IfNot} ${Silent}
+          MessageBox MB_ICONSTOP|MB_OK "本机记录服务仍被其他程序占用，安装器无法更新它。$\r$\n请关闭正在使用 SayAll 记录服务的程序（如 Codex、Claude Code 等），再点“重试”。$\r$\n$\r$\nThe local SayAll record service is still in use. Close the program using it, then retry."
+        ${EndIf}
+      !endif
+      SetErrorLevel 1640
+      Abort
+    sayall_mcp_done_${_uid}:
+  ${EndIf}
+  Pop $R9
+  Pop $R8
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ${IfNot} ${AtLeastBuild} ${SAYALL_MINIMUM_WINDOWS_BUILD}
     MessageBox MB_ICONSTOP|MB_OK "无线麦 SayAll 需要 Windows 10 1809（内部版本 17763）或更高版本。$\r$\nSayAll requires Windows 10 1809 (build 17763) or later."
@@ -149,6 +196,9 @@
 
   ; 版本校验通过后才请正在运行的实例优雅退出：升级路径的关键一步。
   !insertmacro SayAllRequestGracefulExit install
+  ; MCP 服务由 Codex / Claude Code 等外部工具持有，不在主程序退出链路内；
+  ; 不先结束它会锁住 sayall-mcp.exe，升级停在这一步。
+  !insertmacro SayAllStopMcp install 1
   ; 升级覆盖写 sayall-helper.exe 前，必须让旧助手退出——否则
   ; 「无法打开要写入的文件」（2026-09-24 真机复现：跑了一天的旧助手
   ; 锁住 exe，主程序的优雅退出对它无效）。
@@ -463,6 +513,8 @@
 !macro NSIS_HOOK_PREUNINSTALL
   ; 卸载同样不得强杀正在连接的应用（AGENTS.md 同一条规则）。
   !insertmacro SayAllRequestGracefulExit uninstall
+  ; MCP 是外部工具持有的只读服务；先停它，才能删除/覆盖 sayall-mcp.exe。
+  !insertmacro SayAllStopMcp uninstall 0
 
   ; ── 卸载清理标记：必须在停助手**之前**写 ────────────────────────────
   ; 运行时目录（%PROGRAMDATA%\SayAll\rc003-helper）是提权进程建的：ACL 只给普通用户
