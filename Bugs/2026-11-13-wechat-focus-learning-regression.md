@@ -49,3 +49,16 @@
 ## 2026-11-14 追加：预置 APP 与普通 APP 一致
 
 用户要求移除只读「预置能力」卡：预置 APP 也显示聚焦方式与滚动区域，预置默认策略显示为选中并标「预置可用」；用户仍可重新学习覆盖，滚动区域清除后恢复预置。聚焦方式按 0–4 顺序排列，自动选择输入框仅预置应用提供并默认选中，提示改为「预置可用」；删除重复的「改用 APP 快捷键聚焦」入口与聚焦方式右侧「已自定义」提示；左侧「添加 APP」固定在列表滚动区底部。已同步修改 `AppsPage`、`AppFocusProfileEditor`、`focus-defaults` 与滚动区域预设 id/路径别名解析；自动化 passed。
+
+## 2026-11-14 追加：聚焦与翻页、学习记录保留、DimAgent 滚动
+
+- 代码提交：`f4ab08f`（`fix(apps): 聚焦与翻页文案、学习记录保留与 DimAgent 滚动`）。
+- 页面命名与文案对齐 Mac PR #1040：侧栏/页面标题改为「聚焦与翻页」，英文页标题 `Focus & Scrolling`、窄侧栏 `Focus/Scroll`；副标题改为「按 App 单独设置输入框聚焦与翻页滚动；只要该 App 在前台就能用，不会改变按键绑定。」；「绑定到它的按键」改为「哪些按键会打开它」；删除入口改为「删除这个 App 的设置」。来源与边界见 `ATTRIBUTION.md`。
+- 移除「记录点击位置」右侧的「界面不暴露输入框时」提示，移除快捷键策略下方的「改回打开后自动聚焦」链接。
+- 学习记录保留：`AppFocusProfile::normalized` 现在保留所有有效载荷，策略只决定执行哪条；`profileForStrategy` 切换时携带 `recorded` / `point` / `shortcut`。新增前端与后端回归测试；旧版 1.9.x 在降级回读时仍可能按旧规则清掉非当前策略载荷，这是版本兼容边界。
+- DimAgent 滚动：日志显示保存的是 `control_type=Window`，旧回退走 `PostMessage(WM_MOUSEWHEEL)`，Chromium/Electron 渲染子窗口忽略该消息（`method=wheel moved=false`）。现改为 `SendInput` 真实滚轮：临时把物理光标移到区域中心，发送后恢复；左键按住或光标定位失败时才回退旧消息路径。日志新增 `input=send_input|post_message` 与 `cursor_restored`。临时探针调用生产 `scroll_foreground` 后，DimAgent UIA 文本位置统计由 `sum=107757` 变为 `129199`，确认内容实际滚动；探针已移入回收站。安装版测试按钮也记录到 `input=send_input` / `cursor_restored=true`；但 UIA 点击测试按钮会把 SayAll 拉回前台，无法用该次内容位移做目视判据，真实遥控器前台触发仍列为 deferred。
+- 左侧列表布局：短列表时面板高度随内容收缩，「添加 App」紧跟最后一行并保留 8px 间距；长列表时面板最高 `calc(100vh - 150px)`，列表滚动、按钮固定在面板底部。浏览器实测 1067×800：3 行时面板高 242px、按钮顶部 302.6px；20 行时面板高 650px、列表可视 552px、滚动内容 985px、按钮底部 742.6px，均在可视区内。
+- 验证：`cargo fmt --all -- --check` passed；`cargo test --workspace` passed（`sayall-windows` 556 passed / 17 ignored，`sayall-windows-app` 220 passed / 2 ignored，其余 workspace passed）；`cargo check -p sayall-windows-app --features runtime-simulation` passed；`pnpm test` 690 passed / 10 skipped；`pnpm build` passed。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `D58CAEB91808797619188B78B6ECB6E14FEE011787B4C105EFA58EF3F6B236FD`，大小 13485486 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `3CFB97EC71A072F07385C85D695FE856A4DD6A5A832F98492B636B2176769C37`，前端嵌入校验 18/18 passed（对 app exe 校验；NSIS 安装包经过压缩，不能直接做资源键阳性判据）。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 与构建产物仅 3 字节 UNK→NSS 差异；内嵌修订号 `f4ab08f` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-155725.png` 确认侧栏与页面标题为「聚焦与翻页」、「添加 App」和「删除这个 App 的设置」文案生效。
+- 真实遥控器按「向上/向下翻页」触发 DimAgent 滚动、以及微信目视聚焦仍为 **deferred**：需要 RC001/RC003 真机与用户在前台操作目标 App 确认最终用户可见结果。

@@ -37,7 +37,7 @@
 | 应用语言（设置页「通用」，2026-10-24） | 应用语言；三档「跟随系统」「简体中文」「English」；通用模块不显示行副标题；持久化 `application_language`（`system` / `zh-Hans` / `en`，对齐 Mac `AppLanguage`）；**全界面**跟随语言即时切换：侧栏、六个页面、向导 ①–⑧、弹窗、错误文案、托盘菜单与窗口标题；英文术语对齐 Mac（Routines / Full-key support / Doubao / WeType / App Language / System Default） | `SettingsPage.vue`、`AppSettings.application_language`、`src/lib/language.ts`、`src/lib/i18n.ts`、`src-tauri/src/lib.rs`（`apply_native_language`） |
 | 更新完成提示（启动时一次性） | 标题「无线麦已更新」、正文「已成功更新到版本 {版本号}。」、按钮「好」（对齐 Mac `update.completed.*`，原样移植）；只在“本次启动前刚完成更新”时出现一次 | `UpdateCompletedDialog.vue`、`launch_state.rs` |
 | 组合动作（侧边栏页 + 按键页动作分组） | 组合动作；步骤类型写「打开应用」「等待应用」「单键或快捷键」「聚焦输入框」「聚焦学习过的输入框」「打开网址」「执行已有组合动作」（对齐 Mac `macro.step.*`；「系统与媒体动作」不再作为新步骤提供，旧数据仍可显示与执行）；终态写「组合动作执行成功」「组合动作已执行，但无法确认第三方 App 的结果」「组合动作已取消」「组合动作执行超时」等（对齐 Mac `macro.status.execution.*`） | `MacrosPage.vue`、`ButtonsPage.vue`、`src/lib/bridge.ts`（`macroActionLabel` / `macroTerminalLabel` / `macroStepSummary`） |
-| 注册应用选择器（按键页 / 组合动作页 / APP 适配页的「添加应用」弹窗） | 标题写「选择应用」；两个入口写「本机扫描」「程序选择」；确认按钮写「添加应用」；清空写「取消选择」；已加入应用库的条目显示「已添加」；单选锁定提示「已选择应用。要重新选择，请先取消下方已选择的应用。」。已选择区域只显示名称和来源，不显示路径；空态不显示路径说明；左下角不显示确认提示。一次只能选择一个应用 | `RegisteredAppsDialog.vue`、`src/lib/i18n/en/common.ts` |
+| 注册应用选择器（按键页 / 组合动作页 / 「聚焦与翻页」页面的「添加应用」弹窗） | 标题写「选择应用」；两个入口写「本机扫描」「程序选择」；确认按钮写「添加应用」；清空写「取消选择」；已加入应用库的条目显示「已添加」；单选锁定提示「已选择应用。要重新选择，请先取消下方已选择的应用。」。已选择区域只显示名称和来源，不显示路径；空态不显示路径说明；左下角不显示确认提示。一次只能选择一个应用 | `RegisteredAppsDialog.vue`、`src/lib/i18n/en/common.ts` |
 
 `Remote Mic` 仅用于历史兼容标识、代码标识符与既有发布资产，不出现在新文案里。
 型号名只允许在 `remoteModelLabel` 定义一次，其他地方引用它（2026-10-01 教训：连接页
@@ -58,6 +58,7 @@
 | 权限 | Permissions | 设置页分组标题用 Permissions（2026-10-31 起不再是独立侧栏页） |
 | 诊断与日志 | Diagnostics & Logs | 设置页分组标题；诊断摘要、日志目录与问题反馈都在此分组 |
 | 按键映射页标题 | Button Mapping | 对齐 Mac `button_mapping.page.title` |
+| 聚焦与翻页（原「APP 适配」） | Focus & Scrolling / Focus/Scroll | 侧栏与页面标题；英文窄侧栏用 Focus/Scroll；文案对齐 Mac PR #1040（2026-11-14） |
 | 设置 | Settings / Set Up | 页面/侧栏用 Settings；向导阶段用 Set Up |
 | 全按键支持 | Full-key support | 句首大写，其余小写 |
 | 遥控器语音键 | Voice Button | 遥控器上的语音键；相关句子用 voice button |
@@ -787,7 +788,7 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   路径的条目，以及 `{已知文件夹 GUID}\...` 条目（`SHGetKnownFolderPath` 解析）转为文件 target；
   过滤 URL、文档、卸载程序与 `WindowsApps/SystemApps` 内部路径；`shell:AppsFolder\<AUMID>`
   条目保持原样。按键页手动选一个程序时仍直接绑定当前编辑格（与旧「＋ 添加应用」一致）；
-  扫描多选仍只入应用库、不改绑定。组合动作页与 APP 适配页复用同一弹窗。落点：
+  扫描多选仍只入应用库、不改绑定。组合动作页与「聚焦与翻页」页面复用同一弹窗。落点：
   `registered_apps.rs`、`RegisteredAppsDialog.vue`、`ButtonsPage.vue`、`MacrosPage.vue`。
 
 - 2026-11-10（应用选择器改为单选，用户要求；取代同日「扫描多选仍只入应用库」）：弹窗标题
@@ -796,7 +797,7 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   「已选择应用。要重新选择，请先取消下方已选择的应用。」，点「取消选择」恢复；底部主按钮
   「添加应用」确认，未选择或保存中禁用。移除全选、「添加所选」与「已在列表里」过滤；
   已添加的应用仍可选择并显示「已添加」。确认后按键页写入应用库并绑定当前编辑格，组合动作页
-  选中步骤目标，APP 适配页加入左列；成功提示「已选择：{name}」（无编辑目标时
+  选中步骤目标，「聚焦与翻页」页面加入左列；成功提示「已选择：{name}」（无编辑目标时
   「已添加应用：{name}」）。英文：Choose App / Local Scan / Program / Add App /
   Clear Selection / Added。落点：`RegisteredAppsDialog.vue`、`ButtonsPage.vue`、
   `MacrosPage.vue`、`AppsPage.vue`、`src/lib/i18n/en/common.ts`。验收
