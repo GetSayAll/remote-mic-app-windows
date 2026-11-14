@@ -82,9 +82,9 @@
 - 组合动作聚焦目标组：在「目标 APP」组内选择预设或自定义目标后保持展开；只有切换步骤或点击顶部预设按钮才收起。此前 `focusTarget` 变化会把组重置为自动折叠，导致选中组内预设目标时区块消失。
 - 按键页聚焦步骤摘要始终显示「去配置」链接，不再用「预置可用」徽标替代入口；按键页同样只保留链接。
 - 跨页记录同步：`focusTargetPresetId` 之前只匹配精确 id / 预设路径，`shell:AppsFolder\Chrome` 这类目标在按键页和组合动作页解析不到预设 id，导致已经保存到 `focusProfiles[chrome]` / `scrollRegions[chrome]` 的聚焦方式与学习记录回退成预设默认或「需学习」。两页现在都调用 `resolve_preset_target` 解析 AppsFolder 目标，并以 `effectiveFocusPresetId`（精确 id 优先、异步解析兜底）读取显式档案与滚动区域；解析按 generation 防迟到回调覆盖。页面重新挂载时从磁盘重读，因此 Apps → 按键/组合动作切换后能看到同一份记录。
-- 列表底栏间距：最终采用内容高度 + 视口上限的两段式布局。`.list-panel` 为 `height: auto`、`max-height: calc(100vh - 150px)`；`.app-list` 为 `flex: 1 1 auto` 并在自身滚动；「添加 App」紧跟列表底部。短列表时面板按内容收缩，长列表时面板到上限、列表滚动，按钮始终留在视口内。浏览器 1421×1067、13 行：面板高 731px、按钮底部 829.6px；1066×800 且内容超限：面板高 650px、列表 558/639px 滚动、按钮底部 748.6px。
+- 列表底栏间距：最终让左栏直接占满 `.master-detail` 的可用高度（`align-items: stretch` + `.list-panel { height: 100% }`），`.app-list` 在剩余空间内滚动，「添加 App」固定在面板底部。面板底部距窗口底部保留页面 padding，短列表不滚动，只有列表内容超过可用高度才滚动。浏览器 1421×1067：面板底 1047px、按钮底 1038px、视口 1067px（29px 余量）；1066×800 超限：面板 672px、列表 580/639px 滚动、按钮底 771px（29px 余量）。
 - 验证：`pnpm test` passed 695 / 10 skipped；`pnpm build` passed；`cargo fmt --all -- --check` passed；`cargo test --workspace` passed（`sayall-windows` 556 passed / 17 ignored，`sayall-windows-app` 220 passed / 2 ignored，其余 workspace passed）；`cargo check -p sayall-windows-app --features runtime-simulation` passed。新增/调整回归用例覆盖 AppsFolder 预设目标在按键页与组合动作页同步显式聚焦档案和滚动记录、目标键直存记录优先于预设键、组合动作搜索与清除、目标组内选中预设目标后保持展开、组合动作摘要始终有「去配置」、按键页筛选控件不再出现。
-- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `1E3241E8A764511766EE8A40515F5B0C8B802F72CD949F315DFB53573A43AB07`，大小 13490499 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `45FB859F146158DB8F7D618AD9ED53EAAE574ECBF331694270D19A788251C9E8`。
-- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `8e1e8a9` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-193027.png`。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `9B416FF2FE27D18905A1F6B1689D4CBE4E45F6037CDB4B31A9FDDE83D11A138D`，大小 13492831 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `916EDF0603BD0961407092470542274E408F45EF9C663F72BA22CFFFB4277678`。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `476a58f` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-194435.png`。
 - 仍未覆盖：真实 RC001/RC003 滚动与真实微信目视聚焦（deferred，需真机前台操作）。
 
