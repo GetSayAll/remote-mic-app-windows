@@ -31,7 +31,7 @@
   - 验证：前端 `pnpm test`（669 passed / 10 skipped）、`pnpm build`、`vue-tsc --noEmit`；`cargo test --workspace -j 1` 全通过；浏览器 1066×800 空态与有内容态走查（左右栏 228 + 14 + 618.5，无横向溢出）；安装版通过 UIA 学习 Chrome 的 `RootWebArea`，测试向下翻页读回百分比变化；独立探针在 Chrome 测试页验证 PageDown/LargeIncrement、PageUp/滚轮回退、ToBottom/ToTop 都产生可观察位移。
   - 已知边界：私有键位方案的绑定反查 deferred；微信 4.x 等无滚动树的 APP 只能走无光标滚轮回退，无法读回验证；Store 应用图标依赖可解析的可执行文件路径，解析失败回退通用图标。
 
-- [x] **APP 分类与预设能力对齐 Mac（2026-11-11，用户要求）**：按键页动作分组「打开应用」改为「打开 APP」，只列预设应用；末尾「打开自定义 APP」展开「目标 APP」分组，用户自己添加的 APP 从预设列表移入该分组，分组内保留「添加应用」入口。预设应用不再显示聚焦/翻页配置，使用内置聚焦与翻页；自定义 APP 才显示「聚焦：… · 翻页：…」摘要和「去配置」。APP 适配左列只列用户手动添加的 APP：手动添加的路径若匹配预设（如 Chrome），该行标注「预置可用」并只读显示预置聚焦/翻页能力，可删除；未手动添加的预设不进入列表。组合动作页移除「我的组合动作」小节标题，数量徽标移到主标题右侧并收紧间距，数量小于等于 0 时隐藏。组合动作「聚焦学习过的输入框」步骤同步采用相同分组样式：预设网格 +「打开自定义 APP」+「目标 APP」，预置目标显示「预置可用」，自定义目标显示「聚焦：… · 翻页：…」摘要与「去配置」；该步骤只要求选择目标 App，档案缺失或为「只打开 APP」时不再阻塞下一步，执行时只打开或激活目标 App。
+- [x] **APP 分类与预设能力对齐 Mac（2026-11-11，用户要求）**：按键页动作分组「打开应用」改为「打开 APP」，只列预设应用；末尾「打开自定义 APP」展开「目标 APP」分组，用户自己添加的 APP 从预设列表移入该分组，分组内保留「添加应用」入口。预设应用不再显示聚焦/翻页配置，使用内置聚焦与翻页；自定义 APP 才显示「聚焦：… · 翻页：…」摘要和「去配置」。APP 适配左列只列用户手动添加的 APP：手动添加的路径若匹配预设（如 Chrome），该行标注「预置可用」并只读显示预置聚焦/翻页能力，可删除；未手动添加的预设不进入列表。组合动作页移除「我的组合动作」小节标题，数量徽标移到主标题右侧并收紧间距，数量小于等于 0 时隐藏。组合动作「聚焦学习过的输入框」步骤同步采用相同分组样式：预设网格 +「打开自定义 APP」+「目标 APP」，预置目标与自定义目标都显示「聚焦：… · 翻页：…」摘要与「去配置」（2026-11-14 起预置目标不再用「预置可用」替代入口）；该步骤只要求选择目标 App，档案缺失或为「只打开 APP」时不再阻塞下一步，执行时只打开或激活目标 App。
   - 实现：`src/pages/ButtonsPage.vue`、`src/pages/AppsPage.vue`、`src/pages/MacrosPage.vue`、`src/lib/app-adaptation.ts`、`src/lib/i18n/en/{buttons,apps}.ts`、`src/runtime-simulation.ts`。
   - 验证：前端全量 41 文件 / 675 passed / 10 skipped，`vue-tsc --noEmit`、`vite build`、runtime simulation 27 steps passed；安装版截图见 `artifacts/design/2026-11-11-preset-app-adaptation.png`、`2026-11-11-buttons-custom-app.png`、`2026-11-11-macros-count.png`。
   - 已知边界：预设应用的逐应用预置滚动/聚焦差异仍需 RC001/RC003 + 真实应用真机验收，自动聚焦走产品默认策略与 UIA 回退。
@@ -131,6 +131,7 @@
   - 自动化 passed（八轮修复后重跑）：`cargo test --workspace`（core 56 / windows 388 / app 131）、`cargo fmt --all -- --check`、vitest 421 passed | 10 skipped、`vue-tsc` + `vite build`。
   - **待办**：真机复验（RC001/RC003 全矩阵、微信「记录点击位置」的目视确认）仍 deferred。
   - 2026-11-13 修复 1.9 回归：预置应用（微信）显式聚焦档案重新优先于预设默认；「聚焦与翻页」页面恢复「记录点击位置」学习，组合动作页显示「去配置」。自动化见 `Bugs/2026-11-13-wechat-focus-learning-regression.md`；真实微信目视仍 deferred。
+  - 2026-11-14 用户反馈修复：移除按键页「筛选已添加应用」与组合动作页「搜索组合动作」；「添加 App」按钮底部间距收紧到 9px（8px padding + 1px 边框）；组合动作聚焦摘要始终显示「去配置」。AppsFolder 目标经 `resolve_preset_target` 解析预设 id 后，按键页与组合动作页都能读取同一份聚焦方式与翻页学习记录（目标键优先、预设 id 兜底）。自动化 passed：`pnpm test` 694 passed / 10 skipped、`pnpm build`、`cargo fmt --all -- --check`、`cargo test --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation`；真实 RC001/RC003 滚动与微信目视聚焦仍 deferred。
 - [ ] 增强捕获：换遥控器后**自动重选宿主**（2026-10-13 现场提出，助手侧已实现）：助手新增目标
   watchdog（每 2 秒复查 `rc003-target.ini`），目标地址变为另一支且宿主不同 ⇒ 记
   `[RETARGET] event=restart` 并重启自己（复用启动路径重新定位/注入）；应用侧在"报告层没生效 + 豆包"
