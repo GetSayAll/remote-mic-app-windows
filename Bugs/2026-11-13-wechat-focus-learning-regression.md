@@ -78,12 +78,13 @@
 ## 2026-11-14 追加：移除筛选、组合动作「去配置」与跨页记录同步
 
 - 代码提交：`aceac4a`（`fix(apps): 移除筛选并同步聚焦与翻页状态`）。
-- 移除按键页「筛选已添加应用」输入框与对应过滤逻辑；移除组合动作页「搜索组合动作」输入框。两项都是重复入口，保留原生列表滚动。
-- 组合动作聚焦步骤摘要始终显示「去配置」链接，不再用「预置可用」徽标替代入口；按键页同样只保留链接。
+- 移除按键页「筛选已添加应用」输入框与对应过滤逻辑；组合动作页「搜索组合动作」保留。前者是重复入口，后者用于按名称定位已有动作，不能删除。
+- 组合动作聚焦目标组：在「目标 APP」组内选择预设或自定义目标后保持展开；只有切换步骤或点击顶部预设按钮才收起。此前 `focusTarget` 变化会把组重置为自动折叠，导致选中组内预设目标时区块消失。
+- 按键页聚焦步骤摘要始终显示「去配置」链接，不再用「预置可用」徽标替代入口；按键页同样只保留链接。
 - 跨页记录同步：`focusTargetPresetId` 之前只匹配精确 id / 预设路径，`shell:AppsFolder\Chrome` 这类目标在按键页和组合动作页解析不到预设 id，导致已经保存到 `focusProfiles[chrome]` / `scrollRegions[chrome]` 的聚焦方式与学习记录回退成预设默认或「需学习」。两页现在都调用 `resolve_preset_target` 解析 AppsFolder 目标，并以 `effectiveFocusPresetId`（精确 id 优先、异步解析兜底）读取显式档案与滚动区域；解析按 generation 防迟到回调覆盖。页面重新挂载时从磁盘重读，因此 Apps → 按键/组合动作切换后能看到同一份记录。
-- 列表底栏间距：`.list-panel` 底部 padding 由 12px 收紧到 8px，`.library-pane` 由 14px 收紧到 10px。浏览器实测 1150×1500、应用列表 9 行时，「添加 App」按钮底部 681.1px、面板底部 690.1px，可视间距 9px（8px padding + 1px 边框）；按钮仍在列表滚动区末尾。
-- 验证：`pnpm test` passed 694 / 10 skipped；`pnpm build` passed；`cargo fmt --all -- --check` passed；`cargo test --workspace` passed（`sayall-windows` 556 passed / 17 ignored，`sayall-windows-app` 220 passed / 2 ignored，其余 workspace passed）；`cargo check -p sayall-windows-app --features runtime-simulation` passed。新增/调整回归用例覆盖 AppsFolder 预设目标在按键页与组合动作页同步显式聚焦档案和滚动记录、目标键直存记录优先于预设键、组合动作摘要始终有「去配置」、两处筛选控件不再出现。
-- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `03192695F53C1EE73B0B47A271577055C4C1C0B8ECA1BF59B416E815DED6C90B`，大小 13495217 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `5579787E5B6C3137E1828DBB620EDF0379A53E3E5E551CE63AE2D8CAE398968F`。
-- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `aceac4a` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-173347.png` 确认 1.9.1 的「聚焦与翻页」页正常加载。
+- 列表底栏间距：`.master-detail` 由交叉轴拉伸改为 `align-items: flex-start`，`.list-panel` 保持按内容高度收缩；浏览器克隆到 13 行、1700×1300 实测面板底部 838.6px、按钮底部 829.6px，可视间距 9px（8px padding + 1px 边框）。
+- 验证：`pnpm test` passed 695 / 10 skipped；`pnpm build` passed；`cargo fmt --all -- --check` passed；`cargo test --workspace` passed（`sayall-windows` 556 passed / 17 ignored，`sayall-windows-app` 220 passed / 2 ignored，其余 workspace passed）；`cargo check -p sayall-windows-app --features runtime-simulation` passed。新增/调整回归用例覆盖 AppsFolder 预设目标在按键页与组合动作页同步显式聚焦档案和滚动记录、目标键直存记录优先于预设键、组合动作搜索与清除、目标组内选中预设目标后保持展开、组合动作摘要始终有「去配置」、按键页筛选控件不再出现。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `9E070D6E0F39396A2DF70A4085B75E7299289EF9279F21E400071DCBEFE89669`，大小 13493355 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `924BF5CC5CBE691D561779919A869CC3B87A25BBB109EF8664D9DC34A4D38669`。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `e54b63b` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-180912.png`，组合动作页截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-macros-1809.png` 确认「搜索组合动作」已恢复。
 - 仍未覆盖：真实 RC001/RC003 滚动与真实微信目视聚焦（deferred，需真机前台操作）。
 
