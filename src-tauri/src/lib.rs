@@ -3592,6 +3592,12 @@ fn list_preset_apps(
     state.platform.preset_apps()
 }
 
+/// 应用库目标是否对应内置预设；前端用它把 AppsFolder 目标归到预设能力。
+#[tauri::command]
+fn resolve_preset_target(target: String) -> Option<String> {
+    sayall_windows::app_launcher::preset_id_for_target(&target).map(str::to_owned)
+}
+
 /// 从可执行文件或快捷方式提取真实应用图标（PNG data URL）。失败返回 None，由前端显示通用图标。
 #[tauri::command]
 fn get_application_icon(path: String) -> Option<String> {
@@ -6562,6 +6568,7 @@ pub fn run() {
         test_scroll_region,
         activate_app_for_learning,
         list_preset_apps,
+        resolve_preset_target,
         get_application_icon,
         pick_custom_app,
         scan_registered_apps,
@@ -6710,6 +6717,7 @@ pub fn run() {
         test_scroll_region,
         activate_app_for_learning,
         list_preset_apps,
+        resolve_preset_target,
         get_application_icon,
         pick_custom_app,
         scan_registered_apps,

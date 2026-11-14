@@ -6,7 +6,7 @@ import MacrosPage from "./MacrosPage.vue";
 import { clearMacroEditorSession } from "./macro-editor-session";
 import { macrosViewSession } from "./macros-view-session";
 import type { MacroDefinition, MacroLibraryDocument } from "../lib/bridge";
-import { listPresetApps } from "../lib/bridge";
+import { listPresetApps, resolvePresetTarget } from "../lib/bridge";
 
 type CaptureHandler = (edge: { key: string; isPressed: boolean; source?: string }) => void;
 let shortcutCaptureHandler: CaptureHandler | null = null;
@@ -74,6 +74,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       shortcutCaptureHandler = handler;
       return () => {};
     }),
+    resolvePresetTarget: vi.fn(async () => null),
     listPresetApps: vi.fn(async () => [
       { id: "sayall", name: "无线麦 SayAll", installed: true },
       { id: "wechat", name: "微信", installed: true },
@@ -124,6 +125,7 @@ beforeEach(() => {
   testMacroStepSpy.mockReset().mockResolvedValue("test.00000000000000000000000000000002");
   testMacroSpy.mockReset().mockResolvedValue(undefined);
   getMacroRunStatusSpy.mockReset().mockResolvedValue({ running: false, report: null });
+  vi.mocked(resolvePresetTarget).mockResolvedValue(null);
   activateAppForLearningSpy.mockReset().mockResolvedValue(undefined);
   learnFocusTargetSpy.mockReset().mockResolvedValue({
     controlType: "Edit",
@@ -708,7 +710,10 @@ describe("组合动作页 · 编辑向导", () => {
           long: { type: "disabled" },
         },
       },
-      applications: [{ name: "Cursor", path: target }],
+      applications: [
+        { name: "Cursor", path: target },
+        { name: "Chrome 浏览器", path: "chrome" },
+      ],
       focusProfiles: {
         [target]: {
           strategy: "recorded_element",
@@ -752,9 +757,68 @@ describe("组合动作页 · 编辑向导", () => {
     expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
       { page: "apps", params: { appTarget: target } },
     ]);
+
+    // 目标 APP 组内选中预设目标时，组保持展开（2026-11-14 用户反馈）。
+    const chromeChip = body
+      .find(".custom-app-group")
+      .findAll(".chip")
+      .find((chip) => chip.text().includes("Chrome 浏览器"))!;
+    await chromeChip.trigger("click");
+    await flushPromises();
+    expect(body.find(".custom-app-group").exists()).toBe(true);
   });
 
-  it("手动添加的预设使用预置能力并显示预置可用", async () => {
+  it("预置微信显示已记录的点击位置并可去配置", async () => {
+    getButtonMappingsSpy.mockResolvedValue({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target: "wechat" },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      focusProfiles: {
+        wechat: {
+          strategy: "recorded_point",
+          point: {
+            xRatio: 0.5,
+            yRatio: 0.82,
+            windowWidth: 1200,
+            windowHeight: 800,
+          },
+        },
+      },
+    });
+    getCombinedActionsSpy.mockResolvedValue({
+      formatVersion: 1,
+      definitions: [
+        {
+          ...baseDefinition,
+          steps: [{ stepId: "step.01", action: "focus_input", parameters: { target: "wechat" } }],
+        },
+      ],
+    });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!
+      .trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("记录点击位置");
+    await summary.find(".link-button").trigger("click");
+    expect(wrapper.emitted("navigate")?.at(-1)).toEqual([
+      { page: "apps", params: { appTarget: "wechat" } },
+    ]);
+  });
+
+  it("手动添加的预设使用预置能力并保留去配置入口", async () => {
     const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     vi.mocked(listPresetApps).mockResolvedValueOnce([
       { id: "chrome", name: "Chrome 浏览器", installed: true, path: target },
@@ -794,9 +858,65 @@ describe("组合动作页 · 编辑向导", () => {
     const summary = wrapper.find(".focus-profile-summary");
     expect(summary.text()).toContain("使用 APP 快捷键聚焦");
     expect(summary.text()).toContain("翻页：预置可用");
-    expect(summary.find(".preset-pill").text()).toBe("预置可用");
-    expect(summary.find(".link-button").exists()).toBe(false);
+    expect(summary.find(".link-button").text()).toBe("去配置");
     expect(wrapper.find(".focus-strategy-option").exists()).toBe(false);
+  });
+
+  it("AppsFolder 预设目标同步聚焦与翻页记录", async () => {
+    const target = "shell:AppsFolder\\Chrome";
+    vi.mocked(resolvePresetTarget).mockImplementation(async (value) =>
+      value === target ? "chrome" : null,
+    );
+    vi.mocked(listPresetApps).mockResolvedValueOnce([
+      {
+        id: "chrome",
+        name: "Chrome 浏览器",
+        installed: true,
+        path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      },
+    ]);
+    getButtonMappingsSpy.mockResolvedValue({
+      enabled: true,
+      actions: {
+        home: {
+          single: { type: "open_app", target },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      applications: [{ name: "Google Chrome", path: target }],
+      focusProfiles: { chrome: { strategy: "auto_composer" } },
+      scrollRegions: {
+        chrome: {
+          controlType: "Document",
+          normalizedRect: { x: 0, y: 0.1, width: 1, height: 0.8 },
+        },
+      },
+    });
+    getCombinedActionsSpy.mockResolvedValue({
+      formatVersion: 1,
+      definitions: [
+        {
+          ...baseDefinition,
+          steps: [{ stepId: "step.01", action: "focus_input", parameters: { target } }],
+        },
+      ],
+    });
+    const wrapper = await mountPage();
+    await findButton(wrapper, "编辑").trigger("click");
+    await flushPromises();
+    await findButton(wrapper, "编排步骤").trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".step-edit-item")
+      .find((item) => item.text().includes("聚焦学习过的输入框"))!
+      .trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("聚焦：自动选择输入框");
+    expect(summary.text()).toContain("翻页：已学习");
+    expect(summary.find(".link-button").text()).toBe("去配置");
   });
 
   it("按键页没有打开应用动作时，聚焦步骤仍列出预设并展开空目标组", async () => {
@@ -819,7 +939,9 @@ describe("组合动作页 · 编辑向导", () => {
     expect(appChips).toContain("打开自定义 APP");
     expect(appChips).not.toContain("添加应用");
     expect(body.text()).not.toContain("按键页还没有「打开应用」动作");
-    expect(body.find(".focus-profile-summary").exists()).toBe(false);
+    const summary = body.find(".focus-profile-summary");
+    expect(summary.exists()).toBe(true);
+    expect(summary.text()).toContain("自动选择输入框");
 
     await body
       .findAll("button")

@@ -12,8 +12,12 @@ import RegisteredAppsDialog from "../components/RegisteredAppsDialog.vue";
 import { t, tPage } from "../lib/i18n";
 import { effectiveLanguage } from "../lib/language-state";
 import { SHORTCUT_PRESET_GROUPS, shortcutPresetHint } from "../lib/shortcut-presets";
-import { effectiveFocusProfile, presetFocusDefault } from "../lib/focus-defaults";
-import { focusStrategyLabel, scrollRegionForTarget } from "../lib/app-adaptation";
+import { presetFocusDefault } from "../lib/focus-defaults";
+import {
+  effectiveProfileForTarget,
+  focusStrategyLabel,
+  scrollRegionForTarget,
+} from "../lib/app-adaptation";
 import {
   clearMacroEditorSession,
   readMacroEditorSession,
@@ -45,6 +49,7 @@ import {
   openAppLabel,
   registerMacroNames,
   registerPresetAppNames,
+  resolvePresetTarget,
   saveButtonMappings,
   saveMacro,
   startShortcutCapture,
@@ -976,11 +981,38 @@ function presetIdForTarget(target: string | null | undefined): string | null {
 }
 
 const focusTargetPresetId = computed(() => presetIdForTarget(focusTarget.value));
+
+/** AppsFolder 目标无法在前端按路径匹配预设，由后端解析真实 exe 后补齐。 */
+const resolvedFocusPresetId = ref<string | null>(null);
+let focusPresetGeneration = 0;
+watch(
+  focusTarget,
+  async (target) => {
+    const generation = ++focusPresetGeneration;
+    resolvedFocusPresetId.value = null;
+    if (!target) return;
+    try {
+      const presetId = await resolvePresetTarget(target);
+      if (generation === focusPresetGeneration) resolvedFocusPresetId.value = presetId;
+    } catch {
+      // 解析失败只影响预设标记；显式档案和自定义目标仍照常显示。
+    }
+  },
+  { immediate: true },
+);
+
+const effectiveFocusPresetId = computed(
+  () => focusTargetPresetId.value ?? resolvedFocusPresetId.value,
+);
 const focusTargetIsBuiltInPreset = computed(() =>
-  Boolean(focusTarget.value && isPresetTarget(focusTarget.value)),
+  Boolean(
+    focusTarget.value &&
+      (isPresetTarget(focusTarget.value) ||
+        (!focusTargetPresetId.value && resolvedFocusPresetId.value)),
+  ),
 );
 const focusTargetIsLibraryPreset = computed(
-  () => Boolean(focusTargetPresetId.value && !focusTargetIsBuiltInPreset.value),
+  () => Boolean(effectiveFocusPresetId.value && !focusTargetIsBuiltInPreset.value),
 );
 const focusCustomAppsExpanded = computed(
   () =>
@@ -988,12 +1020,14 @@ const focusCustomAppsExpanded = computed(
     Boolean(focusTarget.value && !focusTargetIsBuiltInPreset.value),
 );
 
-/** 手动添加的预设直接使用预设能力，其余目标读取用户档案。 */
+/** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
 function effectiveFocusForTarget(target: string | null | undefined): AppFocusProfile | null {
   if (!target) return null;
-  const presetId = presetIdForTarget(target);
-  if (presetId) return presetFocusDefault(presetId, true);
-  return focusProfiles.value[target] ?? null;
+  return effectiveProfileForTarget(
+    focusProfiles.value,
+    target,
+    effectiveFocusPresetId.value,
+  );
 }
 
 /** 该目标实际会执行的聚焦档案：显式档案优先，预设应用回落到产品默认值。 */
@@ -1071,15 +1105,24 @@ const focusCustomTargets = computed<Array<{ id: string; name: string }>>(() => {
 
 const focusScrollStatus = computed(() => {
   const target = focusTarget.value;
-  if (!target || focusTargetIsBuiltInPreset.value) return null;
-  if (focusTargetIsLibraryPreset.value) return t("预置可用");
-  return scrollRegionForTarget(focusScrollRegions.value, target)
-    ? t("已学习")
-    : t("需学习");
+  if (!target) return null;
+  if (
+    scrollRegionForTarget(
+      focusScrollRegions.value,
+      target,
+      effectiveFocusPresetId.value,
+    )
+  ) {
+    return t("已学习");
+  }
+  if (focusTargetIsBuiltInPreset.value || focusTargetIsLibraryPreset.value) {
+    return t("预置可用");
+  }
+  return t("需学习");
 });
 
-watch([selectedStepId, focusTarget], () => {
-  // 换步骤/换目标后按目标类型重新决定目标 APP 组是否展开。
+watch(selectedStepId, () => {
+  // 换步骤后按目标类型重新决定目标 APP 组是否展开；同一目标组内的选择不收起。
   focusCustomAppsOpen.value = null;
 });
 
@@ -1840,17 +1883,14 @@ watch(
                     </div>
                   </div>
                   <div
-                    v-if="focusTarget && !focusTargetIsBuiltInPreset"
+                    v-if="focusTarget"
                     class="focus-profile-summary"
                   >
                     <span class="muted">
                       {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
                       {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
                     </span>
-                    <span v-if="focusTargetIsLibraryPreset" class="preset-pill">
-                      {{ t("预置可用") }}
-                    </span>
-                    <button v-else class="link-button" type="button" @click="configureFocusProfile">
+                    <button class="link-button" type="button" @click="configureFocusProfile">
                       {{ t("去配置") }}
                     </button>
                   </div>
@@ -2038,7 +2078,7 @@ watch(
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--card);
-  padding: 14px;
+  padding: 14px 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2080,10 +2120,6 @@ watch(
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
   font: inherit;
   font-size: 18px;
   line-height: 1;
@@ -2672,14 +2708,6 @@ watch(
   background: var(--surface-subtle);
 }
 .target-app-title { margin: 0 0 6px; font-size: 12.5px; color: var(--muted); }
-.preset-pill {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--success-surface);
-  color: var(--success-text);
-  font-size: 11px;
-  font-weight: 600;
-}
 .review-summary {
   display: flex;
   align-items: center;

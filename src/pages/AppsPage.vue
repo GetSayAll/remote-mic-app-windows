@@ -11,6 +11,7 @@ import {
   getCombinedActions,
   learnScrollRegion,
   listPresetApps,
+  resolvePresetTarget,
   saveButtonMappings,
   testScrollRegion,
   type AppFocusProfile,
@@ -28,12 +29,11 @@ import {
   buildAppRows,
   compactFocusLabel,
   effectiveAppProfile,
+  explicitProfileForTarget,
   findAppBindings,
   findMacroReferences,
-  focusStrategyLabel,
   mergeApplications,
   nextSelectedTarget,
-  profileForTarget,
   removeAppAdaptation,
   scrollRegionForTarget,
   type AppAdaptationRow,
@@ -61,6 +61,7 @@ const addError = ref<string | null>(null);
 const confirmDelete = ref(false);
 const notice = ref<{ text: string; tone: "success" | "error" } | null>(null);
 const appIcons = ref<Record<string, string>>({});
+const resolvedPresetIds = ref<Record<string, string>>({});
 const iconRequests = new Set<string>();
 const scrollLearning = ref(false);
 const scrollTesting = ref<ScrollCommand | null>(null);
@@ -76,6 +77,7 @@ const rows = computed(() =>
     mappings.value.focusProfiles,
     presetApps.value,
     props.initialTarget ? [props.initialTarget] : [],
+    resolvedPresetIds.value,
   ),
 );
 const selectedRow = computed<AppAdaptationRow | null>(
@@ -83,11 +85,17 @@ const selectedRow = computed<AppAdaptationRow | null>(
 );
 const selectedProfile = computed<AppFocusProfile | null>(() => {
   const row = selectedRow.value;
-  return row ? profileForTarget(mappings.value.focusProfiles, row.target) : null;
+  return row
+    ? explicitProfileForTarget(mappings.value.focusProfiles, row.target, row.presetId)
+    : null;
 });
 const selectedScrollRegion = computed<ScrollRegionTarget | null>(() =>
   selectedRow.value
-    ? scrollRegionForTarget(mappings.value.scrollRegions, selectedRow.value.target)
+    ? scrollRegionForTarget(
+        mappings.value.scrollRegions,
+        selectedRow.value.target,
+        selectedRow.value.presetId,
+      )
     : null,
 );
 const scrollBusy = computed(() => scrollLearning.value || scrollTesting.value !== null || saving.value);
@@ -96,16 +104,19 @@ const fallbackProfile = computed<AppFocusProfile | null>(() => {
   return row?.preset ? presetFocusDefault(row.presetId ?? row.target, true) : null;
 });
 const selectedIsPreset = computed(() => Boolean(selectedRow.value?.preset));
-const presetFocusLabel = computed(() => {
-  const row = selectedRow.value;
-  if (!row) return "";
-  const profile = effectiveAppProfile(row, mappings.value.focusProfiles);
-  return profile ? focusStrategyLabel(profile.strategy) : t("只打开 APP");
+/** 预置应用的滚动区域已可用；用户重新学习后以显式档案为准。 */
+const scrollStatusLabel = computed(() => {
+  if (selectedScrollRegion.value) return t("已学习");
+  return selectedIsPreset.value ? t("预置可用") : t("需学习");
 });
 /** 没有真实路径的预设只剩产品默认值，用「恢复默认」语义；有路径的按普通 APP 展示。 */
 function isPresetPlaceholder(row: AppAdaptationRow | null): boolean {
   return Boolean(row?.preset && !row.path);
 }
+/** 只有用户手动添加过的应用才显示删除适配；显式导航来的条目删除后仍会留在当前页。 */
+const canDeleteSelected = computed(
+  () => Boolean(selectedRow.value?.library) && !isPresetPlaceholder(selectedRow.value),
+);
 const bindings = computed(() => {
   const row = selectedRow.value;
   return row ? findAppBindings(mappings.value.actions, row.target) : [];
@@ -118,12 +129,12 @@ const deleteBlockedReason = computed<string | null>(() => {
   const row = selectedRow.value;
   if (!row || isPresetPlaceholder(row)) return null;
   if (bindings.value.length) {
-    return t("还有 {count} 处绑定在使用它，先解绑才能删除适配。", {
+    return t("还有 {count} 处绑定在使用它，先解绑才能删除设置。", {
       count: bindings.value.length,
     });
   }
   if (macroReferences.value.length) {
-    return t("还有 {count} 个组合动作在使用它，先移除引用才能删除适配。", {
+    return t("还有 {count} 个组合动作在使用它，先移除引用才能删除设置。", {
       count: macroReferences.value.length,
     });
   }
@@ -145,11 +156,16 @@ function selectRow(target: string): void {
 
 /** 列表摘要：预设整体预置可用；自定义 APP 显示短聚焦名 + 翻页状态。 */
 function rowStatus(row: AppAdaptationRow): string {
-  if (row.preset) return t("预置可用");
   const focus = t(compactFocusLabel(effectiveAppProfile(row, mappings.value.focusProfiles)));
-  const scroll = scrollRegionForTarget(mappings.value.scrollRegions, row.target)
+  const scroll = scrollRegionForTarget(
+    mappings.value.scrollRegions,
+    row.target,
+    row.presetId,
+  )
     ? t("已学习")
-    : t("需学习");
+    : row.preset
+      ? t("预置可用")
+      : t("需学习");
   return `${focus} · ${scroll}`;
 }
 
@@ -212,6 +228,24 @@ async function loadIcons(): Promise<void> {
   }
 }
 
+/** AppsFolder 目标无法在前端按路径匹配预设，加载时让后端按真实 exe 补齐。 */
+async function resolvePresetIds(apps: readonly CustomAppPick[]): Promise<void> {
+  const entries = await Promise.all(
+    apps.map(async (app) => {
+      try {
+        return [app.path, await resolvePresetTarget(app.path)] as const;
+      } catch {
+        return [app.path, null] as const;
+      }
+    }),
+  );
+  const next: Record<string, string> = {};
+  for (const [path, presetId] of entries) {
+    if (presetId) next[path.toLocaleLowerCase()] = presetId;
+  }
+  resolvedPresetIds.value = next;
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   loadError.value = null;
@@ -226,6 +260,7 @@ async function load(): Promise<void> {
     mappings.value = saved;
     presetApps.value = presets;
     macroDefinitions.value = macros;
+    void resolvePresetIds(saved.applications ?? []);
     selectedTarget.value = nextSelectedTarget(
       rows.value,
       props.initialTarget ?? appsViewSession.selectedTarget,
@@ -233,7 +268,7 @@ async function load(): Promise<void> {
     void loadIcons();
   } catch (error) {
     console.warn("load app adaptation page failed", error);
-    loadError.value = t("无法读取 APP 适配设置，请稍后重试。");
+    loadError.value = t("无法读取聚焦与翻页设置，请稍后重试。");
   } finally {
     loading.value = false;
   }
@@ -259,6 +294,7 @@ async function persist(next: ButtonMappings): Promise<boolean> {
   try {
     mappings.value = await saveButtonMappings(mappingPayload(next));
     void loadIcons();
+    void resolvePresetIds(mappings.value.applications ?? []);
     return true;
   } catch (error) {
     console.warn("save app adaptation failed", error);
@@ -269,26 +305,36 @@ async function persist(next: ButtonMappings): Promise<boolean> {
   }
 }
 
-async function saveProfile(target: string, profile: AppFocusProfile | null): Promise<boolean> {
+async function saveProfile(
+  row: AppAdaptationRow,
+  profile: AppFocusProfile | null,
+): Promise<boolean> {
   const focusProfiles = { ...(mappings.value.focusProfiles ?? {}) };
-  const expected = target.toLocaleLowerCase();
+  const keys = [row.target, row.presetId]
+    .filter((key): key is string => Boolean(key))
+    .map((key) => key.toLocaleLowerCase());
   for (const key of Object.keys(focusProfiles)) {
-    if (key.toLocaleLowerCase() === expected) delete focusProfiles[key];
+    if (keys.includes(key.toLocaleLowerCase())) delete focusProfiles[key];
   }
-  if (profile) focusProfiles[target] = profile;
+  // 预设统一存到预设 id：组合动作可能用 `wechat`，按键页/应用库可能用真实路径。
+  const key = row.presetId ?? row.target;
+  if (profile) focusProfiles[key] = profile;
   return persist({ ...mappings.value, focusProfiles });
 }
 
 async function saveScrollRegion(
-  target: string,
+  row: AppAdaptationRow,
   region: ScrollRegionTarget | null,
 ): Promise<boolean> {
   const scrollRegions = { ...(mappings.value.scrollRegions ?? {}) };
-  const expected = target.toLocaleLowerCase();
+  const keys = [row.target, row.presetId]
+    .filter((key): key is string => Boolean(key))
+    .map((key) => key.toLocaleLowerCase());
   for (const key of Object.keys(scrollRegions)) {
-    if (key.toLocaleLowerCase() === expected) delete scrollRegions[key];
+    if (keys.includes(key.toLocaleLowerCase())) delete scrollRegions[key];
   }
-  if (region) scrollRegions[target] = region;
+  const key = row.presetId ?? row.target;
+  if (region) scrollRegions[key] = region;
   return persist({ ...mappings.value, scrollRegions });
 }
 
@@ -300,7 +346,7 @@ async function learnScrollRegionForSelected(): Promise<void> {
   try {
     await activateAppForLearning(row.target);
     const region = await learnScrollRegion();
-    if (await saveScrollRegion(row.target, region)) {
+    if (await saveScrollRegion(row, region)) {
       scrollRegionMessage(t("滚动区域已记录，可以直接测试翻页。"));
     } else {
       scrollRegionMessage(t("保存滚动区域失败，请重试。"), "error");
@@ -316,7 +362,7 @@ async function clearScrollRegion(): Promise<void> {
   const row = selectedRow.value;
   if (!row || scrollBusy.value) return;
   scrollMessage.value = null;
-  if (!(await saveScrollRegion(row.target, null))) {
+  if (!(await saveScrollRegion(row, null))) {
     scrollRegionMessage(t("清除滚动区域失败，请重试。"), "error");
   }
 }
@@ -326,8 +372,15 @@ async function testScroll(command: ScrollCommand): Promise<void> {
   if (!row || !row.installed || scrollBusy.value) return;
   scrollTesting.value = command;
   scrollMessage.value = null;
+  const regionKey =
+    scrollRegionForTarget(mappings.value.scrollRegions, row.target)
+      ? row.target
+      : row.presetId &&
+          scrollRegionForTarget(mappings.value.scrollRegions, row.presetId)
+        ? row.presetId
+        : (row.presetId ?? row.target);
   try {
-    const outcome = await testScrollRegion(row.target, command);
+    const outcome = await testScrollRegion(regionKey, command);
     if (command === "to_top" && outcome.atEdge) {
       scrollRegionMessage(t("已滚到顶部。"));
     } else if (command === "to_bottom" && outcome.atEdge) {
@@ -365,7 +418,24 @@ async function selectApp(app: CustomAppPick): Promise<void> {
 async function deleteAdaptation(): Promise<void> {
   const row = selectedRow.value;
   if (!row || deleteBlockedReason.value) return;
-  const next = removeAppAdaptation(mappings.value, row.target, isPresetPlaceholder(row));
+  let next = removeAppAdaptation(mappings.value, row.target, isPresetPlaceholder(row));
+  // 预设档案统一存在预设 id 下，删除适配时连同 id 键一起清理。
+  if (row.presetId) {
+    const expected = row.presetId.toLocaleLowerCase();
+    const focusProfiles = { ...(next.focusProfiles ?? {}) };
+    for (const key of Object.keys(focusProfiles)) {
+      if (key.toLocaleLowerCase() === expected) delete focusProfiles[key];
+    }
+    const scrollRegions = { ...(next.scrollRegions ?? {}) };
+    for (const key of Object.keys(scrollRegions)) {
+      if (key.toLocaleLowerCase() === expected) delete scrollRegions[key];
+    }
+    next = {
+      ...next,
+      focusProfiles: Object.keys(focusProfiles).length ? focusProfiles : undefined,
+      scrollRegions: Object.keys(scrollRegions).length ? scrollRegions : undefined,
+    };
+  }
   if (await persist(next)) {
     selectedTarget.value = nextSelectedTarget(rows.value, null);
     confirmDelete.value = false;
@@ -406,15 +476,15 @@ onUnmounted(() => {
   <section class="apps-page">
     <header class="page-header">
       <div>
-        <h1>{{ tPage("APP 适配") }}</h1>
-        <p class="page-subtitle">{{ t("输入框聚焦与翻页滚动按 APP 生效，APP 在前台即可使用。") }}</p>
+        <h1>{{ tPage("聚焦与翻页") }}</h1>
+        <p class="page-subtitle">{{ t("按 App 单独设置输入框聚焦与翻页滚动；只要该 App 在前台就能用，不会改变按键绑定。") }}</p>
       </div>
     </header>
 
     <p v-if="notice" class="page-notice" :class="notice.tone" role="status">{{ notice.text }}</p>
     <div v-if="loadError" class="card load-error" role="alert">{{ loadError }}</div>
 
-    <div v-if="loading" class="card loading-card" aria-busy="true">{{ t("正在读取 APP 适配设置…") }}</div>
+    <div v-if="loading" class="card loading-card" aria-busy="true">{{ t("正在读取聚焦与翻页设置…") }}</div>
 
     <article v-else-if="!rows.length" class="card empty-card">
       <span class="empty-icon" aria-hidden="true">
@@ -425,16 +495,16 @@ onUnmounted(() => {
           <path d="M17.3 13.8v7.4M13.6 17.5h7.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
         </svg>
       </span>
-      <h2>{{ t("还没有添加任何 APP") }}</h2>
+      <h2>{{ t("还没有添加任何 App") }}</h2>
       <p class="muted">
-        {{ t("添加后可以为它单独设置输入框聚焦；只要该 APP 在前台就能用。") }}
+        {{ t("添加后可以为它单独设置输入框聚焦与翻页滚动；这两项只要该 App 在前台就能用。") }}
       </p>
-      <button class="primary-button" type="button" @click="addError = null; addOpen = true">{{ t("添加 APP") }}</button>
+      <button class="primary-button" type="button" @click="addError = null; addOpen = true">{{ t("添加 App") }}</button>
     </article>
 
     <div v-else class="master-detail">
-      <section class="panel list-panel" :aria-label="t('已添加的 APP')">
-        <h2 class="list-title">{{ t("已添加的 APP") }}</h2>
+      <section class="panel list-panel" :aria-label="t('已添加的 App')">
+        <h2 class="list-title">{{ t("已添加的 App") }}</h2>
         <div class="app-list">
           <button
             v-for="row in rows"
@@ -456,17 +526,17 @@ onUnmounted(() => {
               <span class="app-row-name">{{ row.name }}</span>
               <span class="app-row-status">
                 {{ rowStatus(row) }}
-                <template v-if="!row.installed"> · {{ t("应用未找到") }}</template>
+                <template v-if="!row.installed"> · {{ t("App 未找到") }}</template>
               </span>
             </span>
           </button>
         </div>
         <button class="add-app" type="button" @click="addError = null; addOpen = true">
-          <span aria-hidden="true">＋</span>{{ t("添加 APP") }}
+          <span aria-hidden="true">＋</span>{{ t("添加 App") }}
         </button>
       </section>
 
-      <section v-if="selectedRow" class="panel detail-panel" :aria-label="t('{name} 的适配设置', { name: selectedRow.name })">
+      <section v-if="selectedRow" class="panel detail-panel" :aria-label="t('{name} 的设置', { name: selectedRow.name })">
         <div class="app-head">
           <div class="app-head-text">
             <h2>{{ selectedRow.name }}</h2>
@@ -474,52 +544,40 @@ onUnmounted(() => {
         </div>
 
         <p v-if="!selectedRow.installed" class="missing-note" role="status">
-          {{ t("应用未找到，请重新添加。") }}
+          {{ t("App 未找到，请重新添加。") }}
         </p>
 
-        <p v-if="!selectedIsPreset" class="scope-note">
-          {{ t("输入框聚焦和上下翻页按 APP 单独设置：只要该 APP 在前台就能用，与「打开 App」动作无关。") }}
+        <p class="scope-note">
+          {{ t("输入框聚焦和上下翻页按 App 单独设置：只要该 App 在前台就能用，与「打开 App」动作无关。") }}
         </p>
-
-        <section v-if="selectedIsPreset" class="section-card preset-card">
-          <div class="section-head">
-            <h3>{{ t("预置能力") }}</h3>
-            <span class="scroll-status learned">{{ t("预置可用") }}</span>
-            <span class="spacer"></span>
-          </div>
-          <div class="preset-status-row">
-            <span class="preset-status-label">{{ t("聚焦方式") }}</span>
-            <span class="preset-status-value">{{ presetFocusLabel }}</span>
-            <span class="preset-badge">{{ t("预置可用") }}</span>
-          </div>
-          <div class="preset-status-row">
-            <span class="preset-status-label">{{ t("翻页") }}</span>
-            <span class="preset-status-value">{{ t("上下翻页 · 滚到两端") }}</span>
-            <span class="preset-badge">{{ t("预置可用") }}</span>
-          </div>
-          <p class="hint">{{ t("预置应用已内置自动聚焦与翻页，无需学习或配置。") }}</p>
-        </section>
 
         <AppFocusProfileEditor
-          v-if="!selectedIsPreset"
           :target="selectedRow.target"
           :profile="selectedProfile"
           :fallback="fallbackProfile"
+          :allow-auto-composer="selectedIsPreset"
           :disabled="!selectedRow.installed"
-          :save="(profile) => saveProfile(selectedRow!.target, profile)"
+          :save="(profile) => saveProfile(selectedRow!, profile)"
           @notice="showNotice"
         />
 
-        <section v-if="!selectedIsPreset" class="section-card scroll-card">
+        <section class="section-card scroll-card">
           <div class="section-head">
             <h3>{{ t("滚动区域") }}</h3>
-            <span class="scroll-status" :class="{ learned: selectedScrollRegion }">
-              {{ selectedScrollRegion ? t("已学习") : t("需学习") }}
+            <span
+              class="scroll-status"
+              :class="{ learned: selectedScrollRegion || selectedIsPreset }"
+            >
+              {{ scrollStatusLabel }}
             </span>
             <span class="spacer"></span>
           </div>
           <p class="hint">
-            {{ t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点或鼠标。") }}
+            {{
+              selectedIsPreset && !selectedScrollRegion
+                ? t("预置滚动区域已可用；重新学习会覆盖预置区域。")
+                : t("翻页键会滚动这个 App 的内容区。只读取区域结构，不读取内容，也不移动焦点；必要时会短暂移动鼠标指针。")
+            }}
           </p>
           <div class="scroll-learn-row">
             <button
@@ -583,11 +641,11 @@ onUnmounted(() => {
 
         <section class="section-card binding-card">
           <div class="section-head">
-            <h3>{{ t("绑定到它的按键") }}</h3>
+            <h3>{{ t("哪些按键会打开它") }}</h3>
             <span class="spacer"></span>
           </div>
           <p v-if="!bindings.length" class="hint">
-            {{ t("还没有按键绑定这个 APP，可在按键页的“打开 APP”里选择它。") }}
+            {{ t("还没有按键会打开这个 App，可在按键页的「打开 App」里选择它。") }}
           </p>
           <div v-else class="binding-list">
             <button
@@ -598,19 +656,19 @@ onUnmounted(() => {
               @click="goToBinding(binding.button, binding.trigger)"
             >
               <span class="binding-key">{{ buttonLabel(binding.button) }} · {{ buttonTriggerLabel(binding.trigger) }}</span>
-              <span class="binding-action">{{ t("打开 APP") }}</span>
+              <span class="binding-action">{{ t("打开 App") }}</span>
               <span class="spacer"></span>
               <span class="binding-go">{{ t("去按键页") }}</span>
             </button>
           </div>
 
-          <template v-if="!isPresetPlaceholder(selectedRow)">
+          <template v-if="canDeleteSelected">
             <div class="section-divider" aria-hidden="true"></div>
             <div class="delete-row">
               <p v-if="deleteBlockedReason" class="danger-line">{{ deleteBlockedReason }}</p>
               <template v-else>
                 <button class="danger-link" type="button" :disabled="saving" @click="confirmDelete = true">
-                  {{ t("删除这个 APP 的适配") }}
+                  {{ t("删除这个 App 的设置") }}
                 </button>
               </template>
             </div>
@@ -631,19 +689,19 @@ onUnmounted(() => {
     <div v-if="confirmDelete && selectedRow" class="dialog-backdrop" @click.self="confirmDelete = false">
       <section class="confirm-dialog" role="dialog" aria-modal="true" :aria-labelledby="'delete-app-title'">
         <h2 id="delete-app-title">
-          {{ isPresetPlaceholder(selectedRow) ? t("恢复「{name}」的默认聚焦？", { name: selectedRow.name }) : t("删除「{name}」的适配？", { name: selectedRow.name }) }}
+          {{ isPresetPlaceholder(selectedRow) ? t("恢复「{name}」的默认聚焦？", { name: selectedRow.name }) : t("删除「{name}」的设置？", { name: selectedRow.name }) }}
         </h2>
         <p class="muted">
           {{
             isPresetPlaceholder(selectedRow)
-              ? t("只会清除 SayAll 保存的显式聚焦设置；APP 本身不会被修改或卸载。")
-              : t("只会删除 SayAll 保存的适配设置（输入框学习记录、聚焦快捷键），不会卸载或改动 APP 本身。")
+              ? t("只会清除 SayAll 保存的显式聚焦设置；App 本身不会被修改或卸载。")
+              : t("只会删除 SayAll 保存的这个 App 的设置（输入框学习记录、聚焦快捷键），不会卸载或改动 App 本身。已绑定的按键会保留，但会变成「尚未选择 App」。")
           }}
         </p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" :disabled="saving" @click="confirmDelete = false">{{ t("取消") }}</button>
           <button class="danger-button" type="button" :disabled="saving" @click="deleteAdaptation">
-            {{ isPresetPlaceholder(selectedRow) ? t("恢复默认") : t("删除适配") }}
+            {{ isPresetPlaceholder(selectedRow) ? t("恢复默认") : t("删除设置") }}
           </button>
         </div>
       </section>
@@ -653,7 +711,11 @@ onUnmounted(() => {
 
 <style scoped>
 .apps-page {
-  padding-bottom: 24px;
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 8px;
+  display: flex;
+  flex-direction: column;
 }
 .apps-page .page-header h1 {
   font-size: 24px;
@@ -712,8 +774,10 @@ onUnmounted(() => {
 }
 .master-detail {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .panel {
   border: 1px solid var(--border);
@@ -724,9 +788,13 @@ onUnmounted(() => {
 .list-panel {
   width: 228px;
   flex: 0 0 228px;
-  padding: 12px;
+  padding: 12px 12px 8px;
   display: flex;
   flex-direction: column;
+  align-self: stretch;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 .list-title {
   margin: 0 0 9px 2px;
@@ -736,6 +804,10 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 .app-row {
   display: flex;
@@ -804,6 +876,8 @@ onUnmounted(() => {
 .add-app {
   min-height: 32px;
   margin-top: 8px;
+  margin-bottom: 0;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -824,10 +898,12 @@ onUnmounted(() => {
 .detail-panel {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
 }
 .app-head {
   display: flex;
@@ -951,38 +1027,6 @@ onUnmounted(() => {
 }
 .scroll-status.learned {
   color: var(--success-text);
-}
-.preset-card {
-  display: grid;
-  gap: 8px;
-}
-.preset-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 28px;
-  padding: 5px 9px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-subtle);
-}
-.preset-status-label {
-  min-width: 64px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.preset-status-value {
-  flex: 1 1 auto;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.preset-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--success-surface);
-  color: var(--success-text);
-  font-size: 11px;
-  font-weight: 600;
 }
 .scroll-learn-row,
 .scroll-edge-row {

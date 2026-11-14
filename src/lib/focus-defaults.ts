@@ -5,10 +5,10 @@ export const FOCUS_STRATEGY_OPTIONS: ReadonlyArray<{
   value: FocusStrategy;
   label: string;
 }> = [
-  { value: "open_only", label: "只打开 APP" },
   { value: "auto_composer", label: "自动选择输入框" },
-  { value: "app_shortcut", label: "使用 APP 快捷键聚焦" },
+  { value: "open_only", label: "只打开 APP" },
   { value: "recorded_element", label: "打开后自动聚焦" },
+  { value: "app_shortcut", label: "使用 APP 快捷键聚焦" },
   { value: "recorded_point", label: "记录点击位置" },
 ];
 

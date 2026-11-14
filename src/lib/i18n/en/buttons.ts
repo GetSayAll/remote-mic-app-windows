@@ -187,7 +187,7 @@ export default {
   "向下翻页": "Page Down",
   "滚到顶部": "Scroll to Top",
   "滚到底部": "Scroll to Bottom",
-  "使用 APP 适配里学习的滚动区域；没有记录时自动寻找可滚动容器": "Use the scroll region learned in Apps; if none is saved, find a scrollable container automatically",
+  "使用聚焦与翻页里学习的滚动区域；没有记录时自动寻找可滚动容器": "Use the scroll region learned in Focus & Scrolling; if none is saved, find a scrollable container automatically",
   "每次移动": "Move by",
   "每次滚动": "Scroll by",
   "每次移动像素": "Pixels per move",

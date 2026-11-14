@@ -44,8 +44,8 @@ export interface NavigationItem {
 /** 公开页面表。公开构建的侧栏就是它与私有页面注册表（通常为空）的合并结果。 */
 export const publicNavigationItems: NavigationItem[] = [
   { id: "buttons", label: "按键", icon: "keyboard" },
-  // 2026-11-09 对齐 Mac：APP 适配紧跟在按键之后，拥有独立的 APP 级作用域。
-  { id: "apps", label: "APP 适配", icon: "apps" },
+  // 2026-11-09 对齐 Mac：聚焦与翻页紧跟在按键之后，拥有独立的 App 级作用域。
+  { id: "apps", label: "聚焦与翻页", icon: "apps" },
   // 2026-10-15 组合动作（对齐 Mac 侧边栏「组合动作」条目与层叠方块图标）；
   // 入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。
   ...(COMBINATION_ACTIONS_ENABLED

@@ -64,14 +64,40 @@ describe("app adaptation rows", () => {
     expect(rows[2]).toMatchObject({ preset: false });
   });
 
-  it("does not expose presets that were not manually added, including navigated presets", () => {
+  it("uses a backend-resolved preset id for AppsFolder targets", () => {
+    const target = "shell:AppsFolder\\Chrome";
+    const rows = buildAppRows(
+      [{ name: "Google Chrome", path: target }],
+      {},
+      PRESETS,
+      [],
+      { [target.toLocaleLowerCase()]: "chrome" },
+    );
+    expect(rows[0]).toMatchObject({
+      preset: true,
+      presetId: "chrome",
+      name: "Google Chrome",
+    });
+  });
+
+  it("shows a navigated preset without adding it to the library", () => {
     const rows = buildAppRows(
       [{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }],
       {},
       PRESETS,
       ["chrome"],
     );
-    expect(rows.map((row) => row.target)).toEqual(["C:\\Apps\\Cursor.exe"]);
+    expect(rows.map((row) => row.target)).toEqual([
+      "C:\\Apps\\Cursor.exe",
+      "chrome",
+    ]);
+    expect(rows[1]).toMatchObject({
+      preset: true,
+      presetId: "chrome",
+      name: "Chrome 浏览器",
+      path: "C:\\Program Files\\Chrome\\chrome.exe",
+      installed: true,
+    });
   });
 
   it("deduplicates added apps by case-insensitive path and keeps first name", () => {
@@ -125,7 +151,7 @@ describe("focus labels", () => {
     expect(compactFocusLabel(profile)).toBe("快捷键");
   });
 
-  it("preset rows ignore stale explicit profiles", () => {
+  it("preset rows use explicit profiles before preset defaults", () => {
     const profile = effectiveAppProfile(
       {
         target: "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe",
@@ -134,12 +160,40 @@ describe("focus labels", () => {
       },
       {
         "C:\\Program Files\\Netease\\CloudMusic\\cloudmusic.exe": {
-          strategy: "open_only",
+          strategy: "recorded_point",
+          point: {
+            xRatio: 0.5,
+            yRatio: 0.8,
+            windowWidth: 1200,
+            windowHeight: 800,
+          },
         },
       },
     );
-    expect(profile?.strategy).toBe("app_shortcut");
-    expect(compactFocusLabel(profile)).toBe("快捷键");
+    expect(profile?.strategy).toBe("recorded_point");
+    expect(compactFocusLabel(profile)).toBe("点击位置");
+  });
+
+  it("reads a preset profile stored under the preset id when the row uses a real path", () => {
+    const profile = effectiveAppProfile(
+      {
+        target: "C:\\Apps\\Weixin.exe",
+        preset: true,
+        presetId: "wechat",
+      },
+      {
+        wechat: {
+          strategy: "recorded_point",
+          point: {
+            xRatio: 0.5,
+            yRatio: 0.8,
+            windowWidth: 1200,
+            windowHeight: 800,
+          },
+        },
+      },
+    );
+    expect(profile?.strategy).toBe("recorded_point");
   });
 
   it("reads a stored profile whose path case differs from the app row", () => {
@@ -264,6 +318,13 @@ describe("deleting an adaptation", () => {
       scrollRegionForTarget(
         { "C:\\Apps\\Cursor.exe": { controlType: "Document" } },
         "c:\\apps\\cursor.exe",
+      ),
+    ).toEqual({ controlType: "Document" });
+    expect(
+      scrollRegionForTarget(
+        { wechat: { controlType: "Document" } },
+        "C:\\Apps\\Weixin.exe",
+        "wechat",
       ),
     ).toEqual({ controlType: "Document" });
     expect(scrollRegionForTarget(undefined, "chrome")).toBeNull();

@@ -9,9 +9,11 @@ import {
   getApplicationIcon,
   getButtonMappings,
   getCombinedActions,
+  learnFocusPoint,
   learnFocusTarget,
   learnScrollRegion,
   listPresetApps,
+  resolvePresetTarget,
   saveButtonMappings,
   scanRegisteredApps,
   startShortcutCapture,
@@ -45,8 +47,15 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     getApplicationIcon: vi.fn(async (path: string) =>
       path.toLowerCase().endsWith("cursor.exe") ? "data:image/png;base64,AAAA" : null,
     ),
+    resolvePresetTarget: vi.fn(async () => null),
     listPresetApps: vi.fn(async () => [
       { id: "notepad", name: "记事本", installed: true, path: "C:\\Windows\\System32\\notepad.exe" },
+      {
+        id: "wechat",
+        name: "微信",
+        installed: true,
+        path: "C:\\Program Files\\Tencent\\WeChat\\Weixin.exe",
+      },
       { id: "chrome", name: "Chrome 浏览器", installed: true, path: "C:\\Program Files\\Chrome\\chrome.exe" },
       {
         id: "netease_music",
@@ -61,6 +70,12 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       controlType: "Edit",
       automationId: "chat-input",
       className: "RichEdit",
+    })),
+    learnFocusPoint: vi.fn(async () => ({
+      xRatio: 0.5,
+      yRatio: 0.82,
+      windowWidth: 1200,
+      windowHeight: 800,
     })),
     testAppFocus: vi.fn(async () => undefined),
     learnScrollRegion: vi.fn(async () => ({
@@ -102,16 +117,17 @@ async function mountPage(props: Record<string, unknown> = {}) {
 describe("APP adaptation page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(resolvePresetTarget).mockResolvedValue(null);
     appsViewSession.selectedTarget = null;
     configureMappings({});
   });
 
   it("shows the empty state and opens the existing app picker", async () => {
     const wrapper = await mountPage();
-    expect(wrapper.text()).toContain("还没有添加任何 APP");
+    expect(wrapper.text()).toContain("还没有添加任何 App");
     expect(wrapper.find(".list-panel").exists()).toBe(false);
 
-    await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "添加 App")!.trigger("click");
     await flushPromises();
     expect(wrapper.find(".registered-apps-dialog").exists()).toBe(true);
   });
@@ -130,7 +146,7 @@ describe("APP adaptation page", () => {
       },
     });
     const wrapper = await mountPage();
-    await wrapper.findAll("button").find((button) => button.text() === "添加 APP")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "添加 App")!.trigger("click");
     await flushPromises();
 
     await wrapper.get('.picker-row input[aria-label="Cursor"]').setValue(true);
@@ -159,9 +175,6 @@ describe("APP adaptation page", () => {
         { name: "微信", path: "C:\\Apps\\Weixin.exe" },
         { name: "Chrome 浏览器", path: "C:\\Program Files\\Chrome\\chrome.exe" },
       ],
-      focusProfiles: {
-        chrome: { strategy: "open_only" },
-      },
     });
     const wrapper = await mountPage();
 
@@ -172,21 +185,23 @@ describe("APP adaptation page", () => {
       "Chrome 浏览器",
     ]);
     expect(rows[0].find(".app-row-status").text()).toBe("只打开 · 需学习");
-    expect(rows[2].find(".app-row-status").text()).toBe("预置可用");
+    expect(rows[2].find(".app-row-status").text()).toBe("快捷键 · 预置可用");
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
     await rows[2].trigger("click");
     await flushPromises();
     expect(wrapper.find(".detail-panel").text()).toContain("预置可用");
     expect(wrapper.find(".detail-panel").text()).toContain("使用 APP 快捷键聚焦");
-    expect(wrapper.find(".focus-editor").exists()).toBe(false);
-    expect(wrapper.find(".scroll-card").exists()).toBe(false);
+    expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.find(".scroll-card").exists()).toBe(true);
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
   });
 
-  it("does not expose a preset unless it was manually added", async () => {
+  it("shows an explicitly navigated preset without adding it to the library", async () => {
     const wrapper = await mountPage({ initialTarget: "notepad" });
-    expect(wrapper.find(".app-row").exists()).toBe(false);
-    expect(wrapper.find(".detail-panel").exists()).toBe(false);
-    expect(wrapper.text()).toContain("还没有添加任何 APP");
+    expect(wrapper.find(".app-row").exists()).toBe(true);
+    expect(wrapper.find(".detail-panel").text()).toContain("记事本");
+    expect(wrapper.text()).not.toContain("还没有添加任何 App");
+    expect(saveButtonMappings).not.toHaveBeenCalled();
   });
 
   it("switches focus strategy and writes only the selected target's profile", async () => {
@@ -211,6 +226,44 @@ describe("APP adaptation page", () => {
     expect(saved.applications).toEqual([{ name: "Cursor", path: "C:\\Apps\\Cursor.exe" }]);
     expect(saved.focusProfiles["C:\\Apps\\Cursor.exe"]?.strategy).toBe("recorded_element");
     expect(saved.focusProfiles["C:\\Other.exe"]?.strategy).toBe("app_shortcut");
+  });
+
+  it("keeps a learned input field when switching focus strategy", async () => {
+    const target = "C:\\Apps\\Cursor.exe";
+    configureMappings({
+      applications: [{ name: "Cursor", path: target }],
+      focusProfiles: {
+        [target]: {
+          strategy: "recorded_element",
+          recorded: {
+            controlType: "Edit",
+            automationId: "chat-input",
+            className: "RichEdit",
+          },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+
+    const option = wrapper
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("使用 APP 快捷键聚焦"))!;
+    await option.trigger("click");
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      focusProfiles: Record<
+        string,
+        {
+          strategy: string;
+          recorded?: { automationId: string };
+          point?: { xRatio: number };
+          shortcut?: { keys: string[] };
+        }
+      >;
+    };
+    expect(saved.focusProfiles[target]?.strategy).toBe("app_shortcut");
+    expect(saved.focusProfiles[target]?.recorded?.automationId).toBe("chat-input");
   });
 
   it("learns an input field and saves the structural record", async () => {
@@ -279,7 +332,7 @@ describe("APP adaptation page", () => {
     expect(saved.focusProfiles["C:\\Apps\\Cursor.exe"]?.recorded?.automationId).toBeUndefined();
   });
 
-  it("hides the removed auto and click options but keeps legacy profiles visible", async () => {
+  it("offers click position for apps that expose no input field", async () => {
     configureMappings({
       applications: [{ name: "微信", path: "C:\\Apps\\Weixin.exe" }],
       focusProfiles: {
@@ -291,11 +344,116 @@ describe("APP adaptation page", () => {
     expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
       "只打开 APP",
       "打开后自动聚焦",
+      "使用 APP 快捷键聚焦",
+      "记录点击位置",
     ]);
     expect(wrapper.find(".detail-panel").text()).toContain("点击位置");
-    expect(wrapper.find(".focus-editor").text()).toContain(
-      "当前为旧版聚焦方式：记录点击位置",
+    expect(wrapper.find(".focus-editor").text()).toContain("开始记录位置");
+    expect(wrapper.find(".focus-editor").text()).not.toContain("旧版聚焦方式");
+  });
+
+  it("lets a preset without a reliable focus method learn a click position", async () => {
+    vi.useFakeTimers();
+    const target = "C:\\Program Files\\Tencent\\WeChat\\Weixin.exe";
+    configureMappings({
+      applications: [{ name: "微信", path: target }],
+    });
+    const wrapper = await mountPage();
+    expect(wrapper.find(".app-row-status").text()).toBe("自动选择 · 预置可用");
+    expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.findAll(".focus-option").map((button) => button.text())).toEqual([
+      "自动选择输入框",
+      "只打开 APP",
+      "打开后自动聚焦",
+      "使用 APP 快捷键聚焦",
+      "记录点击位置",
+    ]);
+    expect(wrapper.find(".focus-option.selected").text()).toContain("自动选择输入框");
+    expect(wrapper.find(".focus-status").text()).toBe("预置可用");
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
+
+    const pointOption = wrapper
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("记录点击位置"))!;
+    await pointOption.trigger("click");
+    await flushPromises();
+
+    const start = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "开始记录位置")!;
+    await start.trigger("click");
+    await flushPromises();
+    expect(activateAppForLearning).toHaveBeenCalledWith(target);
+
+    vi.advanceTimersByTime(6000);
+    await flushPromises();
+
+    expect(learnFocusPoint).toHaveBeenCalledWith(target);
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      focusProfiles: Record<string, { strategy: string; point?: { xRatio: number } }>;
+    };
+    expect(saved.focusProfiles.wechat?.strategy).toBe("recorded_point");
+    expect(saved.focusProfiles.wechat?.point?.xRatio).toBe(0.5);
+    expect(wrapper.find(".app-row-status").text()).toContain("点击位置");
+    vi.useRealTimers();
+  });
+
+  it("shows the preset badge beside the heading only for auto selection", async () => {
+    const target = "shell:AppsFolder\\WorkBuddy.WorkBuddy";
+    vi.mocked(resolvePresetTarget).mockImplementation(async (value) =>
+      value === target ? "workbuddy" : null,
     );
+    configureMappings({
+      applications: [{ name: "WorkBuddy", path: target }],
+    });
+    const wrapper = await mountPage();
+
+    expect(wrapper.findAll(".focus-option").map((button) => button.text())).toContain(
+      "自动选择输入框",
+    );
+    expect(wrapper.find(".focus-status").text()).toBe("预置可用");
+
+    await wrapper
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("只打开 APP"))!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".focus-status").exists()).toBe(false);
+  });
+
+  it("lets a preset override and restore its preset scroll region", async () => {
+    const target = "C:\\Program Files\\Tencent\\WeChat\\Weixin.exe";
+    configureMappings({
+      applications: [{ name: "微信", path: target }],
+    });
+    const wrapper = await mountPage();
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "学习滚动区域")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(activateAppForLearning).toHaveBeenCalledWith(target);
+    expect(learnScrollRegion).toHaveBeenCalled();
+    const learned = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      scrollRegions?: Record<string, { automationId?: string }>;
+    };
+    expect(learned.scrollRegions?.wechat?.automationId).toBe("RootWebArea");
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("已学习");
+    expect(wrapper.find(".app-row-status").text()).toContain("已学习");
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "清除学习结果")!
+      .trigger("click");
+    await flushPromises();
+    const cleared = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      scrollRegions?: Record<string, unknown>;
+    };
+    expect(cleared.scrollRegions).toBeUndefined();
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
   });
 
   it("blocks deletion while a button still opens the app", async () => {
@@ -312,7 +470,7 @@ describe("APP adaptation page", () => {
     const wrapper = await mountPage();
 
     expect(wrapper.text()).toContain("还有 1 处绑定在使用它");
-    expect(wrapper.findAll("button").some((button) => button.text() === "删除这个 APP 的适配")).toBe(false);
+    expect(wrapper.findAll("button").some((button) => button.text() === "删除这个 App 的设置")).toBe(false);
     expect(wrapper.find(".binding-row").text()).toContain("确定");
   });
 
@@ -332,12 +490,12 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".binding-card .section-divider").exists()).toBe(true);
     expect(wrapper.find(".binding-card .danger-link").exists()).toBe(true);
     expect(wrapper.text()).not.toContain("0 处");
-    expect(wrapper.text()).not.toContain("只删除 SayAll 保存的适配");
-    await wrapper.findAll("button").find((button) => button.text() === "删除这个 APP 的适配")!.trigger("click");
+    expect(wrapper.text()).not.toContain("只删除 SayAll 保存的设置");
+    await wrapper.findAll("button").find((button) => button.text() === "删除这个 App 的设置")!.trigger("click");
     await flushPromises();
     expect(wrapper.find(".confirm-dialog").exists()).toBe(true);
 
-    await wrapper.findAll("button").find((button) => button.text() === "删除适配")!.trigger("click");
+    await wrapper.findAll("button").find((button) => button.text() === "删除设置")!.trigger("click");
     await flushPromises();
 
     const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
@@ -353,7 +511,30 @@ describe("APP adaptation page", () => {
     expect(wrapper.find(".page-notice").exists()).toBe(false);
   });
 
-  it("shows built-in capabilities for a manually added preset without editable focus or scrolling", async () => {
+  it("shows preset focus and scroll as normal editable sections", async () => {
+    configureMappings({
+      applications: [
+        { name: "Chrome 浏览器", path: "C:\\Program Files\\Chrome\\chrome.exe" },
+      ],
+    });
+    const wrapper = await mountPage();
+    const detail = wrapper.find(".detail-panel").text();
+    expect(detail).not.toContain("C:\\Program Files\\Chrome\\chrome.exe");
+    expect(detail).not.toContain("预置能力");
+    expect(detail).toContain("使用 APP 快捷键聚焦");
+    expect(wrapper.find(".focus-editor").exists()).toBe(true);
+    expect(wrapper.find(".focus-option.selected").text()).toContain(
+      "使用 APP 快捷键聚焦",
+    );
+    expect(wrapper.find(".scroll-card").exists()).toBe(true);
+    expect(wrapper.find(".scroll-card .scroll-status").text()).toBe("预置可用");
+    expect(wrapper.find(".scroll-card").text()).toContain(
+      "预置滚动区域已可用；重新学习会覆盖预置区域。",
+    );
+    expect(wrapper.find(".delete-row").exists()).toBe(true);
+  });
+
+  it("deletes a preset profile stored under the preset id", async () => {
     configureMappings({
       applications: [
         { name: "Chrome 浏览器", path: "C:\\Program Files\\Chrome\\chrome.exe" },
@@ -361,14 +542,23 @@ describe("APP adaptation page", () => {
       focusProfiles: { chrome: { strategy: "open_only" } },
     });
     const wrapper = await mountPage();
-    const detail = wrapper.find(".detail-panel").text();
-    expect(detail).not.toContain("C:\\Program Files\\Chrome\\chrome.exe");
-    expect(detail).toContain("预置能力");
-    expect(detail).toContain("预置可用");
-    expect(detail).toContain("使用 APP 快捷键聚焦");
-    expect(wrapper.find(".focus-editor").exists()).toBe(false);
-    expect(wrapper.find(".scroll-card").exists()).toBe(false);
-    expect(wrapper.find(".delete-row").exists()).toBe(true);
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "删除这个 App 的设置")!
+      .trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "删除设置")!
+      .trigger("click");
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.calls.at(-1)?.[0] as {
+      applications: Array<{ path: string }>;
+      focusProfiles?: Record<string, unknown>;
+    };
+    expect(saved.applications).toEqual([]);
+    expect(saved.focusProfiles).toBeUndefined();
   });
 
   it("loads the real application icon instead of a letter tile", async () => {
@@ -441,8 +631,8 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage();
     await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "改用 APP 快捷键聚焦")!
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("使用 APP 快捷键聚焦"))!
       .trigger("click");
     await flushPromises();
     await wrapper.findAll("button").find((button) => button.text() === "录入快捷键")!.trigger("click");
@@ -478,8 +668,8 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage();
     await wrapper
-      .findAll("button")
-      .find((button) => button.text() === "改用 APP 快捷键聚焦")!
+      .findAll(".focus-option")
+      .find((button) => button.text().includes("使用 APP 快捷键聚焦"))!
       .trigger("click");
     await flushPromises();
     await wrapper.findAll("button").find((button) => button.text() === "录入快捷键")!.trigger("click");
@@ -571,6 +761,6 @@ describe("APP adaptation page", () => {
     });
     const wrapper = await mountPage();
     expect(wrapper.find(".detail-panel").text()).toContain("Cursor");
-    expect(wrapper.text()).not.toContain("无法读取 APP 适配设置");
+    expect(wrapper.text()).not.toContain("无法读取聚焦与翻页设置");
   });
 });

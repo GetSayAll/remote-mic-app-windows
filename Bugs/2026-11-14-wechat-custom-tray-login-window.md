@@ -1,0 +1,23 @@
+# 微信收进托盘后，自定义 App 的「测试打开与聚焦」打开登录页并可重复多开
+
+- 发现日期：2026-11-14
+- 状态：已修复（自动化 + 真实微信复测 passed）
+- 影响范围：1.9.1；Windows 微信 4.x；从「聚焦与翻页」左列自定义 App「微信」触发「测试打开与聚焦」或按键动作
+- 功能点：自定义应用隐藏窗口恢复、托盘图标唤起、微信预设策略复用
+- 现象：微信退到托盘后，从自定义 App 微信执行「测试打开与聚焦」，打开的是微信登录/入口小窗；重复执行会重复打开登录小窗。从预设微信、组合动作「打开应用」和「聚焦学习过的输入框」打开正常。
+- 正常预期：已有微信主窗口时只恢复主窗口并置前，不新起登录小窗，不增加实例。
+- 复现条件：微信 4.x 主窗口收进托盘；应用库自定义微信 target 指向自定义安装目录的 `Weixin.exe`；点击「测试打开与聚焦」。
+- 证据：
+  - `%APPDATA%\app.getsayall.remote-mic.windows\button-mappings.json` 中微信自定义 target 指向自定义安装目录的 `Weixin.exe`，聚焦档案键为 `wechat`。
+  - `crates/sayall-windows/src/app_launcher.rs` 中预设微信设置 `relaunch_when_hidden = false`，注释记录 2026-10-03 / 2026-10-18 真机：重新拉起会新起实例并弹出 295×387 登录小窗；预设路径因此在托盘恢复失败后跳过 relaunch，直接恢复已知隐藏主窗口。
+  - 自定义路径分支的 `delegate_custom_hidden_target` 之前只把 `Weixin.exe` / `Weixin` 作为托盘候选；预设的托盘显示名「微信」未并入，托盘匹配失败后无条件 `launch_explicit`，命中微信的登录小窗行为。
+- 根因：自定义路径没有复用预设的 `relaunch_when_hidden` 元数据，也没有使用预设的托盘显示名；隐藏窗口恢复失败后走了通用 relaunch 路径。
+- 修复：
+  - 新增 `preset_for_custom_hidden_target`：自定义 target 先按预设路径解析，失败再按 exe 名匹配预设；只用于隐藏窗口恢复策略，不改变自定义启动路径。
+  - `delegate_custom_hidden_target` 接受预设元数据，把 `shortcut_names`（微信 / WeChat）并入托盘候选。
+  - 对 `relaunch_when_hidden=false` 的预设，托盘失败后跳过 relaunch，直接恢复已知隐藏主窗口；日志区分 `relaunch_skipped` / `hidden_fallback` / `hidden_foreground`。
+- 验证：
+  - 新增单测 `app_launcher::tests::custom_weixin_target_uses_preset_hidden_policy` passed；`cargo test -p sayall-windows` 557 passed / 17 ignored。
+  - 真实微信 4.x passed：把主窗口收进托盘后，连续两次对自定义路径调用 `test_app_focus`；第一次主窗口从隐藏变为可见（809×827），第二次仍只有同一个可见主窗口，微信进程数保持 5，未出现登录小窗。
+  - 本地测试包 `6b1ce20` 安装校验 passed；helper / gadget / sayall-mcp 哈希对齐，app exe 仅 3 字节 UNK→NSS 差异。
+- 隐私检查：未记录个人路径、设备身份、聊天内容或凭据；只保留代码路径、策略名与公开窗口尺寸。

@@ -47,9 +47,8 @@ use crate::UsageCounters;
 
 /// 「打开应用」实际使用的聚焦档案。
 ///
-/// 预设应用（含用户手动添加的预设路径）直接使用产品默认聚焦方式
-/// （Chrome / 网易云用快捷键，其余自动选择输入框）。
-/// 自定义应用仍按用户保存的档案执行，没有档案时只打开。
+/// 用户显式档案优先（含预设 id / 真实路径两种键），没有显式档案时才回落到
+/// 预设默认值。预设默认值只是兜底，不能覆盖用户学过的输入框或点击位置。
 fn open_app_effective_profile(
     mappings: &ButtonMappings,
     target: &str,
@@ -57,18 +56,36 @@ fn open_app_effective_profile(
     focus_profile_for_target(&mappings.focus_profiles, target)
 }
 
-/// 目标对应的实际聚焦档案：预设优先（含手动添加的预设路径），其余读取用户档案。
+/// 目标对应的实际聚焦档案：用户显式档案优先，预设默认兜底。
 ///
-/// 组合动作的聚焦步骤与按键页的「打开应用 + 聚焦」必须使用同一判定，
-/// 否则手动添加的预设路径会在组合动作里退化成「只打开」。
+/// 组合动作的聚焦步骤与按键页的「打开应用 + 聚焦」必须使用同一判定。
+/// 1.9 曾改成预设优先，导致 1.8 学过的微信 `recorded_point` 等档案失效；
+/// 这里恢复 1.8 的顺序，并额外接受「预设 id」作为真实路径目标的档案键。
 pub(crate) fn focus_profile_for_target(
     profiles: &std::collections::BTreeMap<String, crate::focus::AppFocusProfile>,
     target: &str,
 ) -> Option<crate::focus::AppFocusProfile> {
+    if let Some(profile) = profiles.get(target) {
+        return Some(profile.clone());
+    }
     if let Some(app) = crate::app_launcher::preset_app_for_target(target) {
+        // 手动添加的预设路径可能把档案存在预设 id 下（APP 适配页的规范键）。
+        if let Some(profile) = profiles.get(app.id) {
+            return Some(profile.clone());
+        }
+        // 反向兼容：目标用预设 id、档案仍存在 1.8 的真实路径下。
+        if let Some(path) = crate::app_launcher::cached_preset_apps()
+            .iter()
+            .find(|info| info.id == app.id)
+            .and_then(|info| info.path.as_deref())
+        {
+            if let Some(profile) = profiles.get(path) {
+                return Some(profile.clone());
+            }
+        }
         return Some(preset_focus_profile(app.id));
     }
-    profiles.get(target).cloned()
+    None
 }
 
 /// 预设应用的默认聚焦入口。
@@ -3598,7 +3615,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_profile_for_target_prefers_presets_and_keeps_custom_profiles() {
+    fn focus_profile_for_target_prefers_explicit_profiles_and_falls_back_to_presets() {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
             "chrome".to_owned(),
@@ -3609,12 +3626,49 @@ mod tests {
                 point: None,
             },
         );
-        // 旧显式档案不能覆盖预设能力，否则组合动作会与 UI 摘要不一致。
+        // 用户显式档案必须优先：1.9 曾改成预设优先，导致 1.8 学过的聚焦档案失效。
+        assert_eq!(
+            focus_profile_for_target(&profiles, "chrome")
+                .expect("Chrome 显式档案")
+                .strategy,
+            crate::focus::FocusStrategy::OpenOnly
+        );
+
+        // 微信没有 UIA 树，recorded_point 是唯一可用的聚焦方式，不能被预设默认覆盖。
+        profiles.insert(
+            "wechat".to_owned(),
+            crate::focus::AppFocusProfile {
+                strategy: crate::focus::FocusStrategy::RecordedPoint,
+                point: Some(crate::focus::RecordedPoint {
+                    x_ratio: 0.5,
+                    y_ratio: 0.82,
+                    window_width: 1200,
+                    window_height: 800,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            focus_profile_for_target(&profiles, "wechat")
+                .expect("微信记录的点击位置")
+                .strategy,
+            crate::focus::FocusStrategy::RecordedPoint
+        );
+
+        // 没有显式档案时仍回落到预设能力。
+        profiles.remove("chrome");
         assert_eq!(
             focus_profile_for_target(&profiles, "chrome")
                 .expect("Chrome 预设档案")
                 .strategy,
             crate::focus::FocusStrategy::AppShortcut
+        );
+        assert_eq!(
+            focus_profile_for_target(&profiles, "notepad")
+                .expect("记事本预设档案")
+                .strategy,
+            crate::focus::FocusStrategy::AutoComposer
         );
 
         let custom = r"C:\Tools\Editor.exe";
