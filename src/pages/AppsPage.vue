@@ -792,7 +792,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-self: flex-start;
-  height: calc(100vh - 150px);
+  height: auto;
   max-height: calc(100vh - 150px);
   min-height: 0;
   overflow: hidden;
