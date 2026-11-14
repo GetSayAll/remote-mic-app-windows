@@ -74,3 +74,16 @@
 - 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `1C0F015D7F2925956AE3939A1FDA703AC0F38A86B566AA42BAA8F9C724053468`，大小 13493599 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `9870F30BAC8D3C0DEB27CCE81607C8C87CEEEA3CB75D40DF9F88E52EC79F8A2C`；前端嵌入校验 18/18 passed。
 - 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `1017395` count=1；安装版截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-164340.png` 确认 Chrome / ChatGPT / Vokie 的预置状态与「聚焦方式」区域。
 - 仍未覆盖：真实遥控器翻页与真实微信目视聚焦（deferred，需真机前台操作）。
+
+## 2026-11-14 追加：移除筛选、组合动作「去配置」与跨页记录同步
+
+- 代码提交：`aceac4a`（`fix(apps): 移除筛选并同步聚焦与翻页状态`）。
+- 移除按键页「筛选已添加应用」输入框与对应过滤逻辑；移除组合动作页「搜索组合动作」输入框。两项都是重复入口，保留原生列表滚动。
+- 组合动作聚焦步骤摘要始终显示「去配置」链接，不再用「预置可用」徽标替代入口；按键页同样只保留链接。
+- 跨页记录同步：`focusTargetPresetId` 之前只匹配精确 id / 预设路径，`shell:AppsFolder\Chrome` 这类目标在按键页和组合动作页解析不到预设 id，导致已经保存到 `focusProfiles[chrome]` / `scrollRegions[chrome]` 的聚焦方式与学习记录回退成预设默认或「需学习」。两页现在都调用 `resolve_preset_target` 解析 AppsFolder 目标，并以 `effectiveFocusPresetId`（精确 id 优先、异步解析兜底）读取显式档案与滚动区域；解析按 generation 防迟到回调覆盖。页面重新挂载时从磁盘重读，因此 Apps → 按键/组合动作切换后能看到同一份记录。
+- 列表底栏间距：`.list-panel` 底部 padding 由 12px 收紧到 8px，`.library-pane` 由 14px 收紧到 10px。浏览器实测 1150×1500、应用列表 9 行时，「添加 App」按钮底部 681.1px、面板底部 690.1px，可视间距 9px（8px padding + 1px 边框）；按钮仍在列表滚动区末尾。
+- 验证：`pnpm test` passed 693 / 10 skipped；`pnpm build` passed；`cargo fmt --all -- --check` passed；`cargo test --workspace` passed（`sayall-windows` 556 passed / 17 ignored，`sayall-windows-app` 220 passed / 2 ignored，其余 workspace passed）；`cargo check -p sayall-windows-app --features runtime-simulation` passed。新增/调整回归用例覆盖 AppsFolder 预设目标在按键页与组合动作页同步显式聚焦档案和滚动记录、组合动作摘要始终有「去配置」、两处筛选控件不再出现。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.1_x64-setup.exe`，SHA-256 `03192695F53C1EE73B0B47A271577055C4C1C0B8ECA1BF59B416E815DED6C90B`，大小 13495217 字节（本地测试密钥签名，不可发布）；app exe SHA-256 `5579787E5B6C3137E1828DBB620EDF0379A53E3E5E551CE63AE2D8CAE398968F`。
+- 安装校验 passed：helper / gadget / sayall-mcp 哈希对齐；app exe 仅 3 字节 UNK→NSS 差异；内嵌修订号 `aceac4a` count=1；安装版启动截图 `C:\Users\hd838\AppData\Local\Temp\sayall-installed-173347.png` 确认 1.9.1 的「聚焦与翻页」页正常加载。
+- 仍未覆盖：真实 RC001/RC003 滚动与真实微信目视聚焦（deferred，需真机前台操作）。
+
