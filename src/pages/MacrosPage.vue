@@ -49,6 +49,7 @@ import {
   openAppLabel,
   registerMacroNames,
   registerPresetAppNames,
+  resolvePresetTarget,
   saveButtonMappings,
   saveMacro,
   startShortcutCapture,
@@ -105,7 +106,6 @@ const loading = ref(cachedDefinitions === null);
 const definitions = ref<MacroDefinition[]>(cachedDefinitions ?? []);
 const selectedMacroId = ref<string | null>(cachedDefinitions?.[0]?.macroId ?? null);
 if (cachedDefinitions) registerMacroNames(cachedDefinitions);
-const search = ref("");
 const statusMessage = ref("");
 const statusKind = ref<"info" | "success" | "error">("info");
 
@@ -138,12 +138,6 @@ let testPollTimer: ReturnType<typeof setInterval> | undefined;
 const selectedDefinition = computed(
   () => definitions.value.find((item) => item.macroId === selectedMacroId.value) ?? null,
 );
-
-const filteredDefinitions = computed(() => {
-  const keyword = search.value.trim().toLowerCase();
-  if (!keyword) return definitions.value;
-  return definitions.value.filter((item) => item.name.toLowerCase().includes(keyword));
-});
 
 const draftValid = computed(() => {
   const value = draft.value;
@@ -980,11 +974,38 @@ function presetIdForTarget(target: string | null | undefined): string | null {
 }
 
 const focusTargetPresetId = computed(() => presetIdForTarget(focusTarget.value));
+
+/** AppsFolder 目标无法在前端按路径匹配预设，由后端解析真实 exe 后补齐。 */
+const resolvedFocusPresetId = ref<string | null>(null);
+let focusPresetGeneration = 0;
+watch(
+  focusTarget,
+  async (target) => {
+    const generation = ++focusPresetGeneration;
+    resolvedFocusPresetId.value = null;
+    if (!target) return;
+    try {
+      const presetId = await resolvePresetTarget(target);
+      if (generation === focusPresetGeneration) resolvedFocusPresetId.value = presetId;
+    } catch {
+      // 解析失败只影响预设标记；显式档案和自定义目标仍照常显示。
+    }
+  },
+  { immediate: true },
+);
+
+const effectiveFocusPresetId = computed(
+  () => focusTargetPresetId.value ?? resolvedFocusPresetId.value,
+);
 const focusTargetIsBuiltInPreset = computed(() =>
-  Boolean(focusTarget.value && isPresetTarget(focusTarget.value)),
+  Boolean(
+    focusTarget.value &&
+      (isPresetTarget(focusTarget.value) ||
+        (!focusTargetPresetId.value && resolvedFocusPresetId.value)),
+  ),
 );
 const focusTargetIsLibraryPreset = computed(
-  () => Boolean(focusTargetPresetId.value && !focusTargetIsBuiltInPreset.value),
+  () => Boolean(effectiveFocusPresetId.value && !focusTargetIsBuiltInPreset.value),
 );
 const focusCustomAppsExpanded = computed(
   () =>
@@ -998,7 +1019,7 @@ function effectiveFocusForTarget(target: string | null | undefined): AppFocusPro
   return effectiveProfileForTarget(
     focusProfiles.value,
     target,
-    focusTargetPresetId.value,
+    effectiveFocusPresetId.value,
   );
 }
 
@@ -1012,16 +1033,6 @@ const focusSummary = computed(() =>
     ? t(focusStrategyLabel(focusProfile.value.strategy))
     : t("只打开 APP"),
 );
-
-/** 当前目标实际使用快捷键、且预设本身也提供快捷键时，才显示「预置可用」。 */
-const focusTargetUsesPresetShortcut = computed(() => {
-  const presetId = focusTargetPresetId.value;
-  if (!presetId) return false;
-  return (
-    focusProfile.value?.strategy === "app_shortcut" &&
-    presetFocusDefault(presetId, true)?.strategy === "app_shortcut"
-  );
-});
 
 function configureFocusProfile(): void {
   const target = focusTarget.value;
@@ -1092,7 +1103,7 @@ const focusScrollStatus = computed(() => {
     scrollRegionForTarget(
       focusScrollRegions.value,
       target,
-      focusTargetPresetId.value,
+      effectiveFocusPresetId.value,
     )
   ) {
     return t("已学习");
@@ -1323,27 +1334,9 @@ watch(
     <!-- 库浏览 -->
     <div v-if="!wizardVisible" class="library-body">
       <aside class="library-pane">
-        <div class="search-field">
-          <input
-            v-model="search"
-            class="search-input"
-            type="search"
-            :placeholder="t('搜索组合动作')"
-            :aria-label="t('搜索组合动作')"
-          />
-          <button
-            v-if="search"
-            class="search-clear"
-            type="button"
-            :aria-label="t('清除搜索')"
-            @click="search = ''"
-          >
-            <span aria-hidden="true">×</span>
-          </button>
-        </div>
         <div class="macro-list" role="listbox" :aria-label="t('组合动作列表')">
           <button
-            v-for="definition in filteredDefinitions"
+            v-for="definition in definitions"
             :key="definition.macroId"
             type="button"
             class="macro-item"
@@ -1872,10 +1865,7 @@ watch(
                       {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
                       {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
                     </span>
-                    <span v-if="focusTargetUsesPresetShortcut" class="preset-pill">
-                      {{ t("预置可用") }}
-                    </span>
-                    <button v-else class="link-button" type="button" @click="configureFocusProfile">
+                    <button class="link-button" type="button" @click="configureFocusProfile">
                       {{ t("去配置") }}
                     </button>
                   </div>
@@ -2063,7 +2053,7 @@ watch(
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--card);
-  padding: 14px;
+  padding: 14px 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2084,40 +2074,6 @@ watch(
   border-radius: 99px;
   padding: 3px 8px;
 }
-.search-field {
-  position: relative;
-}
-.search-field .search-input {
-  box-sizing: border-box;
-  min-height: 32px;
-  padding-right: 38px;
-}
-.search-input::-webkit-search-cancel-button {
-  display: none;
-  -webkit-appearance: none;
-}
-.search-clear {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  bottom: 2px;
-  width: 30px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font: inherit;
-  font-size: 18px;
-  line-height: 1;
-}
-.search-clear:hover {
-  background: var(--surface-hover);
-  color: var(--text-primary);
-}
-.search-input,
 .text-input {
   width: 100%;
   border: 1px solid var(--border-strong);
@@ -2697,14 +2653,6 @@ watch(
   background: var(--surface-subtle);
 }
 .target-app-title { margin: 0 0 6px; font-size: 12.5px; color: var(--muted); }
-.preset-pill {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--success-surface);
-  color: var(--success-text);
-  font-size: 11px;
-  font-weight: 600;
-}
 .review-summary {
   display: flex;
   align-items: center;

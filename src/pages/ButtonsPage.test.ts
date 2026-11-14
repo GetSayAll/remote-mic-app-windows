@@ -48,6 +48,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       lastError: null,
     })),
     saveButtonMappings: vi.fn(async (mappings: unknown) => mappings),
+    resolvePresetTarget: vi.fn(async () => null),
     listPresetApps: vi.fn(async () => [
       { id: "sayall", name: "无线麦 SayAll", installed: true },
       { id: "wechat", name: "微信", installed: true },
@@ -212,6 +213,7 @@ import {
   learnFocusPoint,
   learnFocusTarget,
   listPresetApps,
+  resolvePresetTarget,
   pickCustomApp,
   saveLockMappingSelection,
   scanPairedRemotes,
@@ -367,6 +369,7 @@ beforeEach(() => {
   });
   vi.mocked(pickCustomApp).mockClear();
   vi.mocked(pickCustomApp).mockResolvedValue(null);
+  vi.mocked(resolvePresetTarget).mockResolvedValue(null);
   vi.mocked(learnFocusPoint).mockClear();
   vi.mocked(learnFocusPoint).mockResolvedValue({
     xRatio: 0.5,
@@ -1705,7 +1708,50 @@ describe("buttons mapping page", () => {
     ]);
   });
 
-  it("手动添加的预设显示预置可用，不提供可编辑配置", async () => {
+  it("AppsFolder 预设目标同步聚焦与翻页记录", async () => {
+    const target = "shell:AppsFolder\\Chrome";
+    vi.mocked(resolvePresetTarget).mockImplementation(async (value) =>
+      value === target ? "chrome" : null,
+    );
+    vi.mocked(listPresetApps).mockResolvedValueOnce([
+      {
+        id: "chrome",
+        name: "Chrome 浏览器",
+        installed: true,
+        path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      },
+    ]);
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+      applications: [{ name: "Google Chrome", path: target }],
+      focusProfiles: { chrome: { strategy: "auto_composer" } },
+      scrollRegions: {
+        chrome: {
+          controlType: "Document",
+          normalizedRect: { x: 0, y: 0.1, width: 1, height: 0.8 },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
+    await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+
+    const summary = wrapper.find(".focus-profile-summary");
+    expect(summary.text()).toContain("聚焦：自动选择输入框");
+    expect(summary.text()).toContain("翻页：已学习");
+    expect(summary.find(".link-button").text()).toBe("去配置");
+    wrapper.unmount();
+  });
+
+  it("手动添加的预设显示预置能力，并保留去配置入口", async () => {
     const target = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     vi.mocked(listPresetApps).mockResolvedValueOnce([
       { id: "chrome", name: "Chrome 浏览器", installed: true, path: target },
@@ -1728,8 +1774,7 @@ describe("buttons mapping page", () => {
     const summary = wrapper.find(".focus-profile-summary");
     expect(summary.text()).toContain("使用 APP 快捷键聚焦");
     expect(summary.text()).toContain("翻页：预置可用");
-    expect(summary.find(".preset-pill").text()).toBe("预置可用");
-    expect(summary.find(".link-button").exists()).toBe(false);
+    expect(summary.find(".link-button").text()).toBe("去配置");
     wrapper.unmount();
   });
 

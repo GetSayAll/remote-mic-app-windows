@@ -57,6 +57,7 @@ import {
   identityShortcutByButton,
   importButtonMappingConfiguration,
   listPresetApps,
+  resolvePresetTarget,
   mouseClickLabels,
   mouseMoveLabels,
   openAppLabel,
@@ -515,6 +516,25 @@ const focusTarget = computed(() =>
     : null,
 );
 
+/** AppsFolder 目标无法在前端按路径匹配预设，由后端解析真实 exe 后补齐。 */
+const resolvedFocusPresetId = ref<string | null>(null);
+let focusPresetGeneration = 0;
+watch(
+  focusTarget,
+  async (target) => {
+    const generation = ++focusPresetGeneration;
+    resolvedFocusPresetId.value = null;
+    if (!target) return;
+    try {
+      const presetId = await resolvePresetTarget(target);
+      if (generation === focusPresetGeneration) resolvedFocusPresetId.value = presetId;
+    } catch {
+      // 解析失败只影响预设标记；显式档案和自定义目标仍照常显示。
+    }
+  },
+  { immediate: true },
+);
+
 /** 目标匹配到的预设 id：内置预设 id 或用户手动添加的预设路径。 */
 const focusTargetPresetId = computed<string | null>(() => {
   const target = focusTarget.value?.trim().toLocaleLowerCase();
@@ -527,11 +547,18 @@ const focusTargetPresetId = computed<string | null>(() => {
     )?.id ?? null
   );
 });
+const effectiveFocusPresetId = computed(
+  () => focusTargetPresetId.value ?? resolvedFocusPresetId.value,
+);
 const focusTargetIsBuiltInPreset = computed(() =>
-  Boolean(focusTarget.value && presetAppIds.value.has(focusTarget.value)),
+  Boolean(
+    focusTarget.value &&
+      (presetAppIds.value.has(focusTarget.value) ||
+        (!focusTargetPresetId.value && resolvedFocusPresetId.value)),
+  ),
 );
 const focusTargetIsLibraryPreset = computed(
-  () => Boolean(focusTargetPresetId.value && !focusTargetIsBuiltInPreset.value),
+  () => Boolean(effectiveFocusPresetId.value && !focusTargetIsBuiltInPreset.value),
 );
 /** 预置应用只有存在用户显式档案时才在按键页显示摘要，避免把预置默认误报成用户设置。 */
 const focusTargetHasExplicitProfile = computed(() =>
@@ -540,7 +567,7 @@ const focusTargetHasExplicitProfile = computed(() =>
       explicitProfileForTarget(
         mappings.value.focusProfiles,
         focusTarget.value,
-        focusTargetPresetId.value,
+        effectiveFocusPresetId.value,
       ),
   ),
 );
@@ -552,7 +579,7 @@ const focusProfile = computed<AppFocusProfile | null>(() => {
   return effectiveProfileForTarget(
     mappings.value.focusProfiles,
     target,
-    focusTargetPresetId.value,
+    effectiveFocusPresetId.value,
   );
 });
 
@@ -637,9 +664,7 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
 
 const appPickerOpen = ref(false);
 const appPickerError = ref<string | null>(null);
-const appFilter = ref("");
 const customAppsOpen = ref<boolean | null>(null);
-const filteredCustomApps = computed(() => customApps.value.filter(app => app.name.toLocaleLowerCase().includes(appFilter.value.trim().toLocaleLowerCase())));
 const customAppsExpanded = computed(
   () =>
     customAppsOpen.value ??
@@ -652,7 +677,7 @@ const focusScrollStatus = computed(() => {
     scrollRegionForTarget(
       mappings.value.scrollRegions,
       target,
-      focusTargetPresetId.value,
+      effectiveFocusPresetId.value,
     )
   ) {
     return t("已学习");
@@ -2566,17 +2591,9 @@ onUnmounted(() => {
           </div>
           <div v-if="customAppsExpanded" id="custom-app-group" class="custom-app-group">
             <p class="action-section-title target-app-title">{{ t("目标 APP") }}</p>
-            <input
-              v-if="customApps.length > 12"
-              v-model="appFilter"
-              class="app-library-search"
-              type="search"
-              :aria-label="t('筛选已添加应用')"
-              :placeholder="t('筛选已添加应用')"
-            />
             <div class="preset-grid app-library">
               <button
-                v-for="app in filteredCustomApps"
+                v-for="app in customApps"
                 :key="app.path"
                 class="chip custom-app"
                 type="button"
@@ -2605,10 +2622,7 @@ onUnmounted(() => {
               {{ t("聚焦：{summary}", { summary: focusSummary }) }} ·
               {{ t("翻页：{status}", { status: focusScrollStatus ?? t("需学习") }) }}
             </span>
-            <span v-if="focusTargetIsLibraryPreset && focusProfile?.strategy === 'app_shortcut'" class="preset-pill">
-              {{ t("预置可用") }}
-            </span>
-            <button v-else class="link-button" type="button" @click="configureFocusProfile">
+            <button class="link-button" type="button" @click="configureFocusProfile">
               {{ t("去配置") }}
             </button>
           </div>
@@ -2913,7 +2927,7 @@ onUnmounted(() => {
 /* 打开应用：预设 + 已添加应用共用一个换行网格（2026-10-03 用户要求）。
    芯片内换行只给自定义应用名（预设名保持单行，避免撑高整行）。 */
 .app-library .chip.custom-app { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-.app-library-search { display: block; width: min(300px, 100%); box-sizing: border-box; margin-top: 10px; padding: 6px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid #888; border-radius: 4px; }
+
 /* 「打开自定义 APP」展开后的目标 APP 组：与预设应用分开，只有这里的目标才有
    聚焦与翻页配置。 */
 .open-custom-app { border-style: dashed; }
@@ -2925,7 +2939,7 @@ onUnmounted(() => {
   background: var(--surface-subtle);
 }
 .target-app-title { margin: 0 0 6px; font-size: 12.5px; color: var(--muted); }
-.custom-app-group .app-library-search { margin-top: 0; margin-bottom: 8px; }
+
 /* 「聚焦方式」只读摘要；可写控件统一在 APP 适配页。 */
 .focus-profile-summary {
   display: flex;
@@ -2938,14 +2952,6 @@ onUnmounted(() => {
   border-radius: 8px;
   background: var(--surface-subtle);
   font-size: 12px;
-}
-.preset-pill {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--success-surface);
-  color: var(--success-text);
-  font-size: 11px;
-  font-weight: 600;
 }
 .focus-profile-summary .link-button {
   padding: 0;

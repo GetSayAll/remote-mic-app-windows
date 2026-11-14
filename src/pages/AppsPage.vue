@@ -788,7 +788,7 @@ onUnmounted(() => {
 .list-panel {
   width: 228px;
   flex: 0 0 228px;
-  padding: 12px;
+  padding: 12px 12px 8px;
   display: flex;
   flex-direction: column;
   align-self: flex-start;
