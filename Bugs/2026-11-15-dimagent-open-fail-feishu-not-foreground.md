@@ -62,7 +62,8 @@
   - 飞书真实应用隐藏/后台 3/3 次到前台，进程数 8 → 8，未新起实例；单次约 250 ms（探针进程启动另计）。
   - 单测 `tray_gesture_preference_is_learned_per_exe`、`recorded_focus_failure_does_not_fail_open_app` passed。
   - `cargo test --workspace --quiet` passed（`sayall-windows` 564 passed / 17 ignored）；`cargo check -p sayall-windows-app --features runtime-simulation`、`cargo check --workspace`、`cargo fmt --all -- --check` passed。
-  - **`deferred`**：RC001/RC003 物理遥控器端到端、用户端安装包复测。
+  - 本地测试包（2026-11-15）：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`，SHA-256 `B44E6C07424944E8E5C6B98B39AD4186F6AF942EE9B44C6E8A4C832A334C98AC`；安装后 app exe SHA-256 `8D5EA2DD4FDF278D01EF447A1A0ED0D35A6E5478A525E370706BDF6223E9044E`（与 `target/release` 差 3 字节 bundle 标记），二进制含 `c5442c2`。本包按现有工作树构建，包含未提交的 RC001 HID 变更；这些变更未进入 `c5442c2`。
+  - **`deferred`**：RC001/RC003 物理遥控器端到端、用户端安装包复测（包已安装，等待用户启动应用后复测托盘与飞书）。
 - 已知边界：
   1. 飞书没有 AUMID（实测 `GetApplicationUserModelId` 返回 15703），托盘图标也没有公开坐标；只能走单实例启动/窗口置前，约 250 ms，无法达到 QQ/微信直接托盘消息的即时性，不改用私有 IPC 或 UIA 托盘飞窗。
   2. 聚焦档案不完整不再阻塞打开；要恢复“聚焦已记录输入框”仍需用户在设置里重新学习。
