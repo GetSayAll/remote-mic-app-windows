@@ -79,6 +79,7 @@
   - `window_visibility` 的 `InstallDirectoryFamily` 用 `non_empty_app_user_model_id` 把空 AUMID 转为 `None`，只按 PID/安装目录匹配；
   - `enum_visibility_proc` 再过滤一次空 AUMID，避免任何调用方把空串当身份选择器；
   - 新增单测 `empty_family_aumid_is_not_identity_selector`。
+  - 评审补强：`launch_app` 成功后，`AppShortcut` 缺快捷键/注入失败、`RecordedPoint` 缺位置/解析失败、`AutoComposer` 聚焦服务不可用也统一走 `focus_outcome`，只记录 `open_app_focus...` 并返回 `Ok`；新增 `focus_submission_result`、`focus_outcome` 单测，避免同类“已打开但聚焦失败被判成打开失败”的路径残留。
 - 验证：
   - 修复前探针：`class=Tauri Window` 假阳性，飞书在前台检查中为 false。
   - 修复后探针：连续 8/8 轮隐藏飞书后打开，`show_and_force_foreground class=Chrome_WidgetWin_1`，飞书主窗口 `target_foreground`，无 `lost_at`；单次 430–570 ms（等待飞书真实窗口出现，之前的 ~300 ms 是假阳性提前返回）。
