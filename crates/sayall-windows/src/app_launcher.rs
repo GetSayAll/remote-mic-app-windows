@@ -911,7 +911,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
         if let Some(aumid) = preset_aumid(app.id) {
             let merged = visibility.merge(window_visibility(WindowSelector::AppUserModelId(aumid)));
             if let Some(hwnd) = merged.largest_visible {
-                let activated = unsafe { win_impl::activate_known_window(hwnd) };
+                let activated = activate_known_window_with_retry(hwnd);
                 crate::ble::gatt_note(format!(
                     "app_launcher action=activate_or_launch preset={} phase=aumid_activate_existing terminal_result={}",
                     app.id,
@@ -957,7 +957,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 if let Some(hwnd) = restored {
                     // 托盘回调只保证窗口可见，不保证它成为前台；方案按前台应用匹配，
                     // 不补置前时用户下一次按键仍走默认方案（2026-10-28 真机）。
-                    let focused = unsafe { win_impl::activate_known_window(hwnd) }
+                    let focused = activate_known_window_with_retry(hwnd)
                         || wait_for_target_foreground(
                             app.id,
                             std::time::Duration::from_millis(400),
@@ -1009,7 +1009,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                     ));
                     if !tray_policy_launch_allowed(true, tray.matched) {
                         if let Some(hwnd) = restored {
-                            let focused = unsafe { win_impl::activate_known_window(hwnd) }
+                            let focused = activate_known_window_with_retry(hwnd)
                                 || wait_for_target_foreground(
                                     app.id,
                                     std::time::Duration::from_millis(400),
@@ -1141,7 +1141,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                     ));
                     if !tray_policy_launch_allowed(true, tray.matched) {
                         if let Some(hwnd) = restored {
-                            let focused = unsafe { win_impl::activate_known_window(hwnd) }
+                            let focused = activate_known_window_with_retry(hwnd)
                                 || wait_for_target_foreground(
                                     id,
                                     std::time::Duration::from_millis(400),
@@ -1163,11 +1163,13 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 }
             }
         }
+        // 不用启动前的 Alt 解锁：自定义路径随后会显式置前，Alt 注入只会增加
+        // 延迟并可能干扰单实例转发（2026-11-15 飞书“不够瞬间”现场）。
         launch_explicit(
             &entry_path,
             arguments.as_deref(),
             working_dir.as_deref(),
-            true,
+            false,
         )?;
         return foreground_after_custom_launch(&entry_path, &exe_name, is_shortcut);
     }
@@ -1248,7 +1250,7 @@ fn delegate_custom_hidden_target(
     if let Some(hwnd) = restored {
         // 托盘回调只保证窗口可见，不保证它成为前台；不补置前时下一次按键
         // 仍可能按前台应用匹配到旧方案（与预设路径同因，2026-10-28 真机）。
-        let focused = unsafe { win_impl::activate_known_window(hwnd) }
+        let focused = activate_known_window_with_retry(hwnd)
             || wait_for_target_foreground(target, std::time::Duration::from_millis(400));
         crate::ble::gatt_note(format!(
             "app_launcher action=activate_or_launch target_kind=custom phase=tray_foreground terminal_result={}",
@@ -1451,10 +1453,47 @@ fn preset_process_running(app: &PresetApp) -> bool {
         || preset_aumid(app.id).is_some_and(|aumid| !pids_for_app_user_model_id(aumid).is_empty())
 }
 
-/// 先单击托盘；Electron 单击未唤回时补一次双击。
+/// 记住“这个 exe 的托盘需要双击”：首次观察到单击失败、双击成功后才写入。
+/// 只影响按钮顺序，不写配置、不按应用名硬编码；进程重启后重新学习。
+#[cfg(windows)]
+static TRAY_DOUBLE_PREFERRED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn tray_double_preferred(exe_names: &[&str]) -> bool {
+    let Some(key) = exe_names.first().map(|name| name.to_ascii_lowercase()) else {
+        return false;
+    };
+    TRAY_DOUBLE_PREFERRED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .map(|set| set.contains(&key))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn remember_tray_gesture(exe_names: &[&str], double: bool) {
+    let Some(key) = exe_names.first().map(|name| name.to_ascii_lowercase()) else {
+        return;
+    };
+    let Ok(mut set) = TRAY_DOUBLE_PREFERRED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+    else {
+        return;
+    };
+    if double {
+        set.insert(key);
+    } else {
+        set.remove(&key);
+    }
+}
+
+/// 先单击托盘；Electron 单击未唤回时补一次双击；学到双击后再优先双击。
 ///
 /// 2026-11-15 真机：QQ/WorkBuddy 单击就恢复；DimAgent 的托盘单击回调不显示窗口，
-/// 双击才显示。只对 Electron 直接消息补双击，不对已经成功的应用重复发送。
+/// 双击才显示。首次 DimAgent 打开会多等一次单击预算，之后直接双击，降低延时。
 #[cfg(windows)]
 fn tray_restore_with_double_click(
     names: &[&str],
@@ -1462,16 +1501,85 @@ fn tray_restore_with_double_click(
     known_hidden: Option<isize>,
     hidden_max_area: i64,
 ) -> (crate::tray_icons::TrayInvokeResult, Option<isize>) {
-    let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
-    if tray.submitted {
-        if let Some(hwnd) = tray_restored_window(known_hidden, hidden_max_area, exe_names) {
-            return (tray, Some(hwnd));
-        }
-    }
-    if tray.submitted && tray.method.starts_with("electron_") {
+    let prefer_double = tray_double_preferred(exe_names);
+    let mut first_result: Option<crate::tray_icons::TrayInvokeResult> = None;
+
+    if prefer_double {
         let double = crate::tray_icons::invoke_electron_tray_double_click(exe_names);
         if double.submitted {
-            let restored = tray_restored_window(known_hidden, hidden_max_area, exe_names);
+            // 已确认这个 exe 需要双击：直接等满正常预算。窗口通常几百毫秒内出现，
+            // 但不用 200 ms 短窗口，避免慢一点就误判失败并改发单击。
+            if let Some(hwnd) = tray_restored_window(
+                known_hidden,
+                hidden_max_area,
+                exe_names,
+                RELAUNCH_VISIBLE_CHECKS,
+            ) {
+                return (double, Some(hwnd));
+            }
+            first_result = Some(double);
+        }
+    } else {
+        let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
+        let quick_checks = if tray.method.starts_with("electron_") {
+            TRAY_QUICK_CHECKS
+        } else {
+            RELAUNCH_VISIBLE_CHECKS
+        };
+        if tray.submitted {
+            if let Some(hwnd) =
+                tray_restored_window(known_hidden, hidden_max_area, exe_names, quick_checks)
+            {
+                remember_tray_gesture(exe_names, false);
+                return (tray, Some(hwnd));
+            }
+        }
+        first_result = Some(tray);
+    }
+
+    if prefer_double {
+        // 双击优先但没唤回：补一次单击，成功则把该 exe 切回单击优先。
+        let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
+        if tray.submitted {
+            if let Some(hwnd) = tray_restored_window(
+                known_hidden,
+                hidden_max_area,
+                exe_names,
+                RELAUNCH_VISIBLE_CHECKS,
+            ) {
+                remember_tray_gesture(exe_names, false);
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=tray_retry gesture=single_click matched={} submitted={} method={} terminal_result=passed",
+                    tray.matched, tray.submitted, tray.method
+                ));
+                return (tray, Some(hwnd));
+            }
+        }
+        return (
+            first_result.unwrap_or(crate::tray_icons::TrayInvokeResult {
+                submitted: false,
+                method: "not_found",
+                matched: false,
+            }),
+            None,
+        );
+    }
+
+    // 单击优先但没唤回：Electron 补双击；成功后记住该 exe 需要双击。
+    let first = first_result.unwrap_or(crate::tray_icons::TrayInvokeResult {
+        submitted: false,
+        method: "not_found",
+        matched: false,
+    });
+    if first.submitted && first.method.starts_with("electron_") {
+        let double = crate::tray_icons::invoke_electron_tray_double_click(exe_names);
+        if double.submitted {
+            let restored = tray_restored_window(
+                known_hidden,
+                hidden_max_area,
+                exe_names,
+                RELAUNCH_VISIBLE_CHECKS,
+            );
             crate::ble::gatt_note(format!(
                 "app_launcher action=tray_retry gesture=double_click matched={} submitted={} method={} terminal_result={}",
                 double.matched,
@@ -1479,19 +1587,15 @@ fn tray_restore_with_double_click(
                 double.method,
                 if restored.is_some() { "passed" } else { "failed" }
             ));
+            if restored.is_some() {
+                remember_tray_gesture(exe_names, true);
+            }
             return (double, restored);
         }
     }
-    (tray, None)
+    (first, None)
 }
 
-/// 托盘图标触发后的有界复核。
-///
-/// 先认**已知隐藏窗口**自己变可见；若没有，再接受面积不小于隐藏最大窗口一半的
-/// 可见窗口。原因（2026-11-15 QQ 真机）：隐藏主窗口偶尔被 DWM cloak，不在
-/// `window_visibility` 候选里，托盘唤回的是另一个 `Chrome_WidgetWin_1` 句柄；
-/// 只盯旧句柄会把已经成功的唤回误判为失败。面积门槛避免把登录/提示小窗
-/// （微信 114k vs 主窗口 942k）当成成功。
 /// 托盘唤回后的面积门槛：可见最大窗口至少达到隐藏最大窗口的一半。
 ///
 /// QQ 主窗口 960×620（595k）大于隐藏辅助窗 800×600（480k）→ 接受；
@@ -1501,46 +1605,49 @@ fn visible_area_matches_hidden(visible_max_area: i64, hidden_max_area: i64) -> b
     visible_max_area.saturating_mul(2) >= hidden_max_area
 }
 
+/// 托盘图标触发后的有界复核。
+///
+/// 先认**已知隐藏窗口**自己变可见；若没有，再接受面积不小于隐藏最大窗口一半的
+/// 可见窗口。原因（2026-11-15 QQ 真机）：隐藏主窗口偶尔被 DWM cloak，不在
+/// `window_visibility` 候选里，托盘唤回的是另一个 `Chrome_WidgetWin_1` 句柄；
+/// 只盯旧句柄会把已经成功的唤回误判为失败。面积门槛避免把登录/提示小窗
+/// （微信 114k vs 主窗口 942k）当成成功。
 #[cfg(windows)]
 fn tray_restored_window(
     known_hidden: Option<isize>,
     hidden_max_area: i64,
     exe_names: &[&str],
+    checks: u8,
 ) -> Option<isize> {
-    if let Some(hwnd) = known_hidden {
-        let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
-        let visible = readback_with_recheck(
-            || {
-                unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }
-                    .as_bool()
-            },
-            || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
-            RELAUNCH_VISIBLE_CHECKS,
-        );
-        if visible {
-            return Some(hwnd);
+    // 已知句柄和面积兜底放在同一个轮询里：QQ 主窗口被 cloak 换了句柄时，
+    // 不必先等满已知句柄的预算；DimAgent 单击无效果时也能更早进入双击补试。
+    for attempt in 0..=checks {
+        if let Some(hwnd) = known_hidden {
+            let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) }.as_bool()
+            {
+                return Some(hwnd);
+            }
         }
-    }
-    let mut restored = None;
-    readback_with_recheck(
-        || {
-            let visibility = window_visibility(WindowSelector::ExecutableNames(exe_names));
-            restored = visibility.largest_visible.filter(|_| {
-                known_hidden.is_none()
-                    || visible_area_matches_hidden(visibility.visible_max_area, hidden_max_area)
-            });
-            if restored.is_some() && known_hidden.is_some() {
+        let visibility = window_visibility(WindowSelector::ExecutableNames(exe_names));
+        let restored = visibility.largest_visible.filter(|_| {
+            known_hidden.is_none()
+                || visible_area_matches_hidden(visibility.visible_max_area, hidden_max_area)
+        });
+        if let Some(hwnd) = restored {
+            if known_hidden.is_some() {
                 crate::ble::gatt_note(format!(
                     "app_launcher action=tray_restore_area_fallback visible_max_area={} hidden_max_area={}",
                     visibility.visible_max_area, hidden_max_area
                 ));
             }
-            restored.is_some()
-        },
-        || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
-        RELAUNCH_VISIBLE_CHECKS,
-    );
-    restored
+            return Some(hwnd);
+        }
+        if attempt < checks {
+            std::thread::sleep(RELAUNCH_VISIBLE_WAIT);
+        }
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -1635,9 +1742,12 @@ pub(crate) fn readback_hidden_window_shown_brief(hwnd: Option<isize>) -> bool {
 /// 回落到定点显示已知窗口的路径。
 const RELAUNCH_VISIBLE_CHECKS: u8 = 6;
 const APP_SELF_SHOWN_CHECKS: u8 = 3;
+/// Electron 单击通常 250 ms 内恢复；先用 200 ms 短窗口判断，避免 DimAgent
+/// 这类只处理双击的应用白等满 1.2 s 才补双击（2026-11-15 用户反馈“延时很大”）。
+const TRAY_QUICK_CHECKS: u8 = 1;
 const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// 启动之后的**有界置前**预算：10 × 150 ms。
+/// 启动之后的**有界置前**预算：20 × 150 ms。
 ///
 /// 为什么必须有它（2026-10-15 现场）：ShellExecute 启动打包应用（计算器）后，
 /// 新开的窗口**不会**自动拿到前台（实测：前台窗口仍属于别的进程），用户的第一按
@@ -1648,13 +1758,24 @@ const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_mil
 const LAUNCH_FOREGROUND_CHECKS: u8 = 20;
 const LAUNCH_FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// 置前失败时再等 150 ms 重试一次。Windows 前台锁/瞬时焦点切换会偶发拒绝；
+/// 成功路径不增加等待。
+#[cfg(windows)]
+fn activate_known_window_with_retry(hwnd: isize) -> bool {
+    if unsafe { win_impl::activate_known_window(hwnd) } {
+        return true;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    unsafe { win_impl::activate_known_window(hwnd) }
+}
+
 /// 启动完成后的有界置前；等不到窗口就返回 `Ok`（应用可能仍在启动，界面稍后自行出现）。
 #[cfg(windows)]
 fn foreground_after_launch(app: &PresetApp) -> Result<(), String> {
     for _ in 0..LAUNCH_FOREGROUND_CHECKS {
         if let Some(hwnd) = target_window_visibility(app.id).and_then(|visit| visit.largest_visible)
         {
-            let activated = unsafe { win_impl::activate_known_window(hwnd) };
+            let activated = activate_known_window_with_retry(hwnd);
             crate::ble::gatt_note(format!(
                 "app_launcher action=activate_or_launch preset={} phase=foreground_after_launch terminal_result={}",
                 app.id,
@@ -1708,7 +1829,7 @@ fn foreground_after_custom_launch(
         if let Some(hwnd) =
             custom_window_visibility(entry_path, exe_name, is_shortcut).largest_visible
         {
-            let activated = unsafe { win_impl::activate_known_window(hwnd) };
+            let activated = activate_known_window_with_retry(hwnd);
             crate::ble::gatt_note(format!(
                 "app_launcher action=activate_or_launch target_kind=custom phase=foreground_after_launch terminal_result={}",
                 if activated { "passed" } else { "failed" }
@@ -3136,7 +3257,7 @@ pub(crate) fn activate_existing_window(target: &str) -> bool {
     else {
         return false;
     };
-    unsafe { win_impl::activate_known_window(hwnd) }
+    activate_known_window_with_retry(hwnd)
 }
 
 #[cfg(not(windows))]
@@ -3887,6 +4008,18 @@ pub(crate) mod tests {
     /// 托盘唤回的兜底判据：QQ 主窗口大于隐藏辅助窗 → 接受；微信登录小窗
     /// 远小于隐藏主窗口 → 拒绝。防止“主窗口换了句柄”时误判失败，也防止把
     /// 登录/提示小窗当成功。
+    #[cfg(windows)]
+    #[test]
+    fn tray_gesture_preference_is_learned_per_exe() {
+        let names = ["sayall-tray-gesture-test.exe"];
+        remember_tray_gesture(&names, false);
+        assert!(!tray_double_preferred(&names));
+        remember_tray_gesture(&names, true);
+        assert!(tray_double_preferred(&names));
+        remember_tray_gesture(&names, false);
+        assert!(!tray_double_preferred(&names));
+    }
+
     #[cfg(windows)]
     #[test]
     fn tray_area_fallback_accepts_main_window_but_rejects_login_popup() {

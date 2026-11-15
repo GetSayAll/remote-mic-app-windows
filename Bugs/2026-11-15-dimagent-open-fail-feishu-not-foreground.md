@@ -42,3 +42,27 @@
   1. 只对 Electron 宿主支持单击/双击直接消息；非 Electron 应用仍走 UIA 托盘路径，若其单击回调不显示窗口且没有可用的双击 UIA 等价路径，会返回可诊断错误，不会强制显示隐藏窗口。
   2. 面积兜底只用于“已知隐藏窗口没变可见”的托盘恢复；启动路径仍以窗口出现为准。
 - 隐私检查：未记录个人路径、窗口标题、设备身份、语音内容或凭据；只保留公开窗口类名、布局尺寸、进程计数与策略名。
+
+## 2026-11-15 追加：DimAgent 打开延迟与飞书 open_app 误判
+
+- 用户反馈：DimAgent 从托盘打开仍有很大延时；飞书有时仍不能到最前台，且不如 QQ/微信即时。
+- 证据（用户诊断日志，真实安装包）：
+  - DimAgent：`tray_single_click_wait phase=single_click_wait elapsed_ms=1200 unresolved=true window_visible=false` → `tray_restored_window phase=area_fallback_wait elapsed_ms=1238` → 随后才补双击成功；单次打开约 2.76 s。DimAgent 的 Electron 托盘忽略单击，前两段固定等待是纯浪费。
+  - 飞书：`foreground_after_launch terminal_result=passed` 已成功，但同一动作末尾 `map_launch result=err ... reason=target_unavailable`。配置中 `focusProfiles[飞书.lnk]` 只有 `strategy=recorded_element`，没有 `recorded` 目标；`launch_app_and_focus` 因此返回“该应用还没有学习过输入框”，把已经成功的打开动作判为失败。
+- 根因：
+  1. 单/双击统一路径先单击，再在已知隐藏窗口和面积兜底上各等一轮固定 1.2 s；DimAgent 单击无效，白白等待约 2.4 s。
+  2. “打开应用”把**聚焦档案不完整**也当作打开失败；宿主因此不记录 `target_opened`，后续按键仍按旧目标/旧前景计划处理，表现为“没到最前台/不像 QQ 微信”。
+- 修复：
+  - `app_launcher.rs`：`tray_restored_window` 改为单轮 `checks` 轮询（`TRAY_QUICK_CHECKS=1`，约 200 ms），同一轮同时检查已知隐藏窗口与面积兜底；新增按 exe 的 `TRAY_DOUBLE_PREFERRED` 缓存，确认双击有效后直接走双击并保留完整 `RELAUNCH_VISIBLE_CHECKS` 预算。
+  - `button_mapping.rs`：`RecordedElement` 档案缺少 `recorded` 时记录 `open_app_focus_recorded_element phase=skipped reason=not_configured` 并返回 `Ok(())`；聚焦任务提交失败记录 `phase=deferred reason=focus_service_unavailable`，也不再判打开失败；实际聚焦结果仍由异步 `focus_report` 记录。
+  - 自定义 `.exe/.lnk` 显式启动不再发送预设 Alt，避免给不需要的前台解锁路径增加一次按键。
+- 验证：
+  - 临时探针（不提交）`dimagent_gesture_probe`：第一轮 323 ms，第二轮 59 ms；第二轮日志直接 `electron_tray_double_click_message`，无重试。首次打开仍有约 300 ms 的快速轮询成本。
+  - 临时探针 `focus_missing_config_probe`：构造 `recorded_element` 且无 `recorded` 的飞书档案，结果 `result=Ok(())`；日志 `open_app_focus_recorded_element phase=skipped reason=not_configured`，同轮 `show_and_force_foreground terminal_result=passed`。
+  - 飞书真实应用隐藏/后台 3/3 次到前台，进程数 8 → 8，未新起实例；单次约 250 ms（探针进程启动另计）。
+  - 单测 `tray_gesture_preference_is_learned_per_exe`、`recorded_focus_failure_does_not_fail_open_app` passed。
+  - `cargo test --workspace --quiet` passed（`sayall-windows` 564 passed / 17 ignored）；`cargo check -p sayall-windows-app --features runtime-simulation`、`cargo check --workspace`、`cargo fmt --all -- --check` passed。
+  - **`deferred`**：RC001/RC003 物理遥控器端到端、用户端安装包复测。
+- 已知边界：
+  1. 飞书没有 AUMID（实测 `GetApplicationUserModelId` 返回 15703），托盘图标也没有公开坐标；只能走单实例启动/窗口置前，约 250 ms，无法达到 QQ/微信直接托盘消息的即时性，不改用私有 IPC 或 UIA 托盘飞窗。
+  2. 聚焦档案不完整不再阻塞打开；要恢复“聚焦已记录输入框”仍需用户在设置里重新学习。

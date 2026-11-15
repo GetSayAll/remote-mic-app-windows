@@ -571,23 +571,30 @@ impl MappingInjector for SendInputInjector {
                 Ok(())
             }
             crate::focus::FocusStrategy::RecordedElement => {
-                let recorded = profile
-                    .and_then(|profile| profile.recorded.clone())
-                    .ok_or_else(|| "该应用还没有学习过输入框".to_owned())?;
+                let Some(recorded) = profile.and_then(|profile| profile.recorded.clone()) else {
+                    // 档案策略是 recorded_element 但没有目标（飞书 2026-11-15
+                    // 现场：focusProfiles 只有 strategy，recorded 缺失）。应用已经
+                    // 打开/置前，不能把“没有学习过输入框”当成打开失败。
+                    crate::ble::gatt_note(
+                        "open_app_focus_recorded_element phase=skipped reason=not_configured"
+                            .to_owned(),
+                    );
+                    return Ok(());
+                };
                 // 激活是异步完成的：先等目标成为前台，否则聚焦服务的前几次尝试
                 // 会打在上一个前台应用上（嵌套动作里尤其明显）。
                 let _ = crate::app_launcher::wait_for_target_foreground(
                     target,
                     std::time::Duration::from_millis(2500),
                 );
-                self.with_focus_runner(|runner| {
-                    runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
-                        crate::focus::FocusChoice::Recorded(recorded),
-                    ))
-                })
-                .flatten()
-                .map(|_| ())
-                .ok_or_else(|| "聚焦服务不可用".to_owned())
+                let focus = self
+                    .with_focus_runner(|runner| {
+                        runner.submit(crate::focus_service::FocusTask::LaunchThenFocus(
+                            crate::focus::FocusChoice::Recorded(recorded),
+                        ))
+                    })
+                    .flatten();
+                recorded_focus_result(focus)
             }
             crate::focus::FocusStrategy::RecordedPoint => {
                 let point = profile
@@ -676,6 +683,25 @@ impl MappingInjector for SendInputInjector {
     fn start_app_switcher(&self) -> Result<(), String> {
         request_app_switcher_start()
     }
+}
+
+/// 「已记录输入框」聚焦提交失败不把“打开应用”判为失败。
+///
+/// 应用已经打开/置前；聚焦档案可能因应用更新、UIA 树变化而失效（2026-11-15
+/// 飞书现场：`focusProfiles` 只有 `strategy=recorded_element`、`recorded` 缺失，
+/// 每次 `map_launch result=err`，但 `foreground_after_launch` 已 passed）。
+/// 若把聚焦问题传播为打开失败，宿主不会 `target_opened`，下一条按键仍落到旧应用。
+/// 聚焦任务的实际结果由 `focus_report` 异步记录，这里只处理提交失败。
+fn recorded_focus_result(focus: Option<u64>) -> Result<(), String> {
+    if focus.is_some() {
+        crate::ble::gatt_note("open_app_focus_recorded_element phase=submitted".to_owned());
+    } else {
+        crate::ble::gatt_note(
+            "open_app_focus_recorded_element phase=deferred reason=focus_service_unavailable"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 pub type ButtonEdgeCallback = Arc<dyn Fn(ButtonEdge) + Send + Sync>;
@@ -3587,6 +3613,15 @@ mod tests {
             &[target.to_owned()]
         );
         drop(gate);
+    }
+
+    /// 飞书 2026-11-15 现场：应用已打开并置前，但 recorded_element 聚焦失败，
+    /// 整个 `launch_app_and_focus` 被判为 Err，宿主不切前台方案。聚焦失败必须是
+    /// 非致命：打开成功仍然是成功，只单独记录聚焦失败原因。
+    #[test]
+    fn recorded_focus_failure_does_not_fail_open_app() {
+        assert!(recorded_focus_result(Some(1)).is_ok());
+        assert!(recorded_focus_result(None).is_ok());
     }
 
     /// Chrome 聚焦地址栏、网易云音乐聚焦搜索框：使用公开快捷键，
