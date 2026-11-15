@@ -47,8 +47,9 @@
 - 2026-11-15：参考 Electron 主线 `shell/browser/ui/win/notify_icon_host.cc` 与
   `notify_icon.cc`（2026-11-15 抓取；该行为自 2018 年起稳定，未固定到某个 Electron
   版本）：`kNotifyIconMessage = WM_APP + 1`、`kBaseIconId = 2`，宿主窗口 `WndProc`
-  对 `WM_LBUTTONDOWN` 调用 `NotifyClicked`。本仓库仅对窗口类
-  `Electron_NotifyIconHostWindow` 发送同一窗口消息，等价于用户左键点托盘图标，
+  对 `WM_LBUTTONDOWN` 调用 `NotifyClicked`、对 `WM_LBUTTONDBLCLK` 调用
+  `NotifyDoubleClicked`。本仓库仅对窗口类 `Electron_NotifyIconHostWindow` 发送
+  同一窗口消息：先单击，应用未恢复时补一次双击（DimAgent 只处理双击），
   避免打开 Windows 11 “显示隐藏的图标”浮层；不复制代码、不注入进程、不读私有数据。
   来源：https://github.com/electron/electron/blob/main/shell/browser/ui/win/notify_icon_host.cc
 

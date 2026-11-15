@@ -940,13 +940,12 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 // 应用已运行，但窗口收在托盘里（如微信/QQ 关闭到托盘）。**先走应用自己的
                 // 托盘图标**——这是用户平时"把应用叫回来"的方式，窗口由应用自己恢复，
                 // 状态一致、可交互（2026-10-03 真机：直接 ShowWindow 出来的窗口点不动）。
-                let tray =
-                    crate::tray_icons::invoke_tray_icon(&preset_tray_names(app), app.exe_names);
-                let restored = if tray.submitted {
-                    tray_restored_window(visibility.largest_hidden, app.exe_names)
-                } else {
-                    None
-                };
+                let (tray, restored) = tray_restore_with_double_click(
+                    &preset_tray_names(app),
+                    app.exe_names,
+                    visibility.largest_hidden,
+                    visibility.hidden_max_area,
+                );
                 crate::ble::gatt_note(format!(
                     "app_launcher action=activate_or_launch preset={} phase=tray_icon matched={} submitted={} method={} terminal_result={}",
                     app.id,
@@ -998,18 +997,17 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 // 只有完全没托盘图标的进程（资源管理器、Chrome 后台进程）才允许启动
                 // 新窗口——否则这些应用永远无法从"已运行但无窗口"状态打开。
                 if preset_process_running(app) {
-                    let tray =
-                        crate::tray_icons::invoke_tray_icon(&preset_tray_names(app), app.exe_names);
+                    let (tray, restored) = tray_restore_with_double_click(
+                        &preset_tray_names(app),
+                        app.exe_names,
+                        None,
+                        0,
+                    );
                     crate::ble::gatt_note(format!(
                         "app_launcher action=activate_or_launch preset={} phase=no_window_tray matched={} submitted={} method={}",
                         app.id, tray.matched, tray.submitted, tray.method
                     ));
                     if !tray_policy_launch_allowed(true, tray.matched) {
-                        let restored = if tray.submitted {
-                            tray_restored_window(None, app.exe_names)
-                        } else {
-                            None
-                        };
                         if let Some(hwnd) = restored {
                             let focused = unsafe { win_impl::activate_known_window(hwnd) }
                                 || wait_for_target_foreground(
@@ -1078,10 +1076,11 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
         }
         // `.lnk` 先解析成真实 exe/参数/工作目录；custom `.exe` 直接用自身。
         // 两者随后走同一条"先判定可见性，再决定激活还是交给应用"的路径。
+        let is_shortcut = id.to_ascii_lowercase().ends_with(".lnk");
         let mut entry_path = id.to_owned();
         let mut arguments: Option<String> = None;
         let mut working_dir: Option<String> = None;
-        if id.to_ascii_lowercase().ends_with(".lnk") {
+        if is_shortcut {
             match resolve_lnk(id) {
                 Some(resolved) if !resolved.exe_path.is_empty() => {
                     entry_path = resolved.exe_path;
@@ -1121,6 +1120,7 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 id,
                 &exe_name,
                 visibility.largest_hidden,
+                visibility.hidden_max_area,
                 preset,
             ) {
                 Ok(CustomHiddenOutcome::Handled) => return Ok(()),
@@ -1133,17 +1133,13 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 if !pids_for_exe_names(&[&exe_name]).is_empty() {
                     let names = custom_tray_candidates(id, &exe_name, preset);
                     let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-                    let tray = crate::tray_icons::invoke_tray_icon(&borrowed, &[&exe_name]);
+                    let (tray, restored) =
+                        tray_restore_with_double_click(&borrowed, &[&exe_name], None, 0);
                     crate::ble::gatt_note(format!(
                         "app_launcher action=activate_or_launch target_kind=custom phase=no_window_tray matched={} submitted={} method={}",
                         tray.matched, tray.submitted, tray.method
                     ));
                     if !tray_policy_launch_allowed(true, tray.matched) {
-                        let restored = if tray.submitted {
-                            tray_restored_window(None, &[&exe_name])
-                        } else {
-                            None
-                        };
                         if let Some(hwnd) = restored {
                             let focused = unsafe { win_impl::activate_known_window(hwnd) }
                                 || wait_for_target_foreground(
@@ -1167,12 +1163,13 @@ pub fn activate_or_launch(id: &str) -> Result<(), String> {
                 }
             }
         }
-        return launch_explicit(
+        launch_explicit(
             &entry_path,
             arguments.as_deref(),
             working_dir.as_deref(),
             true,
-        );
+        )?;
+        return foreground_after_custom_launch(&entry_path, &exe_name, is_shortcut);
     }
     Err(format!("未知预设应用：{id}"))
 }
@@ -1234,16 +1231,13 @@ fn delegate_custom_hidden_target(
     target: &str,
     exe_name: &str,
     known_hidden: Option<isize>,
+    hidden_max_area: i64,
     preset: Option<&'static PresetApp>,
 ) -> Result<CustomHiddenOutcome, String> {
     let names = custom_tray_candidates(target, exe_name, preset);
     let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-    let tray = crate::tray_icons::invoke_tray_icon(&borrowed, &[exe_name]);
-    let restored = if tray.submitted {
-        tray_restored_window(known_hidden, &[exe_name])
-    } else {
-        None
-    };
+    let (tray, restored) =
+        tray_restore_with_double_click(&borrowed, &[exe_name], known_hidden, hidden_max_area);
     crate::ble::gatt_note(format!(
         "app_launcher action=activate_or_launch target_kind=custom phase=tray_icon matched={} submitted={} method={} terminal_result={}",
         tray.matched,
@@ -1457,11 +1451,62 @@ fn preset_process_running(app: &PresetApp) -> bool {
         || preset_aumid(app.id).is_some_and(|aumid| !pids_for_app_user_model_id(aumid).is_empty())
 }
 
-/// 托盘图标触发后的有界复核。已知隐藏窗口存在时只认**那个窗口**自己变可见；
-/// 不把同时冒出的登录/提示小窗当成成功（2026-10-03 微信实测假阳性）。
-/// 没有已知窗口时（进程在跑但窗口枚举为空）才接受任意可见主窗口。
+/// 先单击托盘；Electron 单击未唤回时补一次双击。
+///
+/// 2026-11-15 真机：QQ/WorkBuddy 单击就恢复；DimAgent 的托盘单击回调不显示窗口，
+/// 双击才显示。只对 Electron 直接消息补双击，不对已经成功的应用重复发送。
 #[cfg(windows)]
-fn tray_restored_window(known_hidden: Option<isize>, exe_names: &[&str]) -> Option<isize> {
+fn tray_restore_with_double_click(
+    names: &[&str],
+    exe_names: &[&str],
+    known_hidden: Option<isize>,
+    hidden_max_area: i64,
+) -> (crate::tray_icons::TrayInvokeResult, Option<isize>) {
+    let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
+    if tray.submitted {
+        if let Some(hwnd) = tray_restored_window(known_hidden, hidden_max_area, exe_names) {
+            return (tray, Some(hwnd));
+        }
+    }
+    if tray.submitted && tray.method.starts_with("electron_") {
+        let double = crate::tray_icons::invoke_electron_tray_double_click(exe_names);
+        if double.submitted {
+            let restored = tray_restored_window(known_hidden, hidden_max_area, exe_names);
+            crate::ble::gatt_note(format!(
+                "app_launcher action=tray_retry gesture=double_click matched={} submitted={} method={} terminal_result={}",
+                double.matched,
+                double.submitted,
+                double.method,
+                if restored.is_some() { "passed" } else { "failed" }
+            ));
+            return (double, restored);
+        }
+    }
+    (tray, None)
+}
+
+/// 托盘图标触发后的有界复核。
+///
+/// 先认**已知隐藏窗口**自己变可见；若没有，再接受面积不小于隐藏最大窗口一半的
+/// 可见窗口。原因（2026-11-15 QQ 真机）：隐藏主窗口偶尔被 DWM cloak，不在
+/// `window_visibility` 候选里，托盘唤回的是另一个 `Chrome_WidgetWin_1` 句柄；
+/// 只盯旧句柄会把已经成功的唤回误判为失败。面积门槛避免把登录/提示小窗
+/// （微信 114k vs 主窗口 942k）当成成功。
+/// 托盘唤回后的面积门槛：可见最大窗口至少达到隐藏最大窗口的一半。
+///
+/// QQ 主窗口 960×620（595k）大于隐藏辅助窗 800×600（480k）→ 接受；
+/// 微信登录小窗 295×387（114k）远小于隐藏主窗口 942k → 拒绝。
+#[cfg(windows)]
+fn visible_area_matches_hidden(visible_max_area: i64, hidden_max_area: i64) -> bool {
+    visible_max_area.saturating_mul(2) >= hidden_max_area
+}
+
+#[cfg(windows)]
+fn tray_restored_window(
+    known_hidden: Option<isize>,
+    hidden_max_area: i64,
+    exe_names: &[&str],
+) -> Option<isize> {
     if let Some(hwnd) = known_hidden {
         let window = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
         let visible = readback_with_recheck(
@@ -1472,13 +1517,24 @@ fn tray_restored_window(known_hidden: Option<isize>, exe_names: &[&str]) -> Opti
             || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
             RELAUNCH_VISIBLE_CHECKS,
         );
-        return visible.then_some(hwnd);
+        if visible {
+            return Some(hwnd);
+        }
     }
     let mut restored = None;
     readback_with_recheck(
         || {
-            restored =
-                window_visibility(WindowSelector::ExecutableNames(exe_names)).largest_visible;
+            let visibility = window_visibility(WindowSelector::ExecutableNames(exe_names));
+            restored = visibility.largest_visible.filter(|_| {
+                known_hidden.is_none()
+                    || visible_area_matches_hidden(visibility.visible_max_area, hidden_max_area)
+            });
+            if restored.is_some() && known_hidden.is_some() {
+                crate::ble::gatt_note(format!(
+                    "app_launcher action=tray_restore_area_fallback visible_max_area={} hidden_max_area={}",
+                    visibility.visible_max_area, hidden_max_area
+                ));
+            }
             restored.is_some()
         },
         || std::thread::sleep(RELAUNCH_VISIBLE_WAIT),
@@ -1587,7 +1643,9 @@ const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_mil
 /// 新开的窗口**不会**自动拿到前台（实测：前台窗口仍属于别的进程），用户的第一按
 /// 表现为"打开了但没到最前"、第二按才置前。启动完成后按本应用窗口口径
 /// （含 AUMID 合并）轮询，窗口一出现就强制置前。
-const LAUNCH_FOREGROUND_CHECKS: u8 = 10;
+/// 20 × 150 ms = 3 s：覆盖飞书等 Electron 应用冷启动/单实例转发的慢窗口
+/// （2026-11-15 用户反馈"有时打开后不在最前台"；原 10 × 150 ms 预算偏紧）。
+const LAUNCH_FOREGROUND_CHECKS: u8 = 20;
 const LAUNCH_FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// 启动完成后的有界置前；等不到窗口就返回 `Ok`（应用可能仍在启动，界面稍后自行出现）。
@@ -1614,6 +1672,59 @@ fn foreground_after_launch(app: &PresetApp) -> Result<(), String> {
         "app_launcher action=activate_or_launch preset={} phase=foreground_after_launch terminal_result=skipped reason=window_not_observed_within_budget",
         app.id
     ));
+    Ok(())
+}
+
+/// 自定义目标的窗口口径：exe 名 + `.lnk` 的同安装目录同族进程。
+#[cfg(windows)]
+fn custom_window_visibility(
+    entry_path: &str,
+    exe_name: &str,
+    is_shortcut: bool,
+) -> WindowVisibility {
+    let by_name = window_visibility(WindowSelector::ExecutableNames(&[exe_name]));
+    if !is_shortcut {
+        return by_name;
+    }
+    by_name.merge(window_visibility(WindowSelector::InstallDirectoryFamily {
+        resolved_path: entry_path,
+        app_user_model_id: "",
+    }))
+}
+
+/// 自定义路径启动后的有界置前。
+///
+/// 2026-11-15 现场：飞书 `.lnk` 在已运行时通过启动入口唤回，但自定义路径此前
+/// 直接返回 `launch_explicit`，没有预设路径的 `foreground_after_launch` 等待，
+/// 窗口出现后仍停在别的应用后面。`.lnk` 常指向根目录启动器，真正窗口可能在
+/// `app\` 子目录（飞书 2026-11-12 现场），因此同族进程也要并入。
+#[cfg(windows)]
+fn foreground_after_custom_launch(
+    entry_path: &str,
+    exe_name: &str,
+    is_shortcut: bool,
+) -> Result<(), String> {
+    for _ in 0..LAUNCH_FOREGROUND_CHECKS {
+        if let Some(hwnd) =
+            custom_window_visibility(entry_path, exe_name, is_shortcut).largest_visible
+        {
+            let activated = unsafe { win_impl::activate_known_window(hwnd) };
+            crate::ble::gatt_note(format!(
+                "app_launcher action=activate_or_launch target_kind=custom phase=foreground_after_launch terminal_result={}",
+                if activated { "passed" } else { "failed" }
+            ));
+            return if activated {
+                Ok(())
+            } else {
+                Err("Windows 拒绝将目标应用切换到前台".to_owned())
+            };
+        }
+        std::thread::sleep(LAUNCH_FOREGROUND_WAIT);
+    }
+    crate::ble::gatt_note(
+        "app_launcher action=activate_or_launch target_kind=custom phase=foreground_after_launch terminal_result=skipped reason=window_not_observed_within_budget"
+            .to_owned(),
+    );
     Ok(())
 }
 
@@ -3390,17 +3501,31 @@ pub fn application_readiness(target: &str) -> ApplicationReadiness {
         let visibility = target_window_visibility(target).unwrap_or(WindowVisibility::EMPTY);
         (visibility, !pids_for_exe_names(app.exe_names).is_empty())
     } else if is_custom_path_target(target) {
-        let resolved = if target.to_ascii_lowercase().ends_with(".lnk") {
+        let is_shortcut = target.to_ascii_lowercase().ends_with(".lnk");
+        let resolved = if is_shortcut {
             resolve_lnk(target)
                 .map(|shortcut| shortcut.exe_path)
                 .unwrap_or_else(|| target.to_owned())
         } else {
             target.to_owned()
         };
-        (
-            window_visibility(WindowSelector::ExecutablePath(&resolved)),
-            !pids_for_executable_path(&resolved).is_empty(),
-        )
+        let by_path = window_visibility(WindowSelector::ExecutablePath(&resolved));
+        // `.lnk` 常指向根目录启动器，真正窗口在 `app\` 子目录（飞书 2026-11-12
+        // 现场）；就绪判据必须与激活路径共用同族口径，否则窗口明明可见却报
+        // `visible_window=false`，后续聚焦/等待步骤会超时。
+        let by_family = is_shortcut.then(|| {
+            window_visibility(WindowSelector::InstallDirectoryFamily {
+                resolved_path: &resolved,
+                app_user_model_id: "",
+            })
+        });
+        let visibility = by_family.map_or(by_path, |family| by_path.merge(family));
+        let by_path_process = !pids_for_executable_path(&resolved).is_empty();
+        let by_family_process = is_shortcut && {
+            let (preferred, fallback) = pids_for_install_directory_family(&resolved, "");
+            !preferred.is_empty() || !fallback.is_empty()
+        };
+        (visibility, by_path_process || by_family_process)
     } else {
         return unknown;
     };
@@ -3759,6 +3884,17 @@ pub(crate) mod tests {
     ///
     /// 只有"进程在跑、却没有任何托盘图标"的形态（资源管理器、Chrome 后台
     /// 进程等）才允许启动新窗口——它们没有可唤回的应用入口。
+    /// 托盘唤回的兜底判据：QQ 主窗口大于隐藏辅助窗 → 接受；微信登录小窗
+    /// 远小于隐藏主窗口 → 拒绝。防止“主窗口换了句柄”时误判失败，也防止把
+    /// 登录/提示小窗当成功。
+    #[cfg(windows)]
+    #[test]
+    fn tray_area_fallback_accepts_main_window_but_rejects_login_popup() {
+        assert!(visible_area_matches_hidden(595_200, 480_000));
+        assert!(visible_area_matches_hidden(471_000, 942_000));
+        assert!(!visible_area_matches_hidden(114_000, 942_000));
+    }
+
     #[test]
     fn running_process_without_tray_icon_may_launch_but_with_tray_icon_must_not() {
         assert!(tray_policy_launch_allowed(false, false));

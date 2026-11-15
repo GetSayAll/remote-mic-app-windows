@@ -44,6 +44,7 @@ pub(crate) fn invoke_tray_icon(
     process_exe_names: &[&str],
 ) -> TrayInvokeResult {
     use windows::Win32::UI::Accessibility::IUIAutomation;
+    use windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN;
 
     let candidates: Vec<String> = candidates
         .iter()
@@ -66,7 +67,9 @@ pub(crate) fn invoke_tray_icon(
     // Electron（QQ/WorkBuddy 等）优先走框架自己的托盘窗口消息：等价于用户左键
     // 点图标，但不展开 Windows 11 折叠区浮层。失败才回落到 UIA。
     if !process_exe_names.is_empty() {
-        if let Some(result) = try_electron_tray_click(&process_exe_names) {
+        if let Some(result) =
+            try_electron_tray_gesture(&process_exe_names, WM_LBUTTONDOWN, "electron_tray_message")
+        {
             return result;
         }
     }
@@ -384,11 +387,13 @@ fn is_electron_tray_host_class(class_name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn try_electron_tray_click(process_exe_names: &[String]) -> Option<TrayInvokeResult> {
+fn try_electron_tray_gesture(
+    process_exe_names: &[String],
+    message: u32,
+    method: &'static str,
+) -> Option<TrayInvokeResult> {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, PostMessageW, WM_APP, WM_LBUTTONDOWN,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, PostMessageW, WM_APP};
 
     let entries = target_tray_icon_entries(process_exe_names);
     if entries.is_empty() {
@@ -407,7 +412,7 @@ fn try_electron_tray_click(process_exe_names: &[String]) -> Option<TrayInvokeRes
                 Some(entry.hwnd),
                 WM_APP + 1,
                 WPARAM(entry.u_id as usize),
-                LPARAM(WM_LBUTTONDOWN as isize),
+                LPARAM(message as isize),
             )
         }
         .is_ok();
@@ -415,8 +420,33 @@ fn try_electron_tray_click(process_exe_names: &[String]) -> Option<TrayInvokeRes
     }
     submitted.then_some(TrayInvokeResult {
         submitted: true,
-        method: "electron_tray_message",
+        method,
         matched: true,
+    })
+}
+
+/// 只处理双击才恢复主窗口的 Electron 托盘应用（DimAgent 实测）。
+///
+/// QQ/WorkBuddy 单击就恢复；DimAgent 的单击回调不显示窗口，双击才显示。
+/// 单次点击未唤回时由调用方补一次双击，不会对已成功的应用重复发送。
+#[cfg(windows)]
+pub(crate) fn invoke_electron_tray_double_click(process_exe_names: &[&str]) -> TrayInvokeResult {
+    use windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDBLCLK;
+
+    let names: Vec<String> = process_exe_names
+        .iter()
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    try_electron_tray_gesture(
+        &names,
+        WM_LBUTTONDBLCLK,
+        "electron_tray_double_click_message",
+    )
+    .unwrap_or(TrayInvokeResult {
+        submitted: false,
+        method: "not_found",
+        matched: false,
     })
 }
 
