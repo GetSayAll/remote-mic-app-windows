@@ -83,4 +83,5 @@
   - 修复前探针：`class=Tauri Window` 假阳性，飞书在前台检查中为 false。
   - 修复后探针：连续 8/8 轮隐藏飞书后打开，`show_and_force_foreground class=Chrome_WidgetWin_1`，飞书主窗口 `target_foreground`，无 `lost_at`；单次 430–570 ms（等待飞书真实窗口出现，之前的 ~300 ms 是假阳性提前返回）。
   - `cargo test --workspace --quiet` passed（`sayall-windows` 565 passed / 17 ignored）；`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
+  - 本地测试包（2026-11-16）：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`，SHA-256 `4CEC0F716303753230A204B01BCEC3F1476BB1DF3F48AE9A869DB4885A242461`；安装后 app exe SHA-256 `CFCEBCCB0BFEB5489DDB1DACDAD35034DDD214E1848003C2D5D36583A00F8498`，二进制含 `e84ee5a`。本包仍按现有工作树构建，包含未提交的 RC001 HID 变更。
   - **`deferred`**：用户端再次复测；如果仍出现，需在失败时刻记录当时 `GetForegroundWindow` 的类名/PID，以区分“错误候选窗口”与“置前后被抢”。
