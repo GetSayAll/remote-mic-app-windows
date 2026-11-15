@@ -595,7 +595,15 @@ pub fn launch_registered_app(target: &str) -> Result<(), String> {
                         names.push(segment.to_string());
                     }
                     let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-                    let tray = crate::tray_icons::invoke_tray_icon(&borrowed);
+                    // 进程口径用于折叠区/无 tooltip 的托盘图标定位（QQ 同类场景）。
+                    let process_exe_names: Vec<String> = executable_path
+                        .as_deref()
+                        .and_then(|path| path.rsplit(['\\', '/']).next())
+                        .map(|name| vec![name.to_owned()])
+                        .unwrap_or_default();
+                    let process_names: Vec<&str> =
+                        process_exe_names.iter().map(String::as_str).collect();
+                    let tray = crate::tray_icons::invoke_tray_icon(&borrowed, &process_names);
                     let known_hidden = visibility.largest_hidden;
                     let tray_visible = tray.submitted
                         && crate::app_launcher::readback_hidden_window_shown(known_hidden);
