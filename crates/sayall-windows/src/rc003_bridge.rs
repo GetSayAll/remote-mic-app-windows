@@ -895,11 +895,11 @@ impl Rc003Bridge {
             let mut state = lock(&shared);
             state.phase = BridgePhase::Listening;
         }
+        // 描述文件路径含用户名（`%LOCALAPPDATA%`），只记发布结果不记路径
+        // （LOGGING.md 隐私红线）。
         note(format!(
             "rc003_bridge phase=listening port={port} descriptor={}",
-            file.as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "none".to_string())
+            if file.is_some() { "published" } else { "none" }
         ));
 
         let bridge_sender = sender.clone();

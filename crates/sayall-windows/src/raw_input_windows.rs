@@ -48,6 +48,12 @@ const GIDC_REMOVAL: u32 = 2;
 /// 定时审计以"当前枚举结果是否仍包含绑定路径"为判据，弥补通知的漏失。
 const BINDING_AUDIT_TIMER_ID: usize = 0x5A11;
 const BINDING_AUDIT_INTERVAL_MS: u32 = 10_000;
+/// 报告流日志的间隔阈值：只有首条或距上一条 ≥ 5 秒时才记一行。
+///
+/// 设备在位（`binding_present=true`）不等于报告还在到。2026-11-15 现场首次
+/// 语音后设备节点仍在枚举里，但 `raw_event_count` 永不增长；这一行是下一次
+/// 拉日志时区分“用户没按键”与“报告流停了 N 秒后恢复/从未恢复”的直接证据。
+const REPORT_FLOW_LOG_GAP: Duration = Duration::from_secs(5);
 /// 遥控器 HID 接口缺失时给用户看的说明（启动路径与审计路径共用同一份文案，
 /// 避免两处各写一份而逐渐不一致）。
 const AWAITING_DEVICE_MESSAGE: &str =
@@ -262,6 +268,11 @@ struct ListenerContext {
     /// 只用于把日志压成**边沿**（设备一直在位就静默），避免 10 秒一次的审计把
     /// 诊断日志刷满（LOGGING.md「状态未变化不重复刷」）。
     binding_present: bool,
+    /// 最近一条**被接受**的遥控器报告时刻（2026-11-15）。
+    ///
+    /// 只用于报告流诊断：设备节点在位不代表报告还在到。`None` = 监听器启动后
+    /// 还没收到过报告；间隔 ≥ `REPORT_FLOW_LOG_GAP` 时落一行。
+    last_report_at: Option<Instant>,
 }
 
 fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
@@ -406,9 +417,9 @@ fn run_listener(
         Err(DevicePathError::Ambiguous(count)) => {
             let first =
                 normalize_device_path(paths.first().map(String::as_str).unwrap_or_default());
+            // 不打印候选路径：HID 路径含设备实例身份（LOGGING.md 隐私红线）。
             crate::ble::gatt_note(format!(
-                "raw_input binding_initial action=ambiguous_pick selected_path={first} \
-                 matched_device_count={count}"
+                "raw_input binding_initial action=ambiguous_pick matched_device_count={count}"
             ));
             first
         }
@@ -421,6 +432,7 @@ fn run_listener(
             remote_voice_f5_pressed: false,
             // 启动时就绑定成功 = 设备此刻在位；空路径是 Awaiting，等接口出现。
             binding_present: !selected_path.is_empty(),
+            last_report_at: None,
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -438,9 +450,9 @@ fn run_listener(
     }
     // 启动时的绑定结论要留痕：后续所有 binding_audit 记录都以此为基准，
     // 没有这一条就无法判断"是从未绑上"还是"绑上后掉了"（2026-09-18）。
+    // 只记数量与相位；路径含设备实例身份，按 LOGGING.md 不落盘。
     crate::ble::gatt_note(format!(
-        "raw_input binding_initial selected_path={selected_path} matched_device_count={} \
-         phase={}",
+        "raw_input binding_initial matched_device_count={} phase={}",
         paths.len(),
         if selected_path.is_empty() {
             "awaiting"
@@ -472,7 +484,7 @@ fn run_listener(
         _ => {
             crate::ble::gatt_note(format!(
                 "raw_input binding_audit action=timer_armed interval_ms={BINDING_AUDIT_INTERVAL_MS} \
-                 selected_path={selected_path} binding_present={}",
+                 binding_present={}",
                 !selected_path.is_empty()
             ));
         }
@@ -737,8 +749,12 @@ fn audit_binding() {
                 let rebound_path = normalize_device_path(&path);
                 // 换了还是没换？前者说明设备/实例真的变了，后者说明多候选里沿用了
                 // 旧绑定。两者的诊断含义完全不同，所以分开记（2026-09-18）。
+                // `had_previous` 必须赶在赋值前取：unbound 分支会清空 selected_path，
+                // 之后同一路径重新出现时 `kept_previous` 也是 false。只看 kept_previous
+                // 会把“同一实例掉线又回来”误记成“实例变了”（2026-11-15 评审）。
+                let had_previous = !context.selected_path.is_empty();
                 let kept_previous = rebound_path == context.selected_path;
-                let previous_path = context.selected_path.clone();
+                let path_changed = had_previous && !kept_previous;
                 context.selected_path = rebound_path;
                 context.binding_present = true;
                 let stale_remote_event_count = {
@@ -750,11 +766,17 @@ fn audit_binding() {
                 };
                 // 重新绑定后门控才重新具备归因来源。
                 key_gate::set_listener_active(true);
+                // 不打印路径：HID 路径含设备实例身份（LOGGING.md 隐私红线）。
+                // 三个布尔值保留排障所需的分流能力：
+                // - binding_changed = 这次重新绑定的路径与审计前不同（含“之前没有绑定”）；
+                // - previous_binding_present = 审计前是否有过绑定；
+                // - path_changed = 之前有绑定且路径真的换了（同一实例掉线又回来为 false）。
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=rebound kept_previous={kept_previous} \
-                     matched_device_count={candidate_count} stale_remote_event_count={stale_remote_event_count} \
-                     previous_path={previous_path} rebound_path={}",
-                    context.selected_path
+                     binding_changed={} previous_binding_present={had_previous} \
+                     path_changed={path_changed} matched_device_count={candidate_count} \
+                     stale_remote_event_count={stale_remote_event_count}",
+                    !kept_previous
                 ));
             }
             Err(crate::raw_input::DevicePathError::Missing) => {
@@ -763,7 +785,6 @@ fn audit_binding() {
                     return;
                 }
                 context.binding_present = false;
-                let previous_path = context.selected_path.clone();
                 context.selected_path.clear();
                 let stale_remote_event_count = {
                     let mut state = context.snapshot.lock().unwrap();
@@ -775,11 +796,11 @@ fn audit_binding() {
                 // 接口消失：让引擎释放按住状态，避免留下永远等不到配对的按下边沿。
                 let _ = context.engine.send(EngineMessage::DeviceRemoved);
                 key_gate::set_listener_active(false);
-                // 带上丢失的路径与陈旧报文计数：这是判断"按键失效是接口消失还是
-                // 报文被路径过滤丢弃"的关键一组数字（2026-09-18）。
+                // 带上陈旧报文计数：这是判断"按键失效是接口消失还是报文被路径过滤
+                // 丢弃"的关键数字（2026-09-18）。不打印丢失路径（LOGGING.md 隐私红线）。
                 crate::ble::gatt_note(format!(
                     "raw_input binding_audit action=unbound reason=device_missing \
-                     stale_remote_event_count={stale_remote_event_count} lost_path={previous_path}"
+                     stale_remote_event_count={stale_remote_event_count}"
                 ));
             }
             Err(crate::raw_input::DevicePathError::Ambiguous(count)) => {
@@ -791,8 +812,7 @@ fn audit_binding() {
                         context.snapshot.lock().unwrap().stale_remote_event_count;
                     crate::ble::gatt_note(format!(
                         "raw_input binding_audit action=ambiguous candidate_count={count} \
-                         stale_remote_event_count={stale_remote_event_count} kept_path={}",
-                        context.selected_path
+                         stale_remote_event_count={stale_remote_event_count}"
                     ));
                 }
             }
@@ -861,16 +881,24 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 };
                 // 只在第一次失配时写日志（计数的**开始时刻**才是定位线索；
                 // 后续每条都写会把诊断日志刷满，而这批报文的真实来源靠计数即可）。
+                // 不打印路径：HID 路径含设备实例身份（LOGGING.md 隐私红线）。
                 if first {
-                    let bound_path = context.selected_path.clone();
                     let binding_present = context.binding_present;
                     let phase = context.snapshot.lock().unwrap().phase;
+                    // 路径不能进日志；用两个布尔值保留同样的分流能力：
+                    // target_known=false 说明还没连任何一支，无法按地址判断；
+                    // target_known=true + address_matches_target=false = 报文来自另一支。
+                    let target = crate::remote_target::get();
+                    let address_matches_target = target
+                        .map(|address| crate::remote_target::matches_address(&normalized, address))
+                        .unwrap_or(false);
                     crate::ble::gatt_note(format!(
-                        "raw_input stale_remote_event first_seen bound_path={bound_path} \
-                         binding_present={binding_present} phase={phase:?} \
-                         event_path={normalized} \
+                        "raw_input stale_remote_event first_seen binding_present={binding_present} \
+                         phase={phase:?} target_known={} \
+                         address_matches_target={address_matches_target} \
                          hint=遥控器仍在发报文但路径与绑定不符（多候选时期最可能），\
-                         或绑定被审计清空后报文仍到达"
+                         或绑定被审计清空后报文仍到达",
+                        target.is_some()
                     ));
                 }
                 let _ = count;
@@ -886,7 +914,24 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
                 );
             }
         }
-        context.snapshot.lock().unwrap().raw_event_count += 1;
+        let raw_event_count = {
+            let mut state = context.snapshot.lock().unwrap();
+            state.raw_event_count += 1;
+            state.raw_event_count
+        };
+        // 报告流活性（2026-11-15）：设备节点在位不代表报告还在到。首条报告或
+        // 距上一条 ≥ REPORT_FLOW_LOG_GAP 时落一行，下一次拉日志就能把
+        // “用户没按键 / 报告流停了 N 秒后才恢复 / 从来没恢复”分开。
+        let now = Instant::now();
+        if let Some(gap_ms) =
+            crate::raw_input::report_flow_gap_ms(context.last_report_at, now, REPORT_FLOW_LOG_GAP)
+        {
+            crate::ble::gatt_note(format!(
+                "raw_input report_flow first={} gap_ms={gap_ms} raw_event_count={raw_event_count}",
+                gap_ms == 0
+            ));
+        }
+        context.last_report_at = Some(now);
 
         if header.dwType == RIM_TYPEKEYBOARD.0 {
             if body.len() < size_of::<RAWKEYBOARD>() {
