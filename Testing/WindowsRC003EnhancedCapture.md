@@ -551,7 +551,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[AGENT-REFRESH]` | `phase=requested\|completed`、`mode=shared_device_node`（共享宿主）；completed 可带 `terminal_result=skipped reason=host_scan_failed\|already_attempted_once\|rc003_members_not_one\|shared_host_no_gadget\|shared_host_no_instance\|shared_host_bridge_down\|shared_host_cooldown`，失败带 `stage=recover_device_node\|inject` —— 同一代次组合只自动刷新一次；共享宿主只重建 RC003 节点、不结束宿主（2026-11-12） |
 | `[TOKEN]` | `source=file\|generated\|explicit` |
 | `[PREP]` | `dll` `action=reuse\|overwrite\|skip_copy_attaching_existing_tap` `reason` |
-| `[TAP]` / `[ATTACH]` | 宿主内已有 tap 的路径 / 接管决定（`skip_injection`） |
+| `[TAP]` / `[ATTACH]` | 宿主内已有 tap 的**文件名** `in_runtime_dir=true\|false` / 接管决定（`skip_injection`） |
 | `[DLL]` | `dll` `reused_existing` `sha256_verified` `copied` `plan` |
 | `[LISTEN]` | `addr` |
 | `[INJECT]` | `pid` `dll` `wait` `hmodule` `loaded` |
@@ -559,7 +559,7 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[HELLO]` | `auth` `pid` `agent` `mode` `lease_ms` |
 | `[CONFIG]` | `arm_sent` `mode_sent` `restore_sent` `targets_sent` `flush` `mode` `restore` `report_usages` `clear_usages` `canary` `ack=n/a` |
 | `[EDGE]` | `buttons` `raw=t=… usages=0x00F1,… buttons=… n=…` |
-| `[HB]` | agent 心跳：`mode` `report_usages` `clear_usages` `lease_ok` `stat{…}` |
+| `[HB]` | agent 心跳：`mode` `report_usages` `clear_usages` `lease_ok` `last_report_age_ms` `host_pid` `stat{reports_seen…}`。`reports_seen=0` 时 age 无意义；`reports_seen` 不涨但 `foreign_reports` 涨 = 宿主只收到别的设备；`reports_seen` 不涨而 `ioctl_calls` 涨 = 报告形状/IOCTL 变了 |
 | `[AGENT]` | agent 侧 `logLine` 通道；`targets:applied clear=… canary=…` 在这里 |
 | `[AGENT] msg=synth:frame …` | 语音键**逐次按下**的帧结果：`seen`（只说明看到按下，不构成结论）→ `replace ok to=0xe6` / `skip reason=…`；助手转成 `F ok` / `F skip <reason>` 发给主程序（2026-10-14 起，生效判据的输入） |
 | `F ok` / `F skip <reason>`（助手 → 主程序，桥） | 逐次帧结果的转发：只发 1000 ms 内**新鲜**结果，断线不补发（补发会把旧结果伪装成"刚发生的生效证据"）；`seen` 不转发 |

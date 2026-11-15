@@ -88,7 +88,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-12.voice-key-clear';
+var AGENT_BUILD = '2026-11-15.report-liveness';
 
 var TARGET_IOCTL = 0x80018483;
 /* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
@@ -194,6 +194,11 @@ var tLastRx = 0;              /* 最近一次收到下行数据的时刻（看�
 var everRenewed = false;      /* 本次连接是否收到过有效续约：鉴权判定不能用 lastRenewAt 代替 */
 var authFailures = 0;         /* 连续鉴权失败次数（渐进退避） */
 var lastPumpAt = 0;           /* 最近一次读泵真正读到数据的时刻（停顿探针） */
+/* 最近一次看到**形状匹配的 HID 报告**的时刻（2026-11-15）。与 target_hits /
+   synth_hits 的区别：它不看 usage、不看来源，只回答"宿主里还收得到报告吗"。
+   现场首次语音后设备节点仍在、但所有 usage 计数都不动，这个时间戳是唯一能
+   区分"用户没按键"与"报告流已经停了"的判据。 */
+var lastReportAt = 0;
 var lastHeartbeatAt = 0;      /* 上一次 heartbeat 执行的时刻（间隔探针） */
 var lastStallLogAt = 0;       /* stall 日志限流 */
 var retryNotBefore = 0;       /* 连接重试的最早时刻（鉴权失败后拉长退避） */
@@ -203,6 +208,9 @@ var tReady = Date.now();
 
 var stat = {
   ioctl_calls: 0,
+  /* 形状匹配（IOCTL + 8/9 字节 + report_id=0x01）的 HID 报告总数。
+     不计 usage/来源，专门用于报告流活性（2026-11-15 现场）。 */
+  reports_seen: 0,
   target_hits: 0,
   /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。
      语音键 0x003E 是产品路径的 clear-only 目标，不算哨兵键。 */
@@ -919,6 +927,11 @@ function installHook() {
         if (outPtr.readU8() !== REPORT_ID) return;
         if (args[0] === null || args[0].isNull()) return;
 
+        /* 2026-11-15：报告流活性先于来源/usage 判定——只看“宿主还收得到这份报告吗”。
+           设备节点在位、心跳与租约全绿，但这里不涨，就是报告流断了。 */
+        lastReportAt = Date.now();
+        stat.reports_seen++;
+
         /* 2026-11-12：先按来源归属。活动来源（产生当前 DOWN 的那台设备）之外
            的报告一律不碰——尤其不能让它的一帧空报告/释放报告结束遥控器的长按。
            这里必须在 `this.hit = true` 之前早退：onLeave 只负责恢复我们改过的
@@ -1195,8 +1208,12 @@ function heartbeat() {
     hb_gap_ms: hbGap,
     pump_age_ms: pumpAge,
     ever_renewed: everRenewed,
+    /* 报告流活性（2026-11-15）：reports_seen=0 时 age 无意义（写 0）。
+       两者必须一起读：age 很小但 reports_seen 不涨 = 一直在看同一份旧报告。 */
+    last_report_age_ms: lastReportAt === 0 ? 0 : (Date.now() - lastReportAt),
     stat: {
       ioctl_calls: stat.ioctl_calls,
+      reports_seen: stat.reports_seen,
       target_hits: stat.target_hits,
       canary_hits: stat.canary_hits,
       voice_clear_hits: stat.voice_clear_hits,
