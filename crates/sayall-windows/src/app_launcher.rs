@@ -2367,6 +2367,12 @@ pub(crate) fn target_window_visibility(target: &str) -> Option<WindowVisibility>
     None
 }
 
+/// 空 AUMID 表示“只按 PID/安装目录兜底”，不能作为窗口身份匹配条件。
+#[cfg(windows)]
+fn non_empty_app_user_model_id(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
+}
+
 #[cfg(windows)]
 pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibility {
     use windows::Win32::Foundation::LPARAM;
@@ -2384,7 +2390,11 @@ pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibilit
                 pids_for_install_directory_family(resolved_path, app_user_model_id);
             let mut pids = preferred;
             pids.extend(fallback);
-            (pids, Some(app_user_model_id))
+            // 空 AUMID 不是“匹配所有窗口”的占位符：自定义 `.lnk` 走同目录兜底时
+            // 传入的就是空串（2026-11-16 探针实测）。若无条件转成 Some("")，
+            // `enum_visibility_proc` 会把所有空 AUMID 窗口（包括无线麦自己的
+            // Tauri Window）当成目标，飞书窗口还没出现时就会误报 foreground passed。
+            (pids, non_empty_app_user_model_id(app_user_model_id))
         }
     };
     if pids.is_empty() && app_user_model_id.is_none() {
@@ -2625,9 +2635,12 @@ mod win_impl {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let by_pid = context.pids.contains(&pid);
-        let by_identity = context.app_user_model_id.is_some_and(|value| {
-            window_app_user_model_id(hwnd).is_some_and(|id| id.eq_ignore_ascii_case(value))
-        });
+        let by_identity = context
+            .app_user_model_id
+            .filter(|value| !value.is_empty())
+            .is_some_and(|value| {
+                window_app_user_model_id(hwnd).is_some_and(|id| id.eq_ignore_ascii_case(value))
+            });
         if !(by_pid || by_identity) || !eligible_window_without_logging(hwnd) {
             return BOOL::from(true);
         }
@@ -4693,6 +4706,18 @@ pub(crate) mod tests {
                 "{key}: family window not visible to target_window_visibility"
             );
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn empty_family_aumid_is_not_identity_selector() {
+        // 自定义 .lnk 的同目录兜底传空 AUMID；空串必须退化为“只按 PID 匹配”，
+        // 不能变成匹配所有空 AUMID 窗口（会误中无线麦自己的 Tauri Window）。
+        assert_eq!(non_empty_app_user_model_id(""), None);
+        assert_eq!(
+            non_empty_app_user_model_id("Microsoft.WindowsCalculator"),
+            Some("Microsoft.WindowsCalculator")
+        );
     }
 
     #[test]

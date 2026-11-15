@@ -67,3 +67,20 @@
 - 已知边界：
   1. 飞书没有 AUMID（实测 `GetApplicationUserModelId` 返回 15703），托盘图标也没有公开坐标；只能走单实例启动/窗口置前，约 250 ms，无法达到 QQ/微信直接托盘消息的即时性，不改用私有 IPC 或 UIA 托盘飞窗。
   2. 聚焦档案不完整不再阻塞打开；要恢复“聚焦已记录输入框”仍需用户在设置里重新学习。
+
+## 2026-11-16 追加：飞书“偶尔没到最前台”的假阳性
+
+- 用户反馈：安装 `c5442c2` 后仍出现过一次飞书没有到最前台。
+- 证据：
+  - 用户日志中 13 次飞书打开的 `show_and_force_foreground` 全部是 `class=Chrome_WidgetWin_1 terminal_result=passed target_result=foreground_observed`；失败那次没有留下 failed 记录，说明是**提前误判成功**，不是置前被拒绝。
+  - 本地探针反复隐藏飞书主窗口后走生产 `activate_or_launch(<飞书 .lnk>)`：修复前日志出现 `show_and_force_foreground ... class=Tauri Window ... terminal_result=passed`，随后 `phase=foreground_after_launch terminal_result=passed`，但探针读到飞书成为前台是在约 100 ms 之后；即先把**无线麦自己的 Tauri Window** 当成了飞书窗口。
+- 根因：自定义 `.lnk` 的 `InstallDirectoryFamily` 兜底传入空 AUMID；`window_visibility` 把空串无条件包成 `Some("")`，`enum_visibility_proc` 的 `by_identity` 便匹配**所有 AUMID 为空的窗口**（包括无线麦自己的 Tauri Window）。飞书窗口隐藏或尚未创建时，`largest_visible` 选中 Tauri Window，`foreground_after_custom_launch` 对它置前并返回成功，飞书只能依赖自身启动时抢前台；抢不到就表现为“偶尔没到最前台”。
+- 修复：
+  - `window_visibility` 的 `InstallDirectoryFamily` 用 `non_empty_app_user_model_id` 把空 AUMID 转为 `None`，只按 PID/安装目录匹配；
+  - `enum_visibility_proc` 再过滤一次空 AUMID，避免任何调用方把空串当身份选择器；
+  - 新增单测 `empty_family_aumid_is_not_identity_selector`。
+- 验证：
+  - 修复前探针：`class=Tauri Window` 假阳性，飞书在前台检查中为 false。
+  - 修复后探针：连续 8/8 轮隐藏飞书后打开，`show_and_force_foreground class=Chrome_WidgetWin_1`，飞书主窗口 `target_foreground`，无 `lost_at`；单次 430–570 ms（等待飞书真实窗口出现，之前的 ~300 ms 是假阳性提前返回）。
+  - `cargo test --workspace --quiet` passed（`sayall-windows` 565 passed / 17 ignored）；`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
+  - **`deferred`**：用户端再次复测；如果仍出现，需在失败时刻记录当时 `GetForegroundWindow` 的类名/PID，以区分“错误候选窗口”与“置前后被抢”。
