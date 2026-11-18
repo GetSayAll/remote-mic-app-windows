@@ -301,6 +301,70 @@ mod imp {
         fn RegCloseKey(key: Handle) -> i32;
     }
 
+    // 设备节点 PDO 名解析（2026-11-18 共享 WUDFHost 串扰修复）。
+    //
+    // 共享宿主里同时挂着遥控器和物理蓝牙键盘，agent 只按报告形状（IOCTL +
+    // 9 字节 + report_id 0x01）匹配，物理键盘的方向键/回车会与 RC003 的目标
+    // usage 完全重合 → 被当成遥控器上报（方向键变鼠标移动）。判据必须是
+    // **设备身份**：把 RC003 及其 HID 子节点的 PDO 对象名（`\Device\000002xx`）
+    // 下发给 agent，由它按 `NtQueryObject` 得到的来源名放行/拒绝。
+    //
+    // 用 cfgmgr32 而不是 SetupAPI：无需建设备信息集，两个调用即可拿属性。
+    #[link(name = "cfgmgr32")]
+    extern "system" {
+        fn CM_Locate_DevNodeW(devinst: *mut u32, instance: *const u16, flags: u32) -> u32;
+        fn CM_Get_DevNode_PropertyW(
+            devinst: u32,
+            key: *const DevPropKey,
+            ty: *mut u32,
+            buf: *mut u8,
+            size: *mut u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct DevPropGuid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct DevPropKey {
+        fmtid: DevPropGuid,
+        pid: u32,
+    }
+
+    // 与 Windows SDK `devpkey.h` 逐字段一致（GUID 字面量按内存布局拆开写）。
+    const DEVPKEY_DEVICE_PDO_NAME: DevPropKey = DevPropKey {
+        fmtid: DevPropGuid {
+            data1: 0xa45c_254e,
+            data2: 0xdf1c,
+            data3: 0x4efd,
+            data4: [0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0],
+        },
+        pid: 16,
+    };
+    const DEVPKEY_DEVICE_CHILDREN: DevPropKey = DevPropKey {
+        fmtid: DevPropGuid {
+            data1: 0x4340_a6c5,
+            data2: 0x93fa,
+            data3: 0x4706,
+            data4: [0x97, 0x2c, 0x7b, 0x64, 0x80, 0x08, 0xa5, 0xa7],
+        },
+        pid: 9,
+    };
+    const CR_SUCCESS: u32 = 0;
+    const CR_BUFFER_SMALL: u32 = 0x1A;
+    const DEVPROP_TYPE_STRING: u32 = 0x12;
+    const DEVPROP_TYPE_STRING_LIST: u32 = 0x13;
+    /// 属性缓冲上界：PDO 名 / 子节点列表都是几十字节，8KB 已远超需要，
+    /// 同时挡住异常长度（属性值来自内核，仍按不可信长度处理）。
+    const MAX_DEVPROP_BYTES: u32 = 8192;
+
     #[link(name = "shell32")]
     extern "system" {
         fn IsUserAnAdmin() -> i32;
@@ -1685,6 +1749,159 @@ mod imp {
         }
         unsafe { RegCloseKey(root) };
         Ok(scan)
+    }
+
+    /// 读一个设备节点属性。两次调用：第一次拿长度（返回 `CR_BUFFER_SMALL`），
+    /// 第二次读内容。缓冲区按 `u16` 词分配，保证 UTF-16 的 2 字节对齐。
+    fn devnode_property(devinst: u32, key: &DevPropKey) -> Option<(u32, Vec<u16>)> {
+        let mut ty: u32 = 0;
+        let mut size: u32 = 0;
+        let rc = unsafe {
+            CM_Get_DevNode_PropertyW(devinst, key, &mut ty, std::ptr::null_mut(), &mut size, 0)
+        };
+        if rc != CR_SUCCESS && rc != CR_BUFFER_SMALL {
+            return None;
+        }
+        if size == 0 || size > MAX_DEVPROP_BYTES {
+            return None;
+        }
+        let words = (size as usize + 1) / 2;
+        let mut buf = vec![0u16; words];
+        let rc = unsafe {
+            CM_Get_DevNode_PropertyW(
+                devinst,
+                key,
+                &mut ty,
+                buf.as_mut_ptr() as *mut u8,
+                &mut size,
+                0,
+            )
+        };
+        if rc != CR_SUCCESS {
+            return None;
+        }
+        buf.truncate(size as usize / 2);
+        Some((ty, buf))
+    }
+
+    fn locate_devnode(instance_id: &str) -> Option<u32> {
+        let wide = to_wide(instance_id);
+        let mut devinst: u32 = 0;
+        // CM_LOCATE_DEVNODE_NORMAL = 0；不强求设备处于启动状态。
+        let rc = unsafe { CM_Locate_DevNodeW(&mut devinst, wide.as_ptr(), 0) };
+        (rc == CR_SUCCESS).then_some(devinst)
+    }
+
+    /// 拆 `DEVPROP_TYPE_STRING` / `DEVPROP_TYPE_STRING_LIST`（后者是 NUL 分隔、
+    /// 双 NUL 结尾的列表）。空项丢弃。
+    fn devprop_strings(ty: u32, words: &[u16]) -> Vec<String> {
+        if ty != DEVPROP_TYPE_STRING && ty != DEVPROP_TYPE_STRING_LIST {
+            return Vec::new();
+        }
+        words
+            .split(|&w| w == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf16_lossy(part))
+            .collect()
+    }
+
+    fn devnode_pdo_names(devinst: u32) -> Vec<String> {
+        let Some((ty, words)) = devnode_property(devinst, &DEVPKEY_DEVICE_PDO_NAME) else {
+            return Vec::new();
+        };
+        devprop_strings(ty, &words)
+    }
+
+    fn devnode_children(devinst: u32) -> Vec<String> {
+        let Some((ty, words)) = devnode_property(devinst, &DEVPKEY_DEVICE_CHILDREN) else {
+            return Vec::new();
+        };
+        devprop_strings(ty, &words)
+    }
+
+    /// 统一来源名比较形式：小写、去掉 `\??\` 前缀。agent 侧用同一规则，
+    /// 两侧必须一致（`agent_logic_test.mjs` 钉住 agent 那半边）。
+    fn normalize_device_object_name(name: &str) -> String {
+        let lower = name.to_lowercase();
+        let trimmed = lower.strip_prefix(r"\??\").unwrap_or(&lower);
+        // `\??\Device\x` 去掉前缀后剩下 `Device\x`，要把前导分隔符补回来，
+        // 否则与 agent 侧（同样规则）比较时两边形式不一致。
+        if trimmed.starts_with('\\') {
+            trimmed.to_owned()
+        } else {
+            format!("\\{trimmed}")
+        }
+    }
+
+    /// 该宿主的 RC003 设备 PDO 白名单（含 HID 子节点）。
+    ///
+    /// 只返回**设备对象名**，不落日志——`LOGGING.md` 把 HID 路径列为隐私红线，
+    /// 这里同样按敏感数据处理：日志只出现条数。
+    ///
+    /// 失败（注册表/CM 都读不到）时返回空列表 = agent 维持旧行为（fail-open），
+    /// 宁可保留串扰也不把遥控器整体关掉。
+    fn rc003_pdo_allowlist(host_pid: u32) -> Vec<String> {
+        let Ok(scan) = enum_hosts() else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for entry in scan
+            .entries
+            .iter()
+            .filter(|e| e.is_rc003 && (host_pid == 0 || e.pid == host_pid))
+        {
+            let Some(instance) = entry.rc003_instance_id.as_deref() else {
+                continue;
+            };
+            let Some(devinst) = locate_devnode(instance) else {
+                continue;
+            };
+            let mut push = |name: String| {
+                let normalized = normalize_device_object_name(&name);
+                if normalized.starts_with(r"\device\") && !out.contains(&normalized) {
+                    out.push(normalized);
+                }
+            };
+            for name in devnode_pdo_names(devinst) {
+                push(name);
+            }
+            // HID 服务节点本身完成 BLE 报告 IOCTL；其 HID 子节点才是键盘报告
+            // 的实际来源。两层都放行，避免把层数写死（不同 Windows 版本不一）。
+            for child in devnode_children(devinst) {
+                let Some(child_inst) = locate_devnode(&child) else {
+                    continue;
+                };
+                for name in devnode_pdo_names(child_inst) {
+                    push(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// `targets` 命令的 PDO 白名单 JSON 数组。空列表写 `[]`（agent 视为
+    /// "未下发/不限制"）；字符串只含 `\Device\` 名，仍按 JSON 规则转义。
+    fn json_string_array(values: &[String]) -> String {
+        let mut out = String::from("[");
+        for (i, value) in values.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            for ch in value.chars() {
+                match ch {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    ch if (ch as u32) < 0x20 => {
+                        out.push_str(&format!("\\u{:04x}", ch as u32));
+                    }
+                    ch => out.push(ch),
+                }
+            }
+            out.push('"');
+        }
+        out.push(']');
+        out
     }
 
     /// 宿主成员行的分类文本（纯函数，自检覆盖）。
@@ -7856,6 +8073,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         restore: bool,
         canary: &[u16],
         targets: &BridgeCaptureTargets,
+        pdo_sources: &[String],
         synth: Option<(u16, u16)>,
     ) -> io::Result<()> {
         // 清空集合 = 上报集合 ∪ 语音键（clear-only） ∪ 哨兵键。语音键不产生映射边沿，
@@ -7881,10 +8099,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
             format!("{{\"type\":\"restore\",\"token\":\"{token}\",\"on\":{restore}}}\n"),
             format!(
-                "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+                "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}],\"pdo\":{}}}\n",
                 targets.generation,
                 usages_json(&targets.usages),
-                usages_json(&clear)
+                usages_json(&clear),
+                json_string_array(pdo_sources)
             ),
         ];
         let mut has_synth_line = false;
@@ -7931,6 +8150,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ("target_generation", targets.generation.to_string()),
             ("report_usages", usages_hex(&targets.usages)),
             ("clear_usages", usages_hex(&clear)),
+            /* 只报条数：PDO 名属隐私红线（见 `rc003_pdo_allowlist`）。 */
+            ("pdo_sources", pdo_sources.len().to_string()),
             (
                 "canary",
                 if canary.is_empty() {
@@ -7987,13 +8208,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         stream: &mut TcpStream,
         token: &str,
         targets: &BridgeCaptureTargets,
+        pdo_sources: &[String],
     ) -> io::Result<()> {
         let clear = clear_with_voice_key(&targets.usages);
         let line = format!(
-            "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+            "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}],\"pdo\":{}}}\n",
             targets.generation,
             usages_json(&targets.usages),
-            usages_json(&clear)
+            usages_json(&clear),
+            json_string_array(pdo_sources)
         );
         write_socket_line(stream, &line)
     }
@@ -8103,6 +8326,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
+        // RC003 的设备对象名白名单（2026-11-18 共享宿主串扰）。每条连接解析一次：
+        // 设备重枚举会换 PDO 名，但那时 agent 也会重连（助手侧据此重建连接）。
+        let pdo_sources = rc003_pdo_allowlist(SERVED_HOST_PID.load(Ordering::Relaxed));
+        logger.kv(
+            "[PDO]",
+            &[
+                ("event", "allowlist_ready".into()),
+                ("sources", pdo_sources.len().to_string()),
+            ],
+        );
         let mut sent_targets: Option<BridgeCaptureTargets> = None;
         // 最近一次 targets 下发（含重发）的时刻。与 `sent_targets` 同置：
         // 只在写成功后一起更新，两者要么同时为 None、要么同时有值。
@@ -8137,7 +8370,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if let Some(bridge) = bridge {
                     let current = bridge.capture_targets();
                     if sent_targets.as_ref() != Some(&current) {
-                        if let Err(error) = send_dynamic_targets(&mut stream, token, &current) {
+                        if let Err(error) =
+                            send_dynamic_targets(&mut stream, token, &current, &pdo_sources)
+                        {
                             log_write_failure(logger, "dynamic_targets", &error);
                             return;
                         }
@@ -8211,7 +8446,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     resend_attempts,
                     wait.as_millis()
                 ));
-                if let Err(error) = send_dynamic_targets(&mut stream, token, sent) {
+                if let Err(error) = send_dynamic_targets(&mut stream, token, sent, &pdo_sources) {
                     log_write_failure(logger, "targets_resend", &error);
                     return;
                 }
@@ -8268,6 +8503,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 restore,
                                 canary,
                                 &targets,
+                                &pdo_sources,
                                 synth,
                             ) {
                                 log_write_failure(logger, "session_config", &error);
@@ -10300,7 +10536,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-11-15.report-liveness";
+    const AGENT_BUILD: &str = "2026-11-18.pdo-allowlist";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -10828,6 +11064,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 "BTHLEDevice",
                 "some-other-bluetooth-device"
             ));
+        }
+
+        #[test]
+        fn device_object_names_compare_case_insensitively_without_nt_prefix() {
+            // helper 与 agent 必须用同一形式比较来源名，否则白名单会被大小写
+            // 或 `\??\` 前缀拆散（判据失效 → 物理键盘方向键又被映射成鼠标）。
+            assert_eq!(
+                normalize_device_object_name(r"\Device\0000023E"),
+                r"\device\0000023e"
+            );
+            assert_eq!(
+                normalize_device_object_name(r"\??\Device\0000023e"),
+                r"\device\0000023e"
+            );
+        }
+
+        #[test]
+        fn pdo_allowlist_json_escapes_backslashes_and_quotes() {
+            let json = json_string_array(&[r"\Device\0000023e".to_string(), "a\"b".to_string()]);
+            assert_eq!(json, r#"["\\Device\\0000023e","a\"b"]"#);
+            assert_eq!(json_string_array(&[]), "[]");
         }
     }
 
