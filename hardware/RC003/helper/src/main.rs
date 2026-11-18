@@ -360,7 +360,10 @@ mod imp {
     const CR_SUCCESS: u32 = 0;
     const CR_BUFFER_SMALL: u32 = 0x1A;
     const DEVPROP_TYPE_STRING: u32 = 0x12;
-    const DEVPROP_TYPE_STRING_LIST: u32 = 0x13;
+    /// 列表类型 = 基础类型 | `DEVPROP_TYPEMOD_LIST(0x2000)`。实测
+    /// `DEVPKEY_Device_Children` 返回 **0x2012**，不是 0x13——按 0x13 判断会
+    /// 把子节点列表当成未知类型丢掉，白名单只剩父节点 PDO（2026-11-18 现场）。
+    const DEVPROP_TYPE_STRING_LIST: u32 = 0x2012;
     /// 属性缓冲上界：PDO 名 / 子节点列表都是几十字节，8KB 已远超需要，
     /// 同时挡住异常长度（属性值来自内核，仍按不可信长度处理）。
     const MAX_DEVPROP_BYTES: u32 = 8192;
@@ -11085,6 +11088,24 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             let json = json_string_array(&[r"\Device\0000023e".to_string(), "a\"b".to_string()]);
             assert_eq!(json, r#"["\\Device\\0000023e","a\"b"]"#);
             assert_eq!(json_string_array(&[]), "[]");
+        }
+
+        #[test]
+        fn children_property_list_type_is_0x2012() {
+            // 2026-11-18 现场：按 0x13 判断时子节点列表被丢掉，白名单只剩父节点。
+            let words: Vec<u16> = r"HID\Child"
+                .encode_utf16()
+                .chain([0u16, 0].into_iter())
+                .collect();
+            assert_eq!(
+                devprop_strings(DEVPROP_TYPE_STRING_LIST, &words),
+                vec![r"HID\Child".to_string()]
+            );
+            assert!(devprop_strings(0x13, &words).is_empty());
+            assert_eq!(
+                devprop_strings(DEVPROP_TYPE_STRING, &[b'X' as u16, 0]),
+                vec!["X".to_string()]
+            );
         }
     }
 
