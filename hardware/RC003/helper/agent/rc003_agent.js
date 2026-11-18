@@ -92,7 +92,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-18.host-verdict';
+var AGENT_BUILD = '2026-11-18.host-verdict-r2';
 
 var TARGET_IOCTL = 0x80018483;
 /* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
@@ -289,23 +289,14 @@ var clearUsages = [];
 var targetGeneration = 0;
 /* 来源设备白名单（2026-11-18）：RC003 及其 HID 子节点的 `\Device\...` 对象名。
    共享 WUDFHost 里的物理蓝牙键盘与遥控器报告形状完全相同（report_id 0x01、
-   同一 IOCTL），只按 usage 匹配时，键盘的方向键/回车恰好落在目标集合里 → 被
+   同一 IOCTL），只按 usage 匹配时，键盘的方向键/回车恰好落在目标集合里 →
    当成遥控器上报（方向键变鼠标移动）。空数组 = 助手没下发/解析失败，保持旧
-   行为（fail-open），绝不因为白名单缺失把遥控器整体关掉。 */
+   行为（fail-open），绝不因为白名单缺失把遥控器整体关掉。
+
+   注意：本钩子里的真实来源是宿主自己的反射控制设备名
+   （`\Device\UmdfCtrlDev-{GUID}`，同宿主所有设备共用），设备 PDO 名对不上，
+   所以助手已不再下发非空白名单；机制保留给能按名字区分的宿主形态。 */
 var targetPdos = [];
-
-/* 已被外拒的来源名（最多留 4 个，一次性排错日志用）。 */
-var rejectedNames = [];
-
-/* 报告原样采样（最多 24 帧）：确认某个按键（如返回 0x00F1）是否真的出现在
-   宿主侧报告里。只记句柄值与 9+8 字节内容，不含设备身份。 */
-var reportSamples = 0;
-
-function hexBytes(u8) {
-  var s = '';
-  for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
-  return s;
-}
 
 /* ------------------------------------------------------- 编解码与传输 */
 
@@ -613,9 +604,6 @@ function handleCommand(line) {
     sendLine({ type: 'targets_ack', t: Date.now(), generation: targetGeneration, usages: reportUsages });
     logLine('targets:applied generation=' + targetGeneration + ' report=' + usagesHex(reportUsages)
       + ' clear=' + usagesHex(clearUsages) + ' pdo=' + targetPdos.length);
-    /* 2026-11-18：白名单必须能和真实来源名对上，否则全量外拒。只记前 4 个
-       设备对象名（形如 `\device\00000xxx`，不含设备身份），一次性排错用。 */
-    if (targetPdos.length > 0) logLine('targets:pdo_names ' + targetPdos.slice(0, 4).join(' '));
     return;
   }
   /* 语音键热键合成配置。护栏：from 必须是语音键、to 必须是已实测映射的
@@ -1014,28 +1002,12 @@ function installHook() {
            这里必须在 `this.hit = true` 之前早退：onLeave 只负责恢复我们改过的
            缓冲区，异源报告我们一个字节都没动。 */
         var source = sourceKeyOf(args[0]);
-        /* 2026-11-18 排错采样：按键（尤其返回 0x00F1）是否真的出现在宿主报告里。 */
-        if (reportSamples < 24) {
-          reportSamples++;
-          var sampleRaw = new Uint8Array(outPtr.readByteArray(9));
-          logLine('report_sample h=' + args[0].toString()
-            + ' in=' + hexBytes(inBytes) + ' out=' + hexBytes(sampleRaw));
-        }
         /* 2026-11-18：来源白名单早于归属判定。共享宿主里的物理键盘报告形状完全
            匹配（同一 IOCTL + report_id 0x01），方向键/回车与 RC003 的 usage 重合；
            没有这道检查时它会认领 activeSource 并被当成遥控器上报（方向键→鼠标移动）。
            仍必须在 `this.hit = true` 之前早退：这份报告我们一个字节都不改。 */
         if (!sourceAllowed(source)) {
           stat.foreign_pdo++;
-          /* 2026-11-18：只记前 4 个不同的来源名（`\device\00000xxx` 形式的
-             设备对象名），用来核对白名单是否真的命中；不含 VID/PID/序列号。 */
-          if (rejectedNames.length < 4) {
-            var rn = normalizeDeviceName(source);
-            if (rejectedNames.indexOf(rn) < 0) {
-              rejectedNames.push(rn);
-              logLine('source:not_rc003 name=' + rn + ' n=' + stat.foreign_pdo);
-            }
-          }
           if (stat.foreign_pdo <= 5 || stat.foreign_pdo % 100 === 0) {
             logLine('source:not_rc003 n=' + stat.foreign_pdo);
           }
