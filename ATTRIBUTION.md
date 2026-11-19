@@ -42,6 +42,17 @@
   官方 API 语义：
   https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowtextlengthw 。
 
+## 托盘图标直接唤回（Electron）
+
+- 2026-11-15：参考 Electron 主线 `shell/browser/ui/win/notify_icon_host.cc` 与
+  `notify_icon.cc`（2026-11-15 抓取；该行为自 2018 年起稳定，未固定到某个 Electron
+  版本）：`kNotifyIconMessage = WM_APP + 1`、`kBaseIconId = 2`，宿主窗口 `WndProc`
+  对 `WM_LBUTTONDOWN` 调用 `NotifyClicked`、对 `WM_LBUTTONDBLCLK` 调用
+  `NotifyDoubleClicked`。本仓库仅对窗口类 `Electron_NotifyIconHostWindow` 发送
+  同一窗口消息：先单击，应用未恢复时补一次双击（DimAgent 只处理双击），
+  避免打开 Windows 11 “显示隐藏的图标”浮层；不复制代码、不注入进程、不读私有数据。
+  来源：https://github.com/electron/electron/blob/main/shell/browser/ui/win/notify_icon_host.cc
+
 ## 遥控器电量显示
 
 - **GATT Battery Service 订阅（2026-09-27 起主路径）**：Bluetooth SIG 标准 Battery Service `0x180F` / Battery Level `0x2A19`（单字节百分比，`read|notify`），在既有 ATVV GATT 会话内通过公开 WinRT API `GetGattServicesForUuidWithCacheModeAsync` / `GetCharacteristicsForUuidWithCacheModeAsync` / `WriteClientCharacteristicConfigurationDescriptorAsync` / `ReadValueAsync` 订阅与读取，不新开 BLE 会话。规范来源：Bluetooth SIG GSS 规范（Battery Service 1.1 / Battery Level）。设备端支持 notify 的真机证据：`hardware/RC003/evidence/gatt-probe-listen1.log`（订阅后 0.5s 内推送 0x1E=30%）。
