@@ -94,7 +94,8 @@
   crate/集成测试，共 918 passed / 0 failed / 19 ignored）；
   `pnpm test`：696 passed / 10 skipped；`verify-frontend-embedded.ps1`：18/18 passed。
 - 本地测试包 v3：`artifacts/local-test/2026-11-15-shortcut-capture-suspension-v3/`，
-  SHA-256 `74466446a8f549f1394cc51ec3ee490f0f4261aecf4945eaba18d007edac7d61`；
+  源码提交 `4a245a6`（二进制内嵌同一修订），
+  SHA-256 `92b407edc032c41b3545b293ac350f9971ce785d380ddbd2846e99fbeebcedc4`；
   v1（`90750eee…`）与 v2（`dc2a8687…`）已被取代。
 - 真机：**deferred**。需要用户安装本地包后在重启后的内置键盘上复测
   Enter / L / 方向键 / F5，并确认外接键盘与遥控器原有功能不受影响。
