@@ -85,6 +85,6 @@
   - 修复前探针：`class=Tauri Window` 假阳性，飞书在前台检查中为 false。
   - 修复后探针：连续 8/8 轮隐藏飞书后打开，`show_and_force_foreground class=Chrome_WidgetWin_1`，飞书主窗口 `target_foreground`，无 `lost_at`；单次 430–570 ms（等待飞书真实窗口出现，之前的 ~300 ms 是假阳性提前返回）。
   - `focus_missing_config_probe` 实际路径：`recorded_element` 无 `recorded` 时 `result=Ok(())`，日志 `open_app_focus_recorded_element phase=skipped reason=not_configured`。
-  - `cargo test --workspace --quiet` passed（`sayall-windows` 568 passed / 17 ignored）；`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
-  - 本地测试包（2026-11-16，含评审补强）：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`，SHA-256 `B41617E4ED08DAA770B47331A7DF446784F38EF5857A924E8CA4974FD129F5BE`；安装后 app exe SHA-256 `894559182AC2823B8D834BE88B53880C4AC678C542D9ED09A152C82FD7C40D7A`，二进制含 `2a0ee83`。本次构建时工作树无 RC001 HID 变更。
+  - 干净 worktree `fff7ac4`：`cargo fmt --all -- --check` passed；`cargo test -p sayall-windows --lib` 566 passed / 17 ignored；release NSIS 包构建 passed。主工作树另有并发未提交改动，未进入本包。
+  - 本地测试包（2026-11-19，评审 P2 补强）：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`，SHA-256 `E26945E1756E82A7A560FB1369223090C2ED8874664D0D072CF940A96EF9B622`；安装后 app exe SHA-256 `4EEE8A66995B0CBCFE3307EF2940703C0D0EAD16B9FF6247707804B4027BE298`，二进制含 `fff7ac4`。本包由 `.worktree/p2-clean` 干净工作树构建，不含主工作树的并发 Alt+Tab 未提交改动。
   - **`deferred`**：用户端再次复测；如果仍出现，需在失败时刻记录当时 `GetForegroundWindow` 的类名/PID，以区分“错误候选窗口”与“置前后被抢”。
