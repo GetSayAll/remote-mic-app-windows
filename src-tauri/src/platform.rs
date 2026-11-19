@@ -142,6 +142,8 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         }
     }
     fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
+    /// 快捷键录入期间临时暂停增强捕获的报告层清键；fail-open，非 Windows 为 no-op。
+    fn set_shortcut_capture_suspension(&self, _suspended: bool) {}
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
     fn subscribe_button_edges(&self, callback: sayall_windows::button_mapping::ButtonEdgeCallback);
     fn subscribe_button_gestures(
@@ -450,6 +452,10 @@ impl PlatformRuntime for WindowsPlatform {
         // 翻转 mappings.enabled 却不 store 原子量，set_button_mappings 读到恒为
         // false 的原子量，目标集永远为空，按键边沿全部被丢弃。
         WindowsPlatform::set_enhanced_capture_enabled(self, enabled)
+    }
+
+    fn set_shortcut_capture_suspension(&self, suspended: bool) {
+        WindowsPlatform::set_shortcut_capture_suspension(self, suspended)
     }
 
     fn shutdown_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {

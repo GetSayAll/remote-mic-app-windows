@@ -799,7 +799,29 @@ pub(crate) fn apply_enhanced_capture_state(
     enabled: bool,
 ) {
     enhanced_capture_enabled.store(enabled, Ordering::Relaxed);
-    rc003_bridge.set_capture_targets(enabled, button_mapping.mappings().mapped_mask());
+    let effective =
+        effective_enhanced_capture(enabled, SHORTCUT_CAPTURE_SUSPENDED.load(Ordering::Relaxed));
+    rc003_bridge.set_capture_targets(
+        effective,
+        if effective {
+            button_mapping.mappings().mapped_mask()
+        } else {
+            0
+        },
+    );
+}
+
+/// 快捷键录入会话期间临时暂停增强捕获（报告层清键）。
+///
+/// 录入时用户在前台配置快捷键，遥控器并不参与；此时必须让内置键盘/外接键盘的
+/// 所有按键原样到达低级键盘钩子。否则增强捕获 agent 可能把同一 `WUDFHost` 里
+/// 笔记本键盘的 Enter / 方向 / Home / 音量等目标 usage 当成遥控器按键清掉
+/// （2026-11-15 现场：内置键盘录入无反应，外接键盘正常，重启后复发）。
+static SHORTCUT_CAPTURE_SUSPENDED: AtomicBool = AtomicBool::new(false);
+
+/// 增强捕获实际是否应向报告层下发清键目标：用户开着、且不在快捷键录入期间。
+fn effective_enhanced_capture(enabled: bool, suspended: bool) -> bool {
+    enabled && !suspended
 }
 
 impl WindowsPlatform {
@@ -922,8 +944,12 @@ impl WindowsPlatform {
         *lock(&self.voice_hold_hotkey) = hotkey.clone();
         #[cfg(windows)]
         {
-            let synth_to = hotkey.and_then(|chord| rc003_bridge::voice_synth_target(&chord));
-            self.rc003_bridge.set_voice_synth(synth_to);
+            // 快捷键录入期间只暂停、不重配：录入结束后由 set_shortcut_capture_suspension(false)
+            // 按当时的热键重新下发，避免用户改快捷键导致暂停被意外解除。
+            if !SHORTCUT_CAPTURE_SUSPENDED.load(Ordering::Relaxed) {
+                let synth_to = hotkey.and_then(|chord| rc003_bridge::voice_synth_target(&chord));
+                self.rc003_bridge.set_voice_synth(synth_to);
+            }
         }
     }
 
@@ -1250,6 +1276,44 @@ impl WindowsPlatform {
         );
         #[cfg(not(windows))]
         let _ = enabled;
+    }
+
+    /// 快捷键录入会话的临时暂停：**不改用户开关**，只让报告层在录入期间停止清键。
+    ///
+    /// 与 [`Self::set_enhanced_capture_enabled`] 同一套收敛点：恢复时重新下发当前
+    /// 映射的 `mapped_mask()`。录入结束、启动失败、页面取消或应用退出都必须成对
+    /// 调用 `false`；重复调用幂等。非 Windows 为 no-op。
+    pub fn set_shortcut_capture_suspension(&self, suspended: bool) {
+        SHORTCUT_CAPTURE_SUSPENDED.store(suspended, Ordering::Relaxed);
+        #[cfg(windows)]
+        {
+            // 语音键 F5 的报告层合成也一起暂停：否则录入 F5 时 agent 会把它替换成
+            // 右 Alt，前端只看到一个修饰键，永远等不到主键。恢复时按当时保存的
+            // 「按住说话快捷键」重新下发，避免覆盖用户在录入期间改的设置。
+            if suspended {
+                self.rc003_bridge.set_voice_synth(None);
+            }
+            let enabled = self.enhanced_capture_enabled.load(Ordering::Relaxed);
+            let effective = effective_enhanced_capture(enabled, suspended);
+            self.rc003_bridge.set_capture_targets(
+                effective,
+                if effective {
+                    self.button_mapping.mappings().mapped_mask()
+                } else {
+                    0
+                },
+            );
+            if !suspended {
+                let hotkey = (*lock(&self.voice_hold_hotkey)).clone();
+                let synth_to = hotkey.and_then(|chord| rc003_bridge::voice_synth_target(&chord));
+                self.rc003_bridge.set_voice_synth(synth_to);
+            }
+            crate::ble::gatt_note(format!(
+                "shortcut_capture_suspend phase=requested terminal_result=pending suspended={suspended} enhanced_capture_enabled={enabled} effective={effective}"
+            ));
+        }
+        #[cfg(not(windows))]
+        let _ = suspended;
     }
 
     pub fn button_mappings(&self) -> send_input::ButtonMappings {
@@ -2187,6 +2251,41 @@ mod tests {
     /// Issue #367：启动/迁移恢复输入工具只能写“按下时兜底切换”的目标，
     /// 不能留下 `ime_align_pending`——否则主窗口第一次失焦就会用
     /// `TF_IPPMF_FORSESSION` 切换整个桌面的输入法。
+    #[test]
+    fn shortcut_capture_suspension_only_changes_effective_targets() {
+        assert!(effective_enhanced_capture(true, false));
+        assert!(!effective_enhanced_capture(true, true));
+        assert!(!effective_enhanced_capture(false, false));
+        assert!(!effective_enhanced_capture(false, true));
+    }
+
+    #[test]
+    fn shortcut_capture_suspension_also_mutes_voice_synth() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub fn set_shortcut_capture_suspension")
+            .expect("suspension method must exist");
+        let end = source[start..]
+            .find("pub fn button_mappings")
+            .map(|offset| start + offset)
+            .expect("suspension method must end before button_mappings");
+        let block = &source[start..end];
+        assert!(block.contains("set_voice_synth(None)"));
+        assert!(block.contains("voice_synth_target"));
+
+        let hotkey_start = source
+            .find("pub fn set_voice_hold_hotkey")
+            .expect("voice hold hotkey setter must exist");
+        let hotkey_end = source[hotkey_start..]
+            .find("pub fn restore_voice_input_tool")
+            .map(|offset| hotkey_start + offset)
+            .expect("voice hold hotkey setter must end before restore_voice_input_tool");
+        assert!(
+            source[hotkey_start..hotkey_end].contains("SHORTCUT_CAPTURE_SUSPENDED"),
+            "changing the hotkey during capture must not re-enable the synth"
+        );
+    }
+
     #[test]
     fn restoring_voice_tool_clears_pending_alignment() {
         let tool = std::sync::Mutex::new(Some(VoiceInputTool::Wechat));

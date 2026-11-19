@@ -344,6 +344,8 @@ const busy = ref(false);
 const statusMessage = ref<string | null>(null);
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
+/** start 返回的 preheld 键尚未全部松开：后端吞键但不投递边沿，必须提示用户。 */
+const waitingPreheldRelease = ref(false);
 const captureDisplay = ref<string[]>([]);
 const safeCaptureMode = ref(false);
 const capturePressedKeys = new Set<KeyCode>();
@@ -1398,7 +1400,7 @@ async function beginShortcutCapture(): Promise<void> {
   captureStarting.value = true;
   statusMessage.value = null;
   try {
-    await startShortcutCapture();
+    const preheld = await startShortcutCapture();
     if (unmounted || requestId !== captureRequestId) {
       await stopShortcutCapture().catch(() => undefined);
       return;
@@ -1409,6 +1411,12 @@ async function beginShortcutCapture(): Promise<void> {
     pressedCaptureModifiers.clear();
     captureDisplay.value = [];
     capturingShortcut.value = true;
+    waitingPreheldRelease.value = preheld.length > 0;
+    if (waitingPreheldRelease.value) {
+      statusMessage.value = t(
+        "检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始",
+      );
+    }
     if (captureTimeout !== null) window.clearTimeout(captureTimeout);
     captureTimeout = window.setTimeout(() => {
       void finishShortcutCapture(t("录入已超时，请重新录入"));
@@ -1428,6 +1436,7 @@ async function finishShortcutCapture(message?: string): Promise<void> {
   captureRequestId += 1;
   captureStarting.value = false;
   capturingShortcut.value = false;
+  waitingPreheldRelease.value = false;
   if (captureTimeout !== null) window.clearTimeout(captureTimeout);
   captureTimeout = null;
   await stopShortcutCapture().catch(() => undefined);
@@ -1445,6 +1454,10 @@ function handleCaptureBlur(): void {
 
 function acceptCapturedKey(code: KeyCode, isPressed: boolean, repeat = false): void {
   if (!capturingShortcut.value) return;
+  if (waitingPreheldRelease.value) {
+    waitingPreheldRelease.value = false;
+    statusMessage.value = null;
+  }
   if (!isPressed) {
     capturePressedKeys.delete(code);
     if (MODIFIER_KEYS.has(code)) pressedCaptureModifiers.delete(code);
@@ -1777,6 +1790,8 @@ watch(rc003CaptureFailureRaw, (raw) => {
  * 这里不重复、也不把用户往遥控器侧引（这条链断在 PC 内部，现场已证伪按遥控器有用）。
  */
 const captureInactiveNote = computed(() =>
+  !capturingShortcut.value &&
+  !captureStarting.value &&
   shouldShowCaptureInactive({
     switchState: captureSwitchState.value,
     health: rc003CaptureHealth.value,
