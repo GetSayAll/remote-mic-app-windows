@@ -1453,47 +1453,55 @@ fn preset_process_running(app: &PresetApp) -> bool {
         || preset_aumid(app.id).is_some_and(|aumid| !pids_for_app_user_model_id(aumid).is_empty())
 }
 
-/// 记住“这个 exe 的托盘需要双击”：首次观察到单击失败、双击成功后才写入。
-/// 只影响按钮顺序，不写配置、不按应用名硬编码；进程重启后重新学习。
+/// 托盘手势偏好：只记录应用实际表现出的行为，不按应用名硬编码。
 #[cfg(windows)]
-static TRAY_DOUBLE_PREFERRED: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayGesturePreference {
+    Single,
+    Double,
+}
+
+/// 每个 exe 学到的托盘手势。进程重启后重新学习。
+///
+/// 关键安全边界：**未知 Electron 应用首次必须先等完整单击预算**，不能因为
+/// 单击回调稍慢就提前补双击。否则一个单击有效、恢复慢于 150 ms 的应用会收到
+/// 单击 + 双击，可能被双击回调切换显示状态。只有已经确认双击的 exe 才直接
+/// 走双击快速路径；单击成功过的 exe 也记录为 Single，后续仍按单击处理。
+#[cfg(windows)]
+static TRAY_GESTURE_PREFERENCE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, TrayGesturePreference>>,
 > = std::sync::OnceLock::new();
 
 #[cfg(windows)]
-fn tray_double_preferred(exe_names: &[&str]) -> bool {
-    let Some(key) = exe_names.first().map(|name| name.to_ascii_lowercase()) else {
-        return false;
-    };
-    TRAY_DOUBLE_PREFERRED
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+fn tray_gesture_preference(exe_names: &[&str]) -> Option<TrayGesturePreference> {
+    let key = exe_names.first()?.to_ascii_lowercase();
+    TRAY_GESTURE_PREFERENCE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
-        .map(|set| set.contains(&key))
-        .unwrap_or(false)
+        .ok()?
+        .get(&key)
+        .copied()
 }
 
 #[cfg(windows)]
-fn remember_tray_gesture(exe_names: &[&str], double: bool) {
+fn remember_tray_gesture(exe_names: &[&str], preference: TrayGesturePreference) {
     let Some(key) = exe_names.first().map(|name| name.to_ascii_lowercase()) else {
         return;
     };
-    let Ok(mut set) = TRAY_DOUBLE_PREFERRED
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+    let Ok(mut map) = TRAY_GESTURE_PREFERENCE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
     else {
         return;
     };
-    if double {
-        set.insert(key);
-    } else {
-        set.remove(&key);
-    }
+    map.insert(key, preference);
 }
 
 /// 先单击托盘；Electron 单击未唤回时补一次双击；学到双击后再优先双击。
 ///
 /// 2026-11-15 真机：QQ/WorkBuddy 单击就恢复；DimAgent 的托盘单击回调不显示窗口，
-/// 双击才显示。首次 DimAgent 打开会多等一次单击预算，之后直接双击，降低延时。
+/// 双击才显示。**未知 Electron 首次单击必须等满完整预算**，不能因为 150 ms 内
+/// 没看到窗口就补双击，否则单击有效但恢复较慢的应用会收到单击 + 双击。
 #[cfg(windows)]
 fn tray_restore_with_double_click(
     names: &[&str],
@@ -1501,14 +1509,12 @@ fn tray_restore_with_double_click(
     known_hidden: Option<isize>,
     hidden_max_area: i64,
 ) -> (crate::tray_icons::TrayInvokeResult, Option<isize>) {
-    let prefer_double = tray_double_preferred(exe_names);
+    let preference = tray_gesture_preference(exe_names);
     let mut first_result: Option<crate::tray_icons::TrayInvokeResult> = None;
 
-    if prefer_double {
+    if preference == Some(TrayGesturePreference::Double) {
         let double = crate::tray_icons::invoke_electron_tray_double_click(exe_names);
         if double.submitted {
-            // 已确认这个 exe 需要双击：直接等满正常预算。窗口通常几百毫秒内出现，
-            // 但不用 200 ms 短窗口，避免慢一点就误判失败并改发单击。
             if let Some(hwnd) = tray_restored_window(
                 known_hidden,
                 hidden_max_area,
@@ -1519,51 +1525,51 @@ fn tray_restore_with_double_click(
             }
             first_result = Some(double);
         }
-    } else {
-        let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
-        let quick_checks = if tray.method.starts_with("electron_") {
-            TRAY_QUICK_CHECKS
-        } else {
-            RELAUNCH_VISIBLE_CHECKS
-        };
-        if tray.submitted {
-            if let Some(hwnd) =
-                tray_restored_window(known_hidden, hidden_max_area, exe_names, quick_checks)
-            {
-                remember_tray_gesture(exe_names, false);
-                return (tray, Some(hwnd));
-            }
-        }
-        first_result = Some(tray);
-    }
-
-    if prefer_double {
         // 双击优先但没唤回：补一次单击，成功则把该 exe 切回单击优先。
-        let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
-        if tray.submitted {
+        let single = crate::tray_icons::invoke_tray_icon(names, exe_names);
+        if single.submitted {
             if let Some(hwnd) = tray_restored_window(
                 known_hidden,
                 hidden_max_area,
                 exe_names,
                 RELAUNCH_VISIBLE_CHECKS,
             ) {
-                remember_tray_gesture(exe_names, false);
+                remember_tray_gesture(exe_names, TrayGesturePreference::Single);
                 crate::ble::gatt_note(format!(
                     "app_launcher action=tray_retry gesture=single_click matched={} submitted={} method={} terminal_result=passed",
-                    tray.matched, tray.submitted, tray.method
+                    single.matched, single.submitted, single.method
                 ));
-                return (tray, Some(hwnd));
+                return (single, Some(hwnd));
             }
         }
-        return (
+        // 单击也失败时保留更有信息量的一次结果（避免把 matched=true 吞成 not_found）。
+        let result = if single.submitted || single.matched {
+            single
+        } else {
             first_result.unwrap_or(crate::tray_icons::TrayInvokeResult {
                 submitted: false,
                 method: "not_found",
                 matched: false,
-            }),
-            None,
-        );
+            })
+        };
+        return (result, None);
     }
+
+    // 未知或已知单击优先：先单击，且必须等满预算。单击成功立即返回（不会变慢）；
+    // 只有确实等不到窗口才补双击。Unknown 的完整等待就是防止误发双击的安全边界。
+    let tray = crate::tray_icons::invoke_tray_icon(names, exe_names);
+    if tray.submitted {
+        if let Some(hwnd) = tray_restored_window(
+            known_hidden,
+            hidden_max_area,
+            exe_names,
+            RELAUNCH_VISIBLE_CHECKS,
+        ) {
+            remember_tray_gesture(exe_names, TrayGesturePreference::Single);
+            return (tray, Some(hwnd));
+        }
+    }
+    first_result = Some(tray);
 
     // 单击优先但没唤回：Electron 补双击；成功后记住该 exe 需要双击。
     let first = first_result.unwrap_or(crate::tray_icons::TrayInvokeResult {
@@ -1588,7 +1594,7 @@ fn tray_restore_with_double_click(
                 if restored.is_some() { "passed" } else { "failed" }
             ));
             if restored.is_some() {
-                remember_tray_gesture(exe_names, true);
+                remember_tray_gesture(exe_names, TrayGesturePreference::Double);
             }
             return (double, restored);
         }
@@ -1742,9 +1748,6 @@ pub(crate) fn readback_hidden_window_shown_brief(hwnd: Option<isize>) -> bool {
 /// 回落到定点显示已知窗口的路径。
 const RELAUNCH_VISIBLE_CHECKS: u8 = 6;
 const APP_SELF_SHOWN_CHECKS: u8 = 3;
-/// Electron 单击通常 250 ms 内恢复；先用 200 ms 短窗口判断，避免 DimAgent
-/// 这类只处理双击的应用白等满 1.2 s 才补双击（2026-11-15 用户反馈“延时很大”）。
-const TRAY_QUICK_CHECKS: u8 = 1;
 const RELAUNCH_VISIBLE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 启动之后的**有界置前**预算：20 × 150 ms。
@@ -2373,6 +2376,23 @@ fn non_empty_app_user_model_id(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// 窗口是否属于目标：PID 命中，或**非空** AUMID 与窗口 AUMID 相等。
+///
+/// 单独抽出来是为了让空 AUMID 的回归测试覆盖真正的匹配谓词，而不是只测
+/// 一个转换函数；`enum_visibility_proc` 必须使用同一份逻辑。
+#[cfg(windows)]
+fn window_identity_matches(
+    by_pid: bool,
+    app_user_model_id: Option<&str>,
+    window_aumid: Option<&str>,
+) -> bool {
+    by_pid
+        || app_user_model_id
+            .filter(|value| !value.is_empty())
+            .zip(window_aumid)
+            .is_some_and(|(want, got)| got.eq_ignore_ascii_case(want))
+}
+
 #[cfg(windows)]
 pub(crate) fn window_visibility(selector: WindowSelector<'_>) -> WindowVisibility {
     use windows::Win32::Foundation::LPARAM;
@@ -2635,13 +2655,13 @@ mod win_impl {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let by_pid = context.pids.contains(&pid);
-        let by_identity = context
-            .app_user_model_id
-            .filter(|value| !value.is_empty())
-            .is_some_and(|value| {
-                window_app_user_model_id(hwnd).is_some_and(|id| id.eq_ignore_ascii_case(value))
-            });
-        if !(by_pid || by_identity) || !eligible_window_without_logging(hwnd) {
+        let window_aumid = window_app_user_model_id(hwnd);
+        if !super::window_identity_matches(
+            by_pid,
+            context.app_user_model_id,
+            window_aumid.as_deref(),
+        ) || !eligible_window_without_logging(hwnd)
+        {
             return BOOL::from(true);
         }
         let area = layout_size(hwnd)
@@ -4025,12 +4045,21 @@ pub(crate) mod tests {
     #[test]
     fn tray_gesture_preference_is_learned_per_exe() {
         let names = ["sayall-tray-gesture-test.exe"];
-        remember_tray_gesture(&names, false);
-        assert!(!tray_double_preferred(&names));
-        remember_tray_gesture(&names, true);
-        assert!(tray_double_preferred(&names));
-        remember_tray_gesture(&names, false);
-        assert!(!tray_double_preferred(&names));
+        remember_tray_gesture(&names, TrayGesturePreference::Single);
+        assert_eq!(
+            tray_gesture_preference(&names),
+            Some(TrayGesturePreference::Single)
+        );
+        remember_tray_gesture(&names, TrayGesturePreference::Double);
+        assert_eq!(
+            tray_gesture_preference(&names),
+            Some(TrayGesturePreference::Double)
+        );
+        remember_tray_gesture(&names, TrayGesturePreference::Single);
+        assert_eq!(
+            tray_gesture_preference(&names),
+            Some(TrayGesturePreference::Single)
+        );
     }
 
     #[cfg(windows)]
@@ -4718,6 +4747,17 @@ pub(crate) mod tests {
             non_empty_app_user_model_id("Microsoft.WindowsCalculator"),
             Some("Microsoft.WindowsCalculator")
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn empty_aumid_does_not_match_window_identity() {
+        // 直接覆盖 enum_visibility_proc 使用的匹配谓词，而不是只测转换函数。
+        assert!(!window_identity_matches(false, Some(""), Some("")));
+        assert!(!window_identity_matches(false, None, Some("")));
+        assert!(!window_identity_matches(false, Some("A"), Some("B")));
+        assert!(window_identity_matches(true, Some(""), Some("")));
+        assert!(window_identity_matches(false, Some("A"), Some("a")));
     }
 
     #[test]

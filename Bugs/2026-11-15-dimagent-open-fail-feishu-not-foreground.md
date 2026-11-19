@@ -53,14 +53,14 @@
   1. 单/双击统一路径先单击，再在已知隐藏窗口和面积兜底上各等一轮固定 1.2 s；DimAgent 单击无效，白白等待约 2.4 s。
   2. “打开应用”把**聚焦档案不完整**也当作打开失败；宿主因此不记录 `target_opened`，后续按键仍按旧目标/旧前景计划处理，表现为“没到最前台/不像 QQ 微信”。
 - 修复：
-  - `app_launcher.rs`：`tray_restored_window` 改为单轮 `checks` 轮询（`TRAY_QUICK_CHECKS=1`，约 200 ms），同一轮同时检查已知隐藏窗口与面积兜底；新增按 exe 的 `TRAY_DOUBLE_PREFERRED` 缓存，确认双击有效后直接走双击并保留完整 `RELAUNCH_VISIBLE_CHECKS` 预算。
+  - `app_launcher.rs`：`tray_restored_window` 改为单轮 `checks` 轮询，同一轮同时检查已知隐藏窗口与面积兜底；新增按 exe 的 `TrayGesturePreference`（Single/Double/Unknown）缓存。Unknown 和已知 Single 必须先等完整单击预算，只有已确认 Double 才直接走双击。2026-11-16 评审移除了 150 ms 快速单击窗口，避免单击有效但恢复较慢的 Electron 应用被误补双击。
   - `button_mapping.rs`：`RecordedElement` 档案缺少 `recorded` 时记录 `open_app_focus_recorded_element phase=skipped reason=not_configured` 并返回 `Ok(())`；聚焦任务提交失败记录 `phase=deferred reason=focus_service_unavailable`，也不再判打开失败；实际聚焦结果仍由异步 `focus_report` 记录。
   - 自定义 `.exe/.lnk` 显式启动不再发送预设 Alt，避免给不需要的前台解锁路径增加一次按键。
 - 验证：
-  - 临时探针（不提交）`dimagent_gesture_probe`：第一轮 323 ms，第二轮 59 ms；第二轮日志直接 `electron_tray_double_click_message`，无重试。首次打开仍有约 300 ms 的快速轮询成本。
+  - 临时探针（不提交）`dimagent_gesture_probe`：P2 修改后第一轮 1382 ms（Unknown 先等完整单击预算，避免误发双击），第二轮 72 ms（已学习 Double，直接双击）；比原来的 2.76 s 明显降低，且慢单击 Electron 应用不会再被误补双击。
   - 临时探针 `focus_missing_config_probe`：构造 `recorded_element` 且无 `recorded` 的飞书档案，结果 `result=Ok(())`；日志 `open_app_focus_recorded_element phase=skipped reason=not_configured`，同轮 `show_and_force_foreground terminal_result=passed`。
   - 飞书真实应用隐藏/后台 3/3 次到前台，进程数 8 → 8，未新起实例；单次约 250 ms（探针进程启动另计）。
-  - 单测 `tray_gesture_preference_is_learned_per_exe`、`recorded_focus_failure_does_not_fail_open_app` passed。
+  - 单测 `tray_gesture_preference_is_learned_per_exe`、`focus_submission_failure_does_not_fail_open_app`、`focus_step_failure_does_not_fail_open_app` passed。
   - `cargo test --workspace --quiet` passed（`sayall-windows` 564 passed / 17 ignored）；`cargo check -p sayall-windows-app --features runtime-simulation`、`cargo check --workspace`、`cargo fmt --all -- --check` passed。
   - 本地测试包（2026-11-15）：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`，SHA-256 `B44E6C07424944E8E5C6B98B39AD4186F6AF942EE9B44C6E8A4C832A334C98AC`；安装后 app exe SHA-256 `8D5EA2DD4FDF278D01EF447A1A0ED0D35A6E5478A525E370706BDF6223E9044E`（与 `target/release` 差 3 字节 bundle 标记），二进制含 `c5442c2`。本包按现有工作树构建，包含未提交的 RC001 HID 变更；这些变更未进入 `c5442c2`。
   - **`deferred`**：RC001/RC003 物理遥控器端到端、用户端安装包复测（包已安装，等待用户启动应用后复测托盘与飞书）。
@@ -78,12 +78,13 @@
 - 修复：
   - `window_visibility` 的 `InstallDirectoryFamily` 用 `non_empty_app_user_model_id` 把空 AUMID 转为 `None`，只按 PID/安装目录匹配；
   - `enum_visibility_proc` 再过滤一次空 AUMID，避免任何调用方把空串当身份选择器；
-  - 新增单测 `empty_family_aumid_is_not_identity_selector`。
+  - 新增单测 `empty_family_aumid_is_not_identity_selector`、`empty_aumid_does_not_match_window_identity`；后者直接覆盖 `enum_visibility_proc` 使用的匹配谓词。
+  - 评审 P2：`TrayGesturePreference` 改为 Single/Double/Unknown 三态；Unknown 与已知 Single 都等完整单击预算，只有已确认 Double 才直接双击，移除 150 ms 快速路径；新增 `tray_gesture_preference_is_learned_per_exe` 三态断言。
   - 评审补强：`launch_app` 成功后，`AppShortcut` 缺快捷键/注入失败、`RecordedPoint` 缺位置/解析失败、`AutoComposer` 聚焦服务不可用也统一走 `focus_outcome`，只记录 `open_app_focus...` 并返回 `Ok`；新增 `focus_submission_result`、`focus_outcome` 单测，避免同类“已打开但聚焦失败被判成打开失败”的路径残留。
 - 验证：
   - 修复前探针：`class=Tauri Window` 假阳性，飞书在前台检查中为 false。
   - 修复后探针：连续 8/8 轮隐藏飞书后打开，`show_and_force_foreground class=Chrome_WidgetWin_1`，飞书主窗口 `target_foreground`，无 `lost_at`；单次 430–570 ms（等待飞书真实窗口出现，之前的 ~300 ms 是假阳性提前返回）。
   - `focus_missing_config_probe` 实际路径：`recorded_element` 无 `recorded` 时 `result=Ok(())`，日志 `open_app_focus_recorded_element phase=skipped reason=not_configured`。
-  - `cargo test --workspace --quiet` passed（`sayall-windows` 565 passed / 17 ignored）；`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
+  - `cargo test --workspace --quiet` passed（`sayall-windows` 568 passed / 17 ignored）；`cargo fmt --all -- --check`、`cargo check --workspace`、`cargo check -p sayall-windows-app --features runtime-simulation` passed。
   - 本地测试包（2026-11-16，含评审补强）：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`，SHA-256 `B41617E4ED08DAA770B47331A7DF446784F38EF5857A924E8CA4974FD129F5BE`；安装后 app exe SHA-256 `894559182AC2823B8D834BE88B53880C4AC678C542D9ED09A152C82FD7C40D7A`，二进制含 `2a0ee83`。本次构建时工作树无 RC001 HID 变更。
   - **`deferred`**：用户端再次复测；如果仍出现，需在失败时刻记录当时 `GetForegroundWindow` 的类名/PID，以区分“错误候选窗口”与“置前后被抢”。
