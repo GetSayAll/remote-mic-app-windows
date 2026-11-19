@@ -727,7 +727,7 @@ mod imp {
                             "gadget",
                             format!("{} 0x{gadget_machine:04X}", machine_name(gadget_machine)),
                         ),
-                        ("image", normalize_display(Path::new(path))),
+                        ("image", display_file_name(Path::new(path))),
                     ],
                 );
                 arch_gate(INJECTOR_MACHINE, *target_machine, gadget_machine)
@@ -3479,8 +3479,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 fs::copy(gadget_src, &dll).map_err(|e| {
                     let mut s = format!(
                         "复制 Gadget 失败 {} -> {}: {e}",
-                        gadget_src.display(),
-                        dll.display()
+                        display_file_name(gadget_src),
+                        display_file_name(&dll)
                     );
                     if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
                         s.push_str(
@@ -5955,6 +5955,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 "ever_renewed",
                                 extract_bool(line, "ever_renewed").to_string(),
                             ),
+                            /* 2026-11-15 报告流活性：与 stat.reports_seen 一起读。
+                            reports_seen=0 时 age 恒为 0（无样本）。 */
+                            (
+                                "last_report_age_ms",
+                                extract_num(line, "last_report_age_ms")
+                                    .unwrap_or(0)
+                                    .to_string(),
+                            ),
+                            /* 2026-11-15：把服务宿主 pid 一并落盘，设备重新枚举后
+                            可以直接对比“助手服务的宿主”有没有跟着换。 */
+                            ("host_pid", target_pid.to_string()),
                             ("stat", stat),
                         ],
                     );
@@ -6534,7 +6545,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 std::process::exit(4);
             }
         };
-        logger.kv("[GADGET]", &[("src", normalize_display(&gadget_src))]);
+        logger.kv("[GADGET]", &[("src", display_file_name(&gadget_src))]);
         if let Err(e) = verify_gadget(&gadget_src, &logger) {
             logger.line(&format!("[STOP] {e}"));
             std::process::exit(6);
@@ -6632,22 +6643,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         ),
                     ],
                 );
-                for m in &found {
-                    logger.line(&format!(
-                        "    [TAP] path={}",
-                        normalize_display(Path::new(&m.path))
-                    ));
-                }
                 // 归属核对：只有"从我们的运行时目录加载起来的"那份才可能是我们注入的。
                 // 名字相同但路径在别处 → 别人（或别的工具）也注入了 frida-gadget，明确说出来，
                 // 免得把"接不上"归因成自己的 bug。
                 let root = args.runtime_dir.to_string_lossy().to_ascii_lowercase();
                 for m in &found {
+                    // 不打印完整路径（含用户名/安装目录）；文件名 + 是否在运行时目录 =
+                    // 排障需要的全部信息，具体是哪一份由 SHA-256 证明。
+                    logger.line(&format!(
+                        "    [TAP] path={} in_runtime_dir={}",
+                        display_file_name(Path::new(&m.path)),
+                        m.path.to_ascii_lowercase().starts_with(&root)
+                    ));
                     if !m.path.to_ascii_lowercase().starts_with(&root) {
                         logger.line(&format!(
                             "[WARN] 宿主里的 Gadget 模块不在我们的运行时目录下（{}），\
                              不是本助手注入的那一份；它的令牌必然对不上。",
-                            normalize_display(Path::new(&m.path))
+                            display_file_name(Path::new(&m.path))
                         ));
                     }
                 }
@@ -7037,7 +7049,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     &[
                         ("action", "skip_injection".into()),
                         ("reason", reason.into()),
-                        ("path", normalize_display(&prepared.dll)),
+                        ("path", display_file_name(&prepared.dll)),
                         (
                             "note",
                             "agent 会在 RECONNECT_MS 内自己连回来；连上后会补发 arm/mode/restore"
@@ -10044,6 +10056,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
     }
 
+    /// 日志里的文件身份：只保留文件名。
+    ///
+    /// 完整路径含用户名或安装目录（例如从下载目录直接运行的 Gadget），属
+    /// `LOGGING.md` 隐私红线；需要区分“哪一份二进制”时用 SHA-256——它已经在
+    /// `[VERIFY]` / `[DLL]` 里逐字记录，文件名足够回答“加载的是哪一个”。
+    fn display_file_name(p: &Path) -> String {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
     /// 默认 Gadget 位置：按顺序试若干候选，**并把选中的路径交给调用方记录**。
     /// 不打印路径的话，"找不到 / 找到的是另一个" 都会变成需要反查的谜题。
     ///
@@ -10082,14 +10106,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 架构单列一项检查与一行日志：SHA 已经隐含锁定架构，但把 machine 打进日志才能一眼
     /// 看出"手上这份是哪个架构"——Issue #206 的排查正是卡在缺这一行证据上。
     fn verify_gadget(path: &Path, logger: &Logger) -> Result<(), String> {
-        let bytes =
-            fs::read(path).map_err(|e| format!("读取 Gadget 失败 {}: {e}", path.display()))?;
+        let bytes = fs::read(path)
+            .map_err(|e| format!("读取 Gadget 失败 {}: {e}", display_file_name(path)))?;
         let digest = sha256_hex(&bytes);
         let machine = pe_machine_from_bytes(&bytes);
         logger.kv(
             "[VERIFY]",
             &[
-                ("file", normalize_display(path)),
+                ("file", display_file_name(path)),
                 ("size", bytes.len().to_string()),
                 ("sha256", digest.clone()),
                 ("expected", GADGET_SHA256.to_string()),
@@ -10276,7 +10300,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-11-12.voice-key-clear";
+    const AGENT_BUILD: &str = "2026-11-15.report-liveness";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -11565,6 +11589,21 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 with_var.starts_with("%ProgramData%") || with_var.is_empty(),
                 "{with_var}"
             );
+        }
+
+        #[test]
+        fn log_file_identity_never_carries_parent_paths() {
+            // 2026-11-15 现场：从下载目录直接运行的 Gadget 把安装目录写进了
+            // [GADGET] / [VERIFY]。文件名 + SHA-256 足够识别二进制，父路径不得落盘。
+            assert_eq!(
+                display_file_name(Path::new(r"D:\downloads\wireless mic\frida-gadget.dll")),
+                "frida-gadget.dll"
+            );
+            assert_eq!(
+                display_file_name(Path::new("frida-gadget.dll")),
+                "frida-gadget.dll"
+            );
+            assert_eq!(display_file_name(Path::new("")), "unknown");
         }
 
         #[test]

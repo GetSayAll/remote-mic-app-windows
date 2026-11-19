@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub const XIAOMI_REMOTE_VENDOR_ID: u16 = 0x2717;
@@ -225,6 +225,27 @@ pub fn report_path_accepted(bound_path: &str, target: Option<u64>, report_path: 
         Some(address) => crate::remote_target::matches_address(report_path, address),
         None => normalize_device_path(report_path) == normalize_device_path(bound_path),
     }
+}
+
+/// 报告流间隔的日志判据（纯函数，单测覆盖）。
+///
+/// 2026-11-15 现场：首次语音后 HID 设备节点仍在位（`binding_present=true`），
+/// 但 `raw_event_count` 永不增长。设备在位 ≠ 报告还在到；恢复后的第一条报告
+/// 需要留下"距上一条多久"的证据，否则下一次只能看到"没有报文"而无法区分
+/// "用户没按键"与"报告流停了 N 秒后恢复/从未恢复"。
+///
+/// 返回 `Some(0)` 表示监听器启动后的第一条报告；返回 `Some(gap_ms)` 表示距上一条
+/// 至少 `threshold`；`None` 表示间隔太短或时钟回拨，不值得落一行。
+pub fn report_flow_gap_ms(
+    last_report_at: Option<Instant>,
+    now: Instant,
+    threshold: Duration,
+) -> Option<u64> {
+    let Some(last) = last_report_at else {
+        return Some(0);
+    };
+    let gap = now.checked_duration_since(last)?;
+    (gap >= threshold).then(|| gap.as_millis() as u64)
 }
 
 pub fn select_single_device_path(paths: &[String]) -> Result<String, DevicePathError> {
@@ -493,6 +514,33 @@ mod tests {
         assert!(report_path_accepted(bound, None, &bound.to_uppercase()));
         assert!(!report_path_accepted(bound, None, sibling));
         assert!(!report_path_accepted(bound, None, other));
+    }
+
+    #[test]
+    fn report_flow_gap_logs_first_and_long_gaps_only() {
+        let now = Instant::now();
+        let threshold = Duration::from_secs(5);
+        // 监听器启动后的第一条：gap=0，调用方据此写 first=true。
+        assert_eq!(report_flow_gap_ms(None, now, threshold), Some(0));
+        // 短间隔不刷屏。
+        assert_eq!(
+            report_flow_gap_ms(Some(now - Duration::from_secs(1)), now, threshold),
+            None
+        );
+        // 阈值边界与长时间闲置。
+        assert_eq!(
+            report_flow_gap_ms(Some(now - Duration::from_secs(5)), now, threshold),
+            Some(5_000)
+        );
+        assert_eq!(
+            report_flow_gap_ms(Some(now - Duration::from_secs(3_600)), now, threshold),
+            Some(3_600_000)
+        );
+        // 时钟回拨不得被误判成“第一条”。
+        assert_eq!(
+            report_flow_gap_ms(Some(now + Duration::from_secs(1)), now, threshold),
+            None
+        );
     }
 
     fn report(usages: &[u16]) -> Vec<u8> {

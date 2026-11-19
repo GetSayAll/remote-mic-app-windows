@@ -6409,9 +6409,9 @@ pub fn run() {
                     let Ok(hwnd) = window.hwnd() else {
                         return false;
                     };
-                    // 先读 Win32 样式：绝大多数按键窗口本来就没置顶，这里零开销地
-                    // 返回 false，不产生任何跨线程 dispatch（本回调在引擎线程上、
-                    // 且一次按键可能被多个候选窗口各调一次）。
+                    // 先读 Win32 样式：绝大多数窗口本来就没置顶，这里零开销地
+                    // 返回 false，不产生任何跨线程 dispatch（本回调可能来自引擎线程、
+                    // 主线程或 Tauri 窗口事件；一次按键可能被多个候选窗口各调一次）。
                     let dropped =
                         sayall_windows::app_launcher::drop_window_topmost(hwnd.0 as isize);
                     if dropped {
@@ -6427,6 +6427,15 @@ pub fn run() {
                     dropped
                 });
             }
+            // 启动时主动撤掉历史遗留的置顶位：主窗口带 `WS_EX_TOPMOST` 时，
+            // Alt+Tab 切走后焦点虽已给目标，Z 序上仍压着它（2026-11-19 反馈
+            // 「上一个应用是无线麦时连按两下卡死」）。打开应用的入口只在
+            // `activate_or_launch` 撤顶，覆盖不到启动即带置顶位的旧状态。
+            let startup_topmost_dropped =
+                sayall_windows::app_launcher::request_self_drop_topmost();
+            sayall_windows::gatt_note(format!(
+                "window_topmost_guard reason=startup dropped={startup_topmost_dropped} terminal_result=passed"
+            ));
             sayall_windows::gatt_note(
                 "app_lifecycle event=tauri_setup phase=completed terminal_result=passed window_created=true state_managed=true".to_owned(),
             );
@@ -6466,6 +6475,17 @@ pub fn run() {
                 // Bugs/2026-09-12）时，这里在焦点离开后再切一次，让后续语音键按下时
                 // 系统输入法已对齐。未布防时是 no-op。
                 if window.label() == "main" {
+                    // Alt+Tab / Win+D 切走时先撤顶：若主窗口带 `WS_EX_TOPMOST`，
+                    // 焦点虽已切给目标，Z 序上仍会把它压在下面，表现为“切不过去/
+                    // 卡死”（2026-11-19 反馈：上一个应用是无线麦时连按两下）。
+                    // 启动入口只能清历史状态；这里覆盖运行期间被外部工具重新置顶。
+                    let dropped = sayall_windows::app_launcher::request_self_drop_topmost();
+                    if dropped {
+                        sayall_windows::gatt_note(
+                            "window_topmost_guard reason=focus_lost dropped=true terminal_result=passed"
+                                .to_owned(),
+                        );
+                    }
                     if let Some(state) = window.app_handle().try_state::<AppState>() {
                         state.platform.align_ime_after_tool_selection();
                     }
@@ -8107,5 +8127,39 @@ mod ui_hint_tests {
                  请改用 main_window(app) / main_webview(app)"
             );
         }
+    }
+
+    /// 主窗口若带 `WS_EX_TOPMOST`，Alt+Tab 切走后会把目标应用压在下面
+    /// （2026-11-19 反馈：上一个应用是无线麦时“点两下卡死”）。
+    ///
+    /// 启动时与主窗口失焦时必须主动撤顶；这里用源码契约锁住两个入口，
+    /// 防止后续重构只保留“打开应用”前的那次调用。
+    #[test]
+    fn stale_topmost_is_dropped_at_startup_and_on_main_focus_loss() {
+        let source = include_str!("lib.rs");
+
+        let focus_start = source
+            .find("WindowEvent::Focused(false)")
+            .expect("Focused(false) 分支必须存在");
+        let focus_end = source[focus_start..]
+            .find("WindowEvent::Resized")
+            .map(|offset| focus_start + offset)
+            .expect("Focused(false) 分支后必须有 Resized 分支");
+        assert!(
+            source[focus_start..focus_end].contains("request_self_drop_topmost()"),
+            "主窗口失焦时必须撤掉自身置顶位，否则 Alt+Tab 切走后目标应用会被压在下面"
+        );
+
+        let setup_start = source
+            .find("set_self_drop_topmost")
+            .expect("启动时必须注册撤顶回调");
+        let setup_end = source[setup_start..]
+            .find("app_lifecycle event=tauri_setup")
+            .map(|offset| setup_start + offset)
+            .expect("注册撤顶回调后必须有 setup 完成日志");
+        assert!(
+            source[setup_start..setup_end].contains("request_self_drop_topmost()"),
+            "启动时必须主动撤掉历史遗留的置顶位"
+        );
     }
 }

@@ -1307,6 +1307,20 @@ fn request_app_switcher_start() -> Result<(), String> {
         .map_err(|_| "app_switcher_engine_disconnected".to_owned())
 }
 
+/// 应用切换器会话启动前撤掉自身置顶位。
+///
+/// 按键动作和组合动作是两条独立入口（`ButtonAction::AppSwitcher` /
+/// `EngineMessage::StartAppSwitcher`），必须共用这一层兜底：若无线麦在后台
+/// 带 `WS_EX_TOPMOST`，`Focused(false)` 不会再触发，确认到别的应用后它仍会
+/// 压在目标上面（2026-11-19 现场）。`source` 只写日志，区分入口。
+fn drop_stale_topmost_for_app_switcher(source: &'static str) {
+    if crate::app_launcher::request_self_drop_topmost() {
+        crate::ble::gatt_note(format!(
+            "window_topmost_guard reason=app_switcher_start dropped=true terminal_result=passed source={source}"
+        ));
+    }
+}
+
 /// 把定时器到期的**连续拍**并入聚合；`advance_with_ticks` 的第二返回值以外
 /// 的手势（双击窗补发的单击、首次长按）是一次性手势，不进聚合
 /// （2026-10-05 评审发现 1：避免把点按记成 `map_repeat`，污染拍数与时长）。
@@ -1638,6 +1652,8 @@ fn engine_worker(
                     let io = InjectorAppSwitcherIo(injector.as_ref());
                     let was_active = app_switcher.is_active();
                     if !was_active {
+                        // 组合动作入口与按键入口共用撤顶兜底（2026-11-19）。
+                        drop_stale_topmost_for_app_switcher("macro");
                         key_gate::set_app_switcher_mask(app_switcher::control_mask());
                         injector.common_phrase_host().close("app_switcher");
                     }
@@ -2159,6 +2175,18 @@ fn fire_gesture(
         }
         ButtonAction::Shortcut { chord } => {
             let terminal_action = chord.is_lock_workstation();
+            // 一次性 Alt+Tab 快捷键也要先撤顶：它不经过 `AppSwitcher` 分支，
+            // 报告里的“按键设为 Alt+Tab”可能正是这条旧绑定。若无线麦在后台
+            // 带置顶位，`Focused(false)` 不会触发，必须在注入前兜底。
+            if chord.is_alt_tab() {
+                let dropped = crate::app_launcher::request_self_drop_topmost();
+                if dropped {
+                    crate::ble::gatt_note(
+                        "window_topmost_guard reason=alt_tab_shortcut dropped=true terminal_result=passed"
+                            .to_owned(),
+                    );
+                }
+            }
             crate::ble::gatt_note(format!(
                 "map_fire button={:?} trigger={:?} action=shortcut chord={}",
                 button,
@@ -2284,6 +2312,11 @@ fn fire_gesture(
             let io = InjectorAppSwitcherIo(injector.as_ref());
             let was_active = app_switcher.is_active();
             if !was_active {
+                // 会话启动前先撤掉自身置顶：切换器目标可能是无线麦自己，
+                // 而 `Focused(false)` 只在无线麦失焦时触发；若置顶位是在
+                // 后台被外部工具设置/恢复的，失焦兜底不会再跑，确认到别的
+                // 应用后无线麦仍会压在目标上面（2026-11-19 现场缺口）。
+                drop_stale_topmost_for_app_switcher("button");
                 // 会话期间 OK/返回/方向/TV 由门控直接吞下：这些键即使没有
                 // 映射，原生动作也会漏进系统切换器或目标应用。
                 key_gate::set_app_switcher_mask(app_switcher::control_mask());
@@ -2434,6 +2467,66 @@ mod tests {
     use crate::send_input::{ButtonAction, ButtonActions, KeyCode};
     use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
+
+    /// 应用切换器启动前必须撤掉自身置顶位。
+    ///
+    /// `Focused(false)` 只在无线麦失焦时触发；如果置顶位是在后台被外部工具
+    /// 设置/恢复的，失焦兜底不会再跑，确认到别的应用后无线麦仍会压住目标
+    /// （2026-11-19 现场缺口）。这里用源码契约锁住引擎侧的启动兜底。
+    #[test]
+    fn app_switcher_start_drops_stale_topmost_before_opening_switcher() {
+        let source = include_str!("button_mapping.rs");
+        let start = source
+            .find("ButtonAction::AppSwitcher =>")
+            .expect("fire_gesture 必须保留 AppSwitcher 分支");
+        let end = source[start..]
+            .find("ButtonAction::OpenCommonPhrases =>")
+            .map(|offset| start + offset)
+            .expect("AppSwitcher 分支后必须保留 OpenCommonPhrases 分支");
+        assert!(
+            source[start..end].contains("drop_stale_topmost_for_app_switcher(\"button\")"),
+            "按键启动应用切换器前必须撤掉自身置顶位，否则后台置顶时目标仍会被压在下面"
+        );
+
+        let macro_start = source
+            .find("EngineMessage::StartAppSwitcher =>")
+            .expect("引擎必须保留组合动作启动切换器的入口");
+        let macro_end = source[macro_start..]
+            .find("EngineMessage::ReleaseAppSwitcherForExit")
+            .map(|offset| macro_start + offset)
+            .expect("StartAppSwitcher 分支后必须保留退出收尾入口");
+        assert!(
+            source[macro_start..macro_end]
+                .contains("drop_stale_topmost_for_app_switcher(\"macro\")"),
+            "组合动作启动应用切换器前也必须撤顶，否则两条入口行为不一致"
+        );
+    }
+
+    /// 一次性 Alt+Tab 快捷键也必须先撤顶。
+    ///
+    /// 旧的一次性 `Alt+Tab` 绑定保留字面语义，不经过 `AppSwitcher` 分支；
+    /// 后台置顶时只能靠注入前这层兜底。用源码契约锁住它，避免以后只保留
+    /// 会话路径。
+    #[test]
+    fn alt_tab_shortcut_drops_stale_topmost_before_injection() {
+        let source = include_str!("button_mapping.rs");
+        let start = source
+            .find("ButtonAction::Shortcut { chord } =>")
+            .expect("fire_gesture 必须保留 Shortcut 分支");
+        let end = source[start..]
+            .find("ButtonAction::OpenApp { target } =>")
+            .map(|offset| start + offset)
+            .expect("Shortcut 分支后必须保留 OpenApp 分支");
+        let branch = &source[start..end];
+        assert!(
+            branch.contains("chord.is_alt_tab()"),
+            "一次性 Alt+Tab 快捷键必须识别 Alt+Tab 组合"
+        );
+        assert!(
+            branch.contains("request_self_drop_topmost()"),
+            "一次性 Alt+Tab 注入前必须撤掉自身置顶位，否则后台置顶时目标仍会被压在下面"
+        );
+    }
 
     /// 测试注入器：记录 tap 的和弦与打开应用的目标。
     #[derive(Debug, Default)]

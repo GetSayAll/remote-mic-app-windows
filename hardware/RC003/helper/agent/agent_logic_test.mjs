@@ -97,6 +97,7 @@ function fakeArgs(outPtr, source = 'h0') {
 const handlers = {};
 const pending = [];                                          // 永不 settle 的 read => 桩连接不会"断线"
 const sleeps = [];                                           // Thread.sleep 桩的调用记录（门内延迟判据）
+const sentLines = [];                                        // agent 真正写出的上行（报告流/HB 判据）
 
 /* 第二个 attach（NtClose）按导出名分流；Node 里没有 NativeFunction，
    NtQueryObject 返回 null，agent 走句柄字符串来源键。 */
@@ -127,7 +128,11 @@ const sandbox = {
       return Promise.resolve({
         setNoDelay() {},
         close() {},
-        output: { write() {} },
+        output: {
+          write(payload) {
+            sentLines.push(Buffer.from(payload).toString('ascii'));
+          },
+        },
         input: { read: () => new Promise((_res, _rej) => { pending.push(1); }) },
       });
     },
@@ -187,6 +192,31 @@ function closeHandle(source) {
 {
   const { ptr } = press(0x004a);                             // 主页键
   check('默认：主页键不被改写', ptr.buf[3] === 0x4a);
+}
+
+/* ------------------------- 0. 报告流活性（2026-11-15 现场） */
+
+{
+  const before = ctx.stat.reports_seen || 0;
+  press(0x0028);
+  check('报告流活性：每条形状匹配的报告都计入 reports_seen',
+    (ctx.stat.reports_seen || 0) === before + 1,
+    `reports_seen=${ctx.stat.reports_seen} before=${before}`);
+  check('报告流活性：lastReportAt 已更新',
+    typeof ctx.lastReportAt === 'number' && ctx.lastReportAt > 0,
+    `lastReportAt=${ctx.lastReportAt}`);
+  const sentBefore = sentLines.length;
+  ctx.heartbeat();
+  const hb = sentLines
+    .slice(sentBefore)
+    .map((line) => JSON.parse(line))
+    .find((message) => message.type === 'hb');
+  check('报告流活性：HB 带 last_report_age_ms',
+    hb && typeof hb.last_report_age_ms === 'number',
+    `hb=${JSON.stringify(hb && hb.last_report_age_ms)}`);
+  check('报告流活性：HB stat 带 reports_seen',
+    hb && hb.stat && hb.stat.reports_seen >= 1,
+    `stat_reports_seen=${hb && hb.stat && hb.stat.reports_seen}`);
 }
 
 /* ------------------------------------------- 2. 三键：清空 + 计数 + 边沿 */
