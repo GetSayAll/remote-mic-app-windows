@@ -74,6 +74,25 @@
 - 真机复测 `deferred`：需要 RC001 / RC003 分别复现“配对在、链路不在”，确认
   `link_status` 与 HID 到场信号；1.9.3 报告人的完整日志仍缺失。
 
+## 本地测试包（2026-11-20）
+
+- 包：`target/release/bundle/nsis/无线麦 SayAll_1.9.3_x64-setup.exe`
+- SHA-256：`6E6F3E186A3512AF2701AAFE323C844E8D106128C28ABD6B1EAC93E1A54F253E`
+- 本机缺 arm64 工具链，包为 x64-only；安装目录保留了上一版的 arm64 载荷，
+  x64 测试不受影响。
+- 前端嵌入校验：`scripts/verify-frontend-embedded.ps1` 对 app exe 18/18 passed；
+  阴性对照 `sayall-mcp.exe` 按预期失败（18/18 缺失）。
+- 静默升级安装：`installer_exit=0`；旧进程日志
+  `reason=installer_requested_exit`，随后 `ble_session_shutdown` 与
+  `platform_shutdown` 均 passed（未强杀）。
+- 安装目录载荷：`sayall-helper.exe`、`frida-gadget.dll`、`sayall-mcp.exe`
+  三件 SHA-256 与 staged 一致；安装版 app exe 与 `target/release` 差 3 字节
+  （NSIS bundle 标记，良性），内嵌 `source_revision=e3cfb94...`、版本 1.9.3。
+- 启动：安装版 pid 39708，`service_discovery` 299ms passed；PrintWindow 截图
+  确认是应用界面（按键映射页），不是目录列表；未强杀，当前保持运行。
+- 未做：向导卡片的安装版视觉复验（当前安装已完成引导，未改用户向导状态，
+  由页面/组件测试覆盖）；RC001 / RC003 真机连接。
+
 ## 隐私检查
 
 本文不含个人路径、蓝牙地址、设备 ID、语音内容或凭据；用户日志附件未入库。
