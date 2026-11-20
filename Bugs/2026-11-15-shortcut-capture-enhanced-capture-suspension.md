@@ -81,18 +81,21 @@
 ## 验证
 
 - `cargo fmt --all -- --check`：passed。
-- `cargo test -p sayall-windows --lib`：560 passed / 0 failed / 17 ignored；
+- `cargo test -p sayall-windows --lib`：561 passed / 0 failed / 17 ignored；
   新增 `shortcut_capture_suspension_only_changes_effective_targets`、
-  `shortcut_capture_suspension_also_mutes_voice_synth` passed。
+  `shortcut_capture_suspension_also_mutes_voice_synth`、
+  `shortcut_capture_suspension_drives_real_bridge_targets_and_synth` passed。
 - `cargo test -p sayall-windows-app --lib`：223 passed / 0 failed / 2 ignored；
   新增 `shortcut_capture_suspends_and_restores_enhanced_capture`、
   `shortcut_capture_finish_claim_rejects_stale_generation` passed。
 - `cargo check -p sayall-windows-app --features runtime-simulation`：passed。
 - 前端 `vitest run src/pages/ButtonsPage.test.ts src/pages/MacrosPage.test.ts`：
   153 passed（含「检测到仍有按住的按键」用例）；`vue-tsc --noEmit`：passed。
-- `cargo test --workspace`：passed（`sayall-windows` 560 + app 223 + 其余
-  crate/集成测试，共 918 passed / 0 failed / 19 ignored）；
+- `cargo test --workspace`（提交 `4a245a6`）：passed（`sayall-windows` 560 +
+  app 223 + 其余 crate/集成测试，共 918 passed / 0 failed / 19 ignored）；
   `pnpm test`：696 passed / 10 skipped；`verify-frontend-embedded.ps1`：18/18 passed。
+  之后的测试补充把暂停逻辑抽成可测函数并新增真实桥接用例，
+  `sayall-windows` 561 passed；生产行为不变。
 - 本地测试包 v3：`artifacts/local-test/2026-11-15-shortcut-capture-suspension-v3/`，
   源码提交 `4a245a6`（二进制内嵌同一修订），
   SHA-256 `92b407edc032c41b3545b293ac350f9971ce785d380ddbd2846e99fbeebcedc4`；

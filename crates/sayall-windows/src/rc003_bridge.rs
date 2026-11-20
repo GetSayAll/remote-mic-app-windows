@@ -1057,6 +1057,12 @@ impl Rc003Bridge {
         ));
     }
 
+    /// 测试用：当前下发给报告层的语音合成目标（`None` = 关闭）。
+    #[cfg(test)]
+    pub(crate) fn voice_synth_usage_for_test(&self) -> Option<u16> {
+        *lock(&self.voice_synth_to)
+    }
+
     /// 请求助手**立即**重选宿主（发一行 `R`，无载荷；2026-10-13 现场）。
     ///
     /// 主程序在发布新目标（连接/恢复换机）的同一刻调用：助手据此立刻复查目标地址，

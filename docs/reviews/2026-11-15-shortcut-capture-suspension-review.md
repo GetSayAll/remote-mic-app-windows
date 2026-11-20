@@ -3,8 +3,7 @@
 - 评审日期：2026-11-15
 - 评审对象：`fix/shortcut-capture-device-20261115`（基于 `origin/main` `25bd512`）
 - 变更范围：4 个源文件 + 2 个单元/契约测试 + 1 个 Bug 记录
-- 结论：**核心修复方向正确，未发现阻塞性缺陷；有 2 项 P1 残留、2 项 P2
-  建议在合入 main 前决策**
+- 结论：**复核后无阻塞性缺陷；P1/P2 已处理，逐项状态见文末「复核后状态」**
 
 ## 变更摘要
 
@@ -132,3 +131,25 @@
 - **合入 main 前**：建议至少处理 P1-1 的 watchdog 或把边界写清楚；P1-2 至少
   把日志口径从 `passed` 改为 `requested`，避免外部调用成功判据失真。
 - **后续**：P2-1 的 preheld 提示是低成本、高诊断价值的改动，建议下一轮补。
+
+## 复核后状态（2026-11-19）
+
+| 项 | 状态 | 落点 / 证据 |
+| --- | --- | --- |
+| P1-1 无 watchdog | **已修** | `SHORTCUT_CAPTURE_GENERATION` + 30 秒 watchdog；`finish_shortcut_capture` 为唯一收尾，`compare_exchange` 认领代次；测试 `shortcut_capture_finish_claim_rejects_stale_generation` |
+| P1-2 日志冒充已生效 | **已修（日志口径）** | 改为 `phase=requested / terminal_result=pending`；未加 ack 等待，真实结果以桥接 `targets_changed` / ownership 为准 |
+| P2-1 preheld 被丢弃 | **已修** | 按键页/组合动作页读取返回值并显示先松键提示；ButtonsPage 新增用例 |
+| P2-2 缺真实桥接集成测试 | **已修** | 新增 `shortcut_capture_suspension_drives_real_bridge_targets_and_synth`：暂停后 `target_usages` 为空、合成目标 `None`，恢复后回到 `mapped_mask()` 与 `0x00E6`；暂停逻辑抽成 `apply_shortcut_capture_suspension` 供真实桥接夹具驱动 |
+| P2-3 全局态测试隔离 | **已收口** | 集成测试与 key_gate 测试共用串行锁，并用 drop guard 复位 `SHORTCUT_CAPTURE_SUSPENDED`；断言失败也不会污染其他用例 |
+| P3-1 F5 合成 | **已修（v2）** | `set_voice_synth(None)` + 恢复时按当前热键重配 |
+| P3-2 跨页并发提示 | 接受 | 当前单页面录入 |
+| P3-3 暂停期间遥控器原生命中 | 接受 | 最长一次录入会话 |
+| P3-4 日志重复 | 接受 | 便于关联命令与平台侧 |
+| P3-5 布尔而非引用计数 | 接受 | 当前单窗口单页面录入 |
+
+验证：`cargo test -p sayall-windows --lib` 561 passed / 17 ignored；
+`cargo test --workspace` 918 passed / 0 failed / 19 ignored（新增用例前）；
+`pnpm test` 696 passed / 10 skipped；`vue-tsc --noEmit`、`verify-frontend-embedded.ps1`
+passed。本地测试包 v3 源码提交 `4a245a6`，SHA-256
+`92b407edc032c41b3545b293ac350f9971ce785d380ddbd2846e99fbeebcedc4`。
+真机复验仍为 **deferred**。
