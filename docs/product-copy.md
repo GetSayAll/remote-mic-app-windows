@@ -809,3 +809,11 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   主按钮由「使用这个应用」改为「添加应用」。扫描列表固定高度并预留滚动条槽位，消除打开
   弹窗时的高度与横向刷新。英文按钮为 Add App。落点：`RegisteredAppsDialog.vue`、
   `src-tauri/src/lib.rs`（`get_application_icon`）、`src/lib/i18n/en/common.ts`。
+
+- 2026-11-19（向导②步长时间重连，issue #104）：重连文案不再承诺「最多等约 60 秒」，
+  改为「不需要重新配对；超过约 60 秒仍未恢复时，下方会给出排查步骤」。连续重连满
+  60 秒（或重试次数达到 5 次）且 `raw_input` 仍为 `awaiting`、尚未收到按键时，显示
+  「遥控器还没有真正连上」提示卡：按普通按键 → 关闭手机/电视蓝牙 → 删除设备后按
+  「TV」键约 3 秒重新配对；动作按钮「打开蓝牙设置」「重新扫描」。落点：
+  `src/onboarding/reconnect-guidance.ts`、`src/onboarding/steps/RemoteStep.vue`、
+  `src/lib/i18n/en/onboarding.ts`。
