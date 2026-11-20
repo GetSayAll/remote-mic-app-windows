@@ -1923,6 +1923,37 @@ fn ble_error_code(error: &PlatformError) -> &'static str {
     }
 }
 
+/// `ConnectionStatus` 的稳定日志 token（issue #104，2026-11-19）。
+///
+/// `gatt_status=1` 只说明对端不可达；要区分"Windows 自己认为链路还在，但 GATT
+/// 服务发现失败"与"链路根本不在"，必须在失败瞬间记录系统侧的链路状态。
+/// 读不到状态时写 `unknown`，不猜测。
+fn link_status_token(status: Option<BluetoothConnectionStatus>) -> &'static str {
+    match status {
+        Some(BluetoothConnectionStatus::Connected) => "connected",
+        Some(BluetoothConnectionStatus::Disconnected) => "disconnected",
+        _ => "unknown",
+    }
+}
+
+/// 连接阶段失败时的链路状态日志行。
+///
+/// 只含阶段、世代、尝试次数、链路状态与稳定错误码；不写设备地址、设备 ID、
+/// 设备名称或原始错误文本（LOGGING.md 隐私红线）。
+fn connect_link_state_note(
+    stage: &'static str,
+    connection_generation: u64,
+    attempt: u32,
+    status: Option<BluetoothConnectionStatus>,
+    error: &PlatformError,
+) -> String {
+    format!(
+        "ble_connect_link phase=failure stage={stage} connection_generation={connection_generation} attempt={attempt} link_status={} error_domain=bluetooth error_code={}",
+        link_status_token(status),
+        ble_error_code(error)
+    )
+}
+
 fn connect_stage<T>(
     reconnecting: bool,
     attempt: u32,
@@ -3469,12 +3500,22 @@ impl BleSession {
             snapshot.remote_token = Some(crate::device_token(device_id));
             snapshot.last_error = None;
         }
-        pending.service = Some(connect_stage(
-            reconnecting,
-            reconnect_attempt,
-            "service_discovery",
-            || find_service(pending.device(), SERVICE_UUID),
-        )?);
+        let service_result =
+            connect_stage(reconnecting, reconnect_attempt, "service_discovery", || {
+                find_service(pending.device(), SERVICE_UUID)
+            });
+        if let Err(error) = &service_result {
+            // issue #104（2026-11-19）：失败瞬间记录 Windows 自己认为的链路状态。
+            // 这一步必须发生在 `?` 释放 `PendingBleConnection` 之前。
+            gatt_note(connect_link_state_note(
+                "service_discovery",
+                connection_generation,
+                reconnect_attempt,
+                pending.device().ConnectionStatus().ok(),
+                error,
+            ));
+        }
+        pending.service = Some(service_result?);
         pending.transmit = Some(connect_stage(
             reconnecting,
             reconnect_attempt,
@@ -4973,6 +5014,38 @@ mod tests {
             !text.contains("gatt_"),
             "raw_error 不应含内部错误码：{text}"
         );
+    }
+
+    #[test]
+    fn connect_failure_records_the_windows_link_state() {
+        // issue #104（2026-11-19）：`gatt_status=1` 只能说明对端不可达，无法区分
+        // "Windows 自己认为链路还在" 与 "链路根本不在"。失败瞬间的
+        // `ConnectionStatus` 必须落盘，且不得包含设备身份或错误原文。
+        let error = gatt_status_error(GattCommunicationStatus(1), "发现 ATVV 服务");
+        let note = connect_link_state_note(
+            "service_discovery",
+            67,
+            5,
+            Some(BluetoothConnectionStatus::Disconnected),
+            &error,
+        );
+        assert!(note.contains("phase=failure"), "{note}");
+        assert!(note.contains("stage=service_discovery"), "{note}");
+        assert!(note.contains("connection_generation=67"), "{note}");
+        assert!(note.contains("attempt=5"), "{note}");
+        assert!(note.contains("link_status=disconnected"), "{note}");
+        assert!(note.contains("error_code=gatt_unreachable"), "{note}");
+        assert!(!note.contains("发现 ATVV 服务"), "不得落 raw_error：{note}");
+
+        assert_eq!(
+            link_status_token(Some(BluetoothConnectionStatus::Connected)),
+            "connected"
+        );
+        assert_eq!(
+            link_status_token(Some(BluetoothConnectionStatus::Disconnected)),
+            "disconnected"
+        );
+        assert_eq!(link_status_token(None), "unknown");
     }
 
     #[test]
