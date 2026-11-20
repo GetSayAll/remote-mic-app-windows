@@ -720,6 +720,31 @@ describe("Onboarding wizard shell", () => {
     wrapper.unmount();
   });
 
+  it("长时间重连且没有按键通道时，给出可操作排查卡而不是只写等 60 秒", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(
+      runtimeWith({
+        connectionPhase: "reconnecting",
+        reconnectAttempt: 5,
+        rawInputPhase: "awaiting",
+      }),
+    );
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("正在自动恢复连接");
+    expect(wrapper.text()).not.toContain("最多等约 60 秒");
+    expect(wrapper.text()).toContain("遥控器还没有真正连上");
+
+    const card = wrapper
+      .findAll(".onboarding-card.warn")
+      .find((node) => node.text().includes("遥控器还没有真正连上"));
+    expect(card).toBeTruthy();
+    expect(card!.text()).toContain("手机或电视");
+    expect(card!.text()).toContain("删除这支遥控器");
+    expect(card!.findAll("button").map((node) => node.text())).toContain("打开蓝牙设置");
+    wrapper.unmount();
+  });
+
   it("按键已收到但还没找到遥控器时，说明句指向扫描", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     // 系统里没有已配对遥控器：自动连接不介入（扫描 0 台），保留"按键已收到、未连接"现场

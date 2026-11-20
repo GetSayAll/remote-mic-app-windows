@@ -57,8 +57,17 @@ export default {
     "Currently connected: “{name}”. Press a regular button on this remote. To use the other one, select Connect on its row.",
   "请先在上面点一行「连接」，选中你手上正在按的这一支。":
     "Select Connect on the row for the remote in your hand.",
-  "正在自动恢复连接（第 {attempt} 次尝试），最多等约 60 秒，不需要重新配对。":
-    "Reconnecting automatically (attempt {attempt}). This can take up to 60 seconds; you do not need to pair again.",
+  "正在自动恢复连接（第 {attempt} 次尝试），不需要重新配对；超过约 60 秒仍未恢复时，下方会给出排查步骤。":
+    "Reconnecting automatically (attempt {attempt}). You do not need to pair again. If it is still not connected after about 60 seconds, troubleshooting steps will appear below.",
+  "遥控器还没有真正连上": "The remote is not actually connected yet",
+  "Windows 里可能只有配对记录，蓝牙链路还没有建立；应用会继续自动重试。请按顺序检查：":
+    "Windows may only have a pairing record for the remote; the Bluetooth link is not established yet. SayAll will keep retrying. Check these in order:",
+  "按一下遥控器的普通按键（比如主页键），看上面的「等待控制按键」是否变成「已收到遥控器按键」。":
+    "Press a regular button on the remote, such as Home, and see whether “Waiting for a control button” above changes to “Remote button received.”",
+  "如果这支遥控器还连着手机或电视，先关掉那些设备的蓝牙；同一支遥控器通常只能同时连接一台设备。":
+    "If this remote is still connected to a phone or TV, turn off Bluetooth on those devices first. A remote can usually connect to only one device at a time.",
+  "仍无反应：在 Windows 蓝牙设置里删除这支遥控器，再按「TV」键约 3 秒重新配对；回来后点「重新扫描」。":
+    "If nothing happens, remove this remote in Windows Bluetooth settings, hold the TV button for about 3 seconds to pair it again, then come back and select Scan Again.",
   "刚才按的是语音键": "That was the voice button",
   "请按遥控器上除语音键以外的普通按键（比如主页键）。":
     "Press a regular button on the remote, such as Home. Do not press the voice button.",

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import {
   connectionPhaseLabel,
   remoteModelLabel,
@@ -9,6 +9,10 @@ import {
 import OptionCard from "../../components/onboarding/OptionCard.vue";
 import StatusRow from "../../components/onboarding/StatusRow.vue";
 import { t } from "../../lib/i18n";
+import {
+  RECONNECT_GUIDANCE_DELAY_MS,
+  shouldShowReconnectGuidance,
+} from "../reconnect-guidance";
 
 const props = defineProps<{
   runtime: RuntimeSnapshot | null;
@@ -45,6 +49,48 @@ const connected = computed(() =>
 const reconnecting = computed(() => connectionPhase.value === "reconnecting");
 const reconnectAttempt = computed(() => props.runtime?.platform.connection.reconnectAttempt ?? 0);
 const phaseLabel = computed(() => connectionPhaseLabel(connectionPhase.value));
+
+/**
+ * 连续重连的本地计时（issue #104，2026-11-19）。
+ *
+ * 只用于决定「是否显示排查卡」，不参与连接逻辑；`reconnectAttempt >= 5`
+ * 另有兜底，用户中途进入第②步时不必再等一个完整的 60 秒。
+ */
+const reconnectWaitedMs = ref(0);
+let reconnectGuidanceTimer: number | undefined;
+
+function clearReconnectGuidanceTimer(): void {
+  if (reconnectGuidanceTimer !== undefined) {
+    window.clearTimeout(reconnectGuidanceTimer);
+    reconnectGuidanceTimer = undefined;
+  }
+}
+
+watch(
+  reconnecting,
+  (value) => {
+    clearReconnectGuidanceTimer();
+    reconnectWaitedMs.value = 0;
+    if (value) {
+      reconnectGuidanceTimer = window.setTimeout(() => {
+        reconnectWaitedMs.value = RECONNECT_GUIDANCE_DELAY_MS;
+      }, RECONNECT_GUIDANCE_DELAY_MS);
+    }
+  },
+  { immediate: true },
+);
+
+onUnmounted(clearReconnectGuidanceTimer);
+
+const showReconnectGuidance = computed(() =>
+  shouldShowReconnectGuidance({
+    reconnecting: reconnecting.value,
+    reconnectAttempt: reconnectAttempt.value,
+    waitedMs: reconnectWaitedMs.value,
+    rawInputPhase: props.runtime?.platform.rawInput.phase ?? "stopped",
+    buttonObserved: props.buttonObserved,
+  }),
+);
 const modelLabel = computed(() =>
   remoteModelLabel(props.runtime?.platform.connection.remoteModel ?? "unknown"),
 );
@@ -242,8 +288,51 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       </p>
     </div>
     <p v-if="reconnecting" class="onboarding-muted">
-      {{ t("正在自动恢复连接（第 {attempt} 次尝试），最多等约 60 秒，不需要重新配对。", { attempt: reconnectAttempt }) }}
+      {{ t("正在自动恢复连接（第 {attempt} 次尝试），不需要重新配对；超过约 60 秒仍未恢复时，下方会给出排查步骤。", { attempt: reconnectAttempt }) }}
     </p>
+
+    <!-- issue #104：Windows 只有配对记录、HID 接口缺席时，重连会无限继续。
+         到约 60 秒后给可操作步骤，而不是让用户对着「最多等 60 秒」干等。 -->
+    <div v-if="showReconnectGuidance" class="onboarding-card warn">
+      <h4>{{ t("遥控器还没有真正连上") }}</h4>
+      <p>
+        {{ t("Windows 里可能只有配对记录，蓝牙链路还没有建立；应用会继续自动重试。请按顺序检查：") }}
+      </p>
+      <!-- 动作先于长说明（2026-11-06 最小窗口教训）：1066×800 下内容区可能只露出
+           卡片上半部分，按钮必须先可见、不需要先滚动。 -->
+      <div class="onboarding-chips">
+        <button
+          class="onboarding-chip strong"
+          type="button"
+          @click="$emit('openBluetoothSettings')"
+        >
+          {{ t("打开蓝牙设置") }}
+        </button>
+        <button class="onboarding-chip" type="button" :disabled="scanning" @click="$emit('scan')">
+          {{ scanning ? t("正在扫描…") : t("重新扫描") }}
+        </button>
+      </div>
+      <ul class="onboarding-numlist">
+        <li>
+          <span class="onboarding-num">1</span>
+          <span>
+            {{ t("按一下遥控器的普通按键（比如主页键），看上面的「等待控制按键」是否变成「已收到遥控器按键」。") }}
+          </span>
+        </li>
+        <li>
+          <span class="onboarding-num">2</span>
+          <span>
+            {{ t("如果这支遥控器还连着手机或电视，先关掉那些设备的蓝牙；同一支遥控器通常只能同时连接一台设备。") }}
+          </span>
+        </li>
+        <li>
+          <span class="onboarding-num">3</span>
+          <span>
+            {{ t("仍无反应：在 Windows 蓝牙设置里删除这支遥控器，再按「TV」键约 3 秒重新配对；回来后点「重新扫描」。") }}
+          </span>
+        </li>
+      </ul>
+    </div>
 
     <div v-if="voiceKeyMistake && !buttonObserved" class="onboarding-card warn">
       <h4>{{ t("刚才按的是语音键") }}</h4>
