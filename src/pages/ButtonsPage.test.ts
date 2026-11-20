@@ -119,7 +119,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       gestureHandler = handler;
       return () => {};
     }),
-    startShortcutCapture: vi.fn(async () => undefined),
+    startShortcutCapture: vi.fn(async () => []),
     stopShortcutCapture: vi.fn(async () => undefined),
     subscribeShortcutCaptureEdges: vi.fn(async (handler: ShortcutCaptureHandler) => {
       shortcutCaptureHandler = handler;
@@ -2070,6 +2070,30 @@ describe("buttons mapping page", () => {
       type: "shortcut",
       chord: { keys: ["left_windows", "l"] },
     });
+  });
+
+  it("warns when pre-held keys block the capture", async () => {
+    vi.mocked(startShortcutCapture).mockResolvedValueOnce(["left_control"]);
+    const wrapper = await mountPage();
+    const powerCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("电源"))!;
+    await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    const captureButton = wrapper
+      .findAll(".mapping-editor .chip")
+      .find((button) => button.text().includes("录入自定义快捷键"))!;
+    await captureButton.trigger("click");
+    await vi.waitFor(() => expect(startShortcutCapture).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("检测到仍有按住的按键，请先松开所有按键"),
+    );
+
+    shortcutCaptureHandler!({ key: "l", isPressed: true });
+    shortcutCaptureHandler!({ key: "l", isPressed: false });
+    await vi.waitFor(() =>
+      expect(wrapper.text()).not.toContain("检测到仍有按住的按键"),
+    );
+    wrapper.unmount();
   });
 
   it("records Win+L safely after the user enables fallback mode", async () => {
