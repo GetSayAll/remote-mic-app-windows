@@ -3759,9 +3759,34 @@ fn capture_mic_baseline_slot() -> &'static std::sync::Mutex<Option<u64>> {
     CAPTURE_MIC_BASELINE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// 录入会话代数：start 递增，stop/watchdog 也递增。只有持有当前代次的
+/// watchdog 才能收尾，防止旧的 30 秒计时器把新会话停掉。
+static SHORTCUT_CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// 后端兜底：前端 15 秒超时已经会 stop；30 秒是 WebView 崩溃 / IPC 丢失时的
+/// 最后一道释放，避免报告层目标与全局吞键永久停留在录入态。
+const SHORTCUT_CAPTURE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn claim_shortcut_capture_finish(expected: Option<u64>) -> bool {
+    match expected {
+        Some(expected) => SHORTCUT_CAPTURE_GENERATION
+            .compare_exchange(
+                expected,
+                expected.wrapping_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok(),
+        None => {
+            SHORTCUT_CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
 #[tauri::command]
 fn start_shortcut_capture(
     app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
 ) -> Result<Vec<sayall_windows::send_input::KeyCode>, String> {
     let started = std::time::Instant::now();
     let mic_baseline = sayall_windows::capture_mic_baseline();
@@ -3769,6 +3794,15 @@ fn start_shortcut_capture(
         Ok(mut guard) => *guard = mic_baseline,
         Err(poisoned) => *poisoned.into_inner() = mic_baseline,
     }
+    // 录入期间暂停报告层清键（2026-11-15）：增强捕获可能把同一 WUDFHost 里
+    // 笔记本键盘的 Enter / 方向 / Home / 音量等目标 usage 当成遥控器按键清掉，
+    // 导致低级键盘钩子完全收不到。录入是前台短会话，遥控器此时不参与；先让
+    // 报告层停止清键，stop 时按当前开关与映射恢复。fail-open：失败不影响录入。
+    state.platform.set_shortcut_capture_suspension(true);
+    sayall_windows::gatt_note(
+        "shortcut_capture action=suspend_enhanced_capture phase=requested terminal_result=pending suspended=true"
+            .to_owned(),
+    );
     sayall_windows::gatt_note(format!(
         "shortcut_capture action=start phase=requested suppression=global_paired_edges capture_mode=main_key_only ime_yield=pending mic_baseline={mic_baseline:?}",
     ));
@@ -3789,6 +3823,11 @@ fn start_shortcut_capture(
         {
             sayall_windows::gatt_note(note);
         }
+        state.platform.set_shortcut_capture_suspension(false);
+        sayall_windows::gatt_note(
+            "shortcut_capture action=suspend_enhanced_capture phase=rollback suspended=false reason=gate_unavailable"
+                .to_owned(),
+        );
         sayall_windows::gatt_note(format!(
             "shortcut_capture action=start phase=completed terminal_result=failed error_domain=keyboard_hook error_code=gate_unavailable reason=hook_not_active retryable=true elapsed_ms={}",
             started.elapsed().as_millis()
@@ -3803,6 +3842,22 @@ fn start_shortcut_capture(
         started.elapsed().as_millis(),
         sayall_windows::key_gate::capture_diagnostics_summary()
     ));
+    // 后端兜底：前端 15 秒超时会 stop；这里防 WebView 崩溃 / IPC 丢失后
+    // 报告层目标与全局吞键永久停留在录入态。代次不匹配的旧计时器直接退出。
+    let generation = SHORTCUT_CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let watchdog_app = app.clone();
+    let watchdog = std::thread::Builder::new()
+        .name("sayall-shortcut-capture-watchdog".to_owned())
+        .spawn(move || {
+            std::thread::sleep(SHORTCUT_CAPTURE_WATCHDOG);
+            let _ = finish_shortcut_capture(&watchdog_app, "watchdog", Some(generation));
+        });
+    if watchdog.is_err() {
+        sayall_windows::gatt_note(
+            "shortcut_capture action=watchdog phase=completed terminal_result=failed reason=spawn_failed"
+                .to_owned(),
+        );
+    }
     Ok(preheld)
 }
 
@@ -3817,21 +3872,51 @@ struct ShortcutCaptureStopResult {
 
 #[tauri::command]
 fn stop_shortcut_capture(app: tauri::AppHandle) -> ShortcutCaptureStopResult {
+    finish_shortcut_capture(&app, "command", None)
+}
+
+/// 录入收尾的唯一实现：正常 stop、启动回滚与 watchdog 共用。
+///
+/// `expected` 为 Some 时用原子 compare-exchange 认领当前代次；认领失败说明
+/// 已有新的 start/stop，直接返回、不得停掉新会话。正常 stop 传 None 总是认领。
+/// 清理动作本身幂等（`set_shortcut_capture_active(false)` / 恢复目标 / 恢复 IME
+/// 均可重复）。
+fn finish_shortcut_capture(
+    app: &tauri::AppHandle,
+    reason: &str,
+    expected: Option<u64>,
+) -> ShortcutCaptureStopResult {
+    if !claim_shortcut_capture_finish(expected) {
+        return ShortcutCaptureStopResult {
+            wetype_voice: "unknown",
+        };
+    }
+    if reason == "watchdog" {
+        sayall_windows::gatt_note(
+            "shortcut_capture action=watchdog phase=triggered reason=timeout".to_owned(),
+        );
+    }
     let mic_baseline = match capture_mic_baseline_slot().lock() {
         Ok(mut guard) => guard.take(),
         Err(poisoned) => poisoned.into_inner().take(),
     };
     let wetype_voice = sayall_windows::capture_mic_verdict(mic_baseline);
     let _ = sayall_windows::key_gate::set_shortcut_capture_active(false);
+    if let Some(state) = app.try_state::<AppState>() {
+        state.platform.set_shortcut_capture_suspension(false);
+    }
+    sayall_windows::gatt_note(format!(
+        "shortcut_capture action=suspend_enhanced_capture phase=requested suspended=false reason={reason}"
+    ));
     // 恢复录入前的输入区域布局（让位撤销，输入法回到该窗口会话）。
-    match run_ime_yield_on_window_thread(&app, sayall_windows::restore_input_method_after_capture) {
+    match run_ime_yield_on_window_thread(app, sayall_windows::restore_input_method_after_capture) {
         Some(note) => sayall_windows::gatt_note(note),
         None => sayall_windows::gatt_note(
             "capture_ime_restore outcome=unavailable reason=window_thread_timeout".to_owned(),
         ),
     }
     sayall_windows::gatt_note(format!(
-        "shortcut_capture action=stop phase=completed terminal_result=passed pending_key_ups=paired wetype_voice={wetype_voice} {}",
+        "shortcut_capture action=stop phase=completed terminal_result=passed reason={reason} pending_key_ups=paired wetype_voice={wetype_voice} {}",
         sayall_windows::key_gate::capture_diagnostics_summary()
     ));
     ShortcutCaptureStopResult { wetype_voice }
@@ -8114,6 +8199,38 @@ mod ui_hint_tests {
     /// 契约测试读源码：这两个文件里再出现 webview 窗口查找即红灯。若将来确有
     /// 需要查**非主窗口**的 webview 窗口，请把断言收窄到只禁 `main` 参数，并在
     /// 评审里说明理由。
+    #[test]
+    fn shortcut_capture_suspends_and_restores_enhanced_capture() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn start_shortcut_capture(")
+            .expect("start_shortcut_capture must exist");
+        let stop = source
+            .find("fn stop_shortcut_capture(")
+            .expect("stop_shortcut_capture must exist");
+        let start_block = &source[start..stop];
+        assert!(
+            start_block.contains("set_shortcut_capture_suspension(true)"),
+            "start must suspend enhanced capture before arming the hook"
+        );
+        assert!(
+            start_block.contains("set_shortcut_capture_suspension(false)"),
+            "start failure path must roll the suspension back"
+        );
+        assert!(
+            source[stop..].contains("set_shortcut_capture_suspension(false)"),
+            "stop must restore enhanced capture"
+        );
+    }
+
+    #[test]
+    fn shortcut_capture_finish_claim_rejects_stale_generation() {
+        let base = SHORTCUT_CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        assert!(claim_shortcut_capture_finish(Some(base)));
+        assert!(!claim_shortcut_capture_finish(Some(base)));
+        assert!(claim_shortcut_capture_finish(None));
+    }
+
     #[test]
     fn main_window_lookup_never_uses_the_webview_window_api() {
         let api = concat!("get_webview_window", "(");

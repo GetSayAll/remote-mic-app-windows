@@ -594,6 +594,8 @@ const capturePressedKeys = new Set<KeyCode>();
 let capturedKeys: KeyCode[] | null = null;
 /** 录入会话代数：取消/重启后，迟到的启动回调不得重新武装后端。 */
 let captureGeneration = 0;
+/** start 返回的 preheld 键尚未全部松开：后端吞键但不投递边沿，必须提示用户。 */
+let waitingPreheldRelease = false;
 const CAPTURE_TIMEOUT_MS = 15_000;
 let captureTimeout: number | null = null;
 
@@ -606,6 +608,10 @@ function clearCaptureTimeout(): void {
 
 function onCaptureEdge(edge: ShortcutCaptureEdge): void {
   if (!captureActive.value) return;
+  if (waitingPreheldRelease) {
+    waitingPreheldRelease = false;
+    setStatus(t("正在录入：请按下一次按键（按 Esc 取消）"));
+  }
   if (!edge.isPressed) {
     capturePressedKeys.delete(edge.key);
     if (capturedKeys && capturePressedKeys.size === 0) {
@@ -667,11 +673,17 @@ async function beginCapture(): Promise<void> {
       captureUnsubscribe = undefined;
       return;
     }
-    await startShortcutCapture();
+    const preheld = await startShortcutCapture();
     if (generation !== captureGeneration) {
       // 启动期间已被取消（Esc/失焦/离开页面）：补一次停止，避免后端留在录入态。
       await stopShortcutCapture().catch(() => undefined);
       return;
+    }
+    waitingPreheldRelease = preheld.length > 0;
+    if (waitingPreheldRelease) {
+      setStatus(
+        t("检测到仍有按住的按键，请先松开所有按键；松开后即可按新组合，录入将自动开始"),
+      );
     }
     // 后端武装成功后才接失焦取消：避免启动期间的焦点抖动把一次正常点击立刻取消。
     window.addEventListener("blur", handleCaptureBlur);
@@ -693,6 +705,7 @@ async function cancelCapture(
 async function stopCapture(): Promise<void> {
   captureGeneration += 1;
   captureActive.value = false;
+  waitingPreheldRelease = false;
   clearCaptureTimeout();
   window.removeEventListener("blur", handleCaptureBlur);
   capturePressedKeys.clear();
