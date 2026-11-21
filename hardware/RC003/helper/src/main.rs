@@ -1687,6 +1687,31 @@ mod imp {
         Ok(scan)
     }
 
+    /// `targets` 命令的 PDO 白名单 JSON 数组。空列表写 `[]`（agent 视为
+    /// "未下发/不限制"）；字符串只含 `\Device\` 名，仍按 JSON 规则转义。
+    fn json_string_array(values: &[String]) -> String {
+        let mut out = String::from("[");
+        for (i, value) in values.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            for ch in value.chars() {
+                match ch {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    ch if (ch as u32) < 0x20 => {
+                        out.push_str(&format!("\\u{:04x}", ch as u32));
+                    }
+                    ch => out.push(ch),
+                }
+            }
+            out.push('"');
+        }
+        out.push(']');
+        out
+    }
+
     /// 宿主成员行的分类文本（纯函数，自检覆盖）。
     ///
     /// 为什么不再打设备接口路径（2026-10-08 用户要求 + `LOGGING.md` 隐私红线）：原来这一行
@@ -7856,6 +7881,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         restore: bool,
         canary: &[u16],
         targets: &BridgeCaptureTargets,
+        pdo_sources: &[String],
         synth: Option<(u16, u16)>,
     ) -> io::Result<()> {
         // 清空集合 = 上报集合 ∪ 语音键（clear-only） ∪ 哨兵键。语音键不产生映射边沿，
@@ -7881,10 +7907,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
             format!("{{\"type\":\"restore\",\"token\":\"{token}\",\"on\":{restore}}}\n"),
             format!(
-                "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+                "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}],\"pdo\":{}}}\n",
                 targets.generation,
                 usages_json(&targets.usages),
-                usages_json(&clear)
+                usages_json(&clear),
+                json_string_array(pdo_sources)
             ),
         ];
         let mut has_synth_line = false;
@@ -7931,6 +7958,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ("target_generation", targets.generation.to_string()),
             ("report_usages", usages_hex(&targets.usages)),
             ("clear_usages", usages_hex(&clear)),
+            /* 只报条数：来源名属隐私红线；正常情况下恒为 0（不下发白名单）。 */
+            ("pdo_sources", pdo_sources.len().to_string()),
             (
                 "canary",
                 if canary.is_empty() {
@@ -7987,13 +8016,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         stream: &mut TcpStream,
         token: &str,
         targets: &BridgeCaptureTargets,
+        pdo_sources: &[String],
     ) -> io::Result<()> {
         let clear = clear_with_voice_key(&targets.usages);
         let line = format!(
-            "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}]}}\n",
+            "{{\"type\":\"targets\",\"token\":\"{token}\",\"generation\":{},\"report\":[{}],\"clear\":[{}],\"pdo\":{}}}\n",
             targets.generation,
             usages_json(&targets.usages),
-            usages_json(&clear)
+            usages_json(&clear),
+            json_string_array(pdo_sources)
         );
         write_socket_line(stream, &line)
     }
@@ -8103,6 +8134,33 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
+        // PDO 白名单不下发（2026-11-18 真机结论）：本钩子里报告的来源是 WUDF
+        // 宿主自己的反射控制设备 `\Device\UmdfCtrlDev-{GUID}`，同一宿主内所有
+        // HID 设备共用这一个名字，设备 PDO 名永远对不上。下发非空白名单会把
+        // 遥控器报告一并外拒——而返回/音量只能由这条链路转发给主程序。
+        // 因此这里只核对宿主归属：独占 RC003 的宿主无需按来源过滤；共享宿主
+        // 也无法按名字区分（同一控制设备名），维持 fail-open 由顺序归属兜底。
+        let host_pid = SERVED_HOST_PID.load(Ordering::Relaxed);
+        let (members, rc003_members) = host_membership(host_pid).unwrap_or((0, 0));
+        let pdo_sources: Vec<String> = Vec::new();
+        logger.kv(
+            "[PDO]",
+            &[
+                ("event", "allowlist_skipped".into()),
+                ("sources", pdo_sources.len().to_string()),
+                ("members", members.to_string()),
+                ("rc003_members", rc003_members.to_string()),
+                (
+                    "verdict",
+                    if members == 1 && rc003_members == 1 {
+                        "exclusive_rc003_host"
+                    } else {
+                        "shared_host_no_source_filter"
+                    }
+                    .into(),
+                ),
+            ],
+        );
         let mut sent_targets: Option<BridgeCaptureTargets> = None;
         // 最近一次 targets 下发（含重发）的时刻。与 `sent_targets` 同置：
         // 只在写成功后一起更新，两者要么同时为 None、要么同时有值。
@@ -8137,7 +8195,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 if let Some(bridge) = bridge {
                     let current = bridge.capture_targets();
                     if sent_targets.as_ref() != Some(&current) {
-                        if let Err(error) = send_dynamic_targets(&mut stream, token, &current) {
+                        if let Err(error) =
+                            send_dynamic_targets(&mut stream, token, &current, &pdo_sources)
+                        {
                             log_write_failure(logger, "dynamic_targets", &error);
                             return;
                         }
@@ -8211,7 +8271,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     resend_attempts,
                     wait.as_millis()
                 ));
-                if let Err(error) = send_dynamic_targets(&mut stream, token, sent) {
+                if let Err(error) = send_dynamic_targets(&mut stream, token, sent, &pdo_sources) {
                     log_write_failure(logger, "targets_resend", &error);
                     return;
                 }
@@ -8268,6 +8328,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 restore,
                                 canary,
                                 &targets,
+                                &pdo_sources,
                                 synth,
                             ) {
                                 log_write_failure(logger, "session_config", &error);
@@ -10300,7 +10361,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-11-15.report-liveness";
+    const AGENT_BUILD: &str = "2026-11-18.host-verdict-r2";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
@@ -10828,6 +10889,13 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 "BTHLEDevice",
                 "some-other-bluetooth-device"
             ));
+        }
+
+        #[test]
+        fn pdo_allowlist_json_escapes_backslashes_and_quotes() {
+            let json = json_string_array(&[r"\Device\0000023e".to_string(), "a\"b".to_string()]);
+            assert_eq!(json, r#"["\\Device\\0000023e","a\"b"]"#);
+            assert_eq!(json_string_array(&[]), "[]");
         }
     }
 

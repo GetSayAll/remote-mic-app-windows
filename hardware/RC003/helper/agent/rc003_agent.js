@@ -77,9 +77,13 @@
  *                     {"type":"disarm"} / {"type":"arm"}
  *                     {"type":"mode","clear":true|false}
  *                     {"type":"restore","on":true|false}
- *                     {"type":"targets","report":[...],"clear":[...]}
+ *                     {"type":"targets","report":[...],"clear":[...],"pdo":["\\device\\..."]}
  *                       下发动态范围。report 必须是语义按键白名单的子集，clear
  *                       必须覆盖 report；空集合表示完全恢复原路径。
+ *                       pdo（2026-11-18）是**来源设备白名单**：只接受
+ *                       `NtQueryObject` 得到这些 `\Device\...` 名的报告，
+ *                       共享 WUDFHost 里的物理键盘因此不会被当成遥控器。
+ *                       缺省/空数组 = 不限制（fail-open，兼容旧助手）。
  */
 
 /* ------------------------------------------------------------------ 常量 */
@@ -88,7 +92,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-15.report-liveness';
+var AGENT_BUILD = '2026-11-18.host-verdict-r2';
 
 var TARGET_IOCTL = 0x80018483;
 /* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
@@ -224,6 +228,9 @@ var stat = {
   kernel_changed: 0,
   edges_sent: 0,
   foreign_reports: 0,         /* 活动来源之外的、形状匹配的报告数（2026-11-12） */
+  /* 报告来源不在 PDO 白名单里而被拒的数量（2026-11-18 共享宿主串扰）：
+     稳定上涨 = 物理键盘/其它 BLE 设备正在被正确拦下；白名单为空时恒为 0。 */
+  foreign_pdo: 0,
   forced_releases: 0,         /* disarm/bye/来源关闭触发的强制 UP（2026-11-12） */
   write_fail: 0,              /* 写失败/被拒的行数（不含"未连接"的丢弃） */
   /* 出站串行化的观测面（2026-10-02）。修复前 `targets_ack`/`synth:frame` 整类丢失
@@ -280,6 +287,16 @@ var inCloseHook = false;       /* NtClose 内部重入 guards（发送路径也�
 var reportUsages = [];
 var clearUsages = [];
 var targetGeneration = 0;
+/* 来源设备白名单（2026-11-18）：RC003 及其 HID 子节点的 `\Device\...` 对象名。
+   共享 WUDFHost 里的物理蓝牙键盘与遥控器报告形状完全相同（report_id 0x01、
+   同一 IOCTL），只按 usage 匹配时，键盘的方向键/回车恰好落在目标集合里 →
+   当成遥控器上报（方向键变鼠标移动）。空数组 = 助手没下发/解析失败，保持旧
+   行为（fail-open），绝不因为白名单缺失把遥控器整体关掉。
+
+   注意：本钩子里的真实来源是宿主自己的反射控制设备名
+   （`\Device\UmdfCtrlDev-{GUID}`，同宿主所有设备共用），设备 PDO 名对不上，
+   所以助手已不再下发非空白名单；机制保留给能按名字区分的宿主形态。 */
+var targetPdos = [];
 
 /* ------------------------------------------------------- 编解码与传输 */
 
@@ -449,6 +466,45 @@ function usageArrayOf(v) {
   return out;
 }
 
+/* 设备对象名白名单数组。非法形状返回 null（调用方保留旧白名单并计数），
+   而不是清空白名单——清空 = fail-open，等于放弃这道护栏。 */
+function pdoArrayOf(v) {
+  if (!Array.isArray(v)) return null;
+  if (v.length > 16) return null;
+  var out = [];
+  for (var i = 0; i < v.length; i++) {
+    var name = v[i];
+    if (typeof name !== 'string') return null;
+    if (name.length === 0 || name.length > 96) return null;
+    var normalized = normalizeDeviceName(name);
+    if (normalized.indexOf('\\device\\') !== 0) return null;
+    if (out.indexOf(normalized) < 0) out.push(normalized);
+  }
+  return out;
+}
+
+/* `\??\` 前缀与大小写都可能在两侧出现，统一后比较（helper 侧同名规则）。 */
+function normalizeDeviceName(name) {
+  var n = String(name || '').toLowerCase();
+  if (n.indexOf('\\??\\') === 0) n = n.slice(4);
+  /* 去掉 `\??\` 后 `Device\x` 少了前导分隔符，补回来（与 helper 侧同一规则）。 */
+  if (n.length > 0 && n.charAt(0) !== '\\') n = '\\' + n;
+  return n;
+}
+
+/* 句柄键 = `NtQueryObject` 查询失败时的退路（形如 `0x7ff...`）。这种来源无法
+   与 PDO 白名单比较：保持旧行为（放行）比把遥控器锁死更可接受；同时计数，
+   让"查询对象名失败"在心跳里可见。 */
+function opaqueSourceKey(source) {
+  return /^0x[0-9a-f]+$/.test(source);
+}
+
+function sourceAllowed(source) {
+  if (targetPdos.length === 0) return true;
+  if (opaqueSourceKey(source)) return true;
+  return targetPdos.indexOf(normalizeDeviceName(source)) >= 0;
+}
+
 function sameUsageSet(a, b) {
   if (a.length !== b.length) return false;
   for (var i = 0; i < a.length; i++) if (a.indexOf(b[i]) < 0) return false;
@@ -527,6 +583,15 @@ function handleCommand(line) {
     if (!isFinite(nextGeneration) || nextGeneration < 0) {
       stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_bad_generation'); return;
     }
+    /* 来源白名单（2026-11-18）：缺省 = 保持旧列表（兼容旧助手）；形状非法 = 整条
+       命令拒绝——不能让一条坏输入把护栏悄悄降级成 fail-open。 */
+    if (cmd.pdo !== undefined) {
+      var pdos = pdoArrayOf(cmd.pdo);
+      if (pdos === null) {
+        stat.cmd_rejected++; stat.targets_rejected++; logLine('targets:rejected_bad_pdo'); return;
+      }
+      targetPdos = pdos;
+    }
     /* 先释放被移出目标集的按键，避免切换映射时留下旧 DOWN。 */
     var retained = [];
     var before = currentUsages();
@@ -538,7 +603,7 @@ function handleCommand(line) {
     stat.targets_applied++;
     sendLine({ type: 'targets_ack', t: Date.now(), generation: targetGeneration, usages: reportUsages });
     logLine('targets:applied generation=' + targetGeneration + ' report=' + usagesHex(reportUsages)
-      + ' clear=' + usagesHex(clearUsages));
+      + ' clear=' + usagesHex(clearUsages) + ' pdo=' + targetPdos.length);
     return;
   }
   /* 语音键热键合成配置。护栏：from 必须是语音键、to 必须是已实测映射的
@@ -937,6 +1002,17 @@ function installHook() {
            这里必须在 `this.hit = true` 之前早退：onLeave 只负责恢复我们改过的
            缓冲区，异源报告我们一个字节都没动。 */
         var source = sourceKeyOf(args[0]);
+        /* 2026-11-18：来源白名单早于归属判定。共享宿主里的物理键盘报告形状完全
+           匹配（同一 IOCTL + report_id 0x01），方向键/回车与 RC003 的 usage 重合；
+           没有这道检查时它会认领 activeSource 并被当成遥控器上报（方向键→鼠标移动）。
+           仍必须在 `this.hit = true` 之前早退：这份报告我们一个字节都不改。 */
+        if (!sourceAllowed(source)) {
+          stat.foreign_pdo++;
+          if (stat.foreign_pdo <= 5 || stat.foreign_pdo % 100 === 0) {
+            logLine('source:not_rc003 n=' + stat.foreign_pdo);
+          }
+          return;
+        }
         if (activeSource !== null && source !== activeSource) {
           stat.foreign_reports++;
           if (stat.foreign_reports <= 5 || stat.foreign_reports % 100 === 0) {
@@ -1200,6 +1276,9 @@ function heartbeat() {
     synth_to: synthTo,
     gate_delay_ms: gateDelayMs,
     target_generation: targetGeneration,
+    /* 来源白名单条数（0 = 未下发/解析失败，fail-open）。条数足够判断
+       "这道护栏到底开没开"，又不必把设备路径写进日志。 */
+    pdo_sources: targetPdos.length,
     restore: restoreOnLeave,
     disarmed: disarmed,
     lease_ok: leaseOk(),
@@ -1223,6 +1302,7 @@ function heartbeat() {
       kernel_changed: stat.kernel_changed,
       edges_sent: stat.edges_sent,
       foreign_reports: stat.foreign_reports,
+      foreign_pdo: stat.foreign_pdo,
       forced_releases: stat.forced_releases,
       write_fail: stat.write_fail,
       /* 出站串行化的观测面：tx_lines 不涨 = 上行根本没出去；

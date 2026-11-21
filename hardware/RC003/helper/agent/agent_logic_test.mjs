@@ -351,6 +351,77 @@ check('targets 热更新被接受（targets_applied=2）',
   ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 7, report: [], clear: [] }));
 }
 
+/* ------- 7.6 来源设备白名单（2026-11-18 物理键盘方向键被当成遥控器） -------
+   共享 WUDFHost 里物理蓝牙键盘的报告与 RC003 形状完全相同（同一 IOCTL、
+   report_id 0x01），方向键 0x4F–0x52 / 回车 0x28 恰好落在目标 usage 里。
+   helper 下发 RC003 的 PDO 名后，agent 必须只认这些来源。 */
+
+{
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 8, report: [0x00f1, 0x0051], clear: [0x00f1, 0x0051],
+    pdo: ['\\Device\\000000AA'],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  const beforePdo = ctx.stat.foreign_pdo;
+  const beforeEdges = ctx.stat.edges_sent;
+
+  /* 物理键盘（不在白名单）按下方向键：一个字节都不能改，也不能上报边沿。 */
+  const keyboard = pressOn('\\Device\\000000bb', 0x0051);
+  check('PDO 白名单：物理键盘方向键不被清零',
+    keyboard.ptr.buf[3] === 0x51 && keyboard.ptr.buf[5] === 0,
+    `buf3=0x${keyboard.ptr.buf[3].toString(16)} buf5=${keyboard.ptr.buf[5]}`);
+  check('PDO 白名单：物理键盘报告不认领来源/不产生边沿',
+    keyboard.self.hit !== true && ctx.activeSource === null
+      && ctx.stat.edges_sent === beforeEdges,
+    `hit=${keyboard.self.hit} active=${ctx.activeSource} edges=${ctx.stat.edges_sent}`);
+  check('PDO 白名单：异源拒绝计数 +1', ctx.stat.foreign_pdo === beforePdo + 1,
+    `foreign_pdo=${ctx.stat.foreign_pdo} before=${beforePdo}`);
+
+  /* 遥控器（白名单内，大小写不同）按下确定键：正常清零并上报。 */
+  const remote = pressOn('\\Device\\000000aa', 0x00f1);
+  check('PDO 白名单：遥控器按下被清零（比较不区分大小写）',
+    remote.ptr.buf[3] === 0 && remote.ptr.buf[4] === 0
+      && ctx.activeSource === '\\Device\\000000aa',
+    `buf3=0x${remote.ptr.buf[3].toString(16)} active=${ctx.activeSource}`);
+  check('PDO 白名单：遥控器边沿 +1', ctx.stat.edges_sent === beforeEdges + 1);
+
+  pressOn('\\Device\\000000aa');
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  /* 查询对象名失败时的句柄退路（`0x...`）：无法比较 → 维持旧行为（放行）。 */
+  const opaque = pressOn('0x7ff0000', 0x00f1);
+  check('PDO 白名单：对象名查询失败（句柄退路）保持 fail-open',
+    opaque.ptr.buf[3] === 0 && opaque.self.hit === true && ctx.activeSource === '0x7ff0000');
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  /* 非法 pdo 形状：整条 targets 被拒，旧白名单仍生效。 */
+  const rejected = ctx.stat.targets_rejected;
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 9, report: [0x00f1], clear: [0x00f1], pdo: [123],
+  }));
+  check('PDO 白名单：非法 pdo 数组被拒', ctx.stat.targets_rejected === rejected + 1);
+  const stillRejected = pressOn('\\Device\\000000bb', 0x0051);
+  check('PDO 白名单：被拒后旧白名单仍生效', stillRejected.self.hit !== true);
+
+  /* 空数组 = 助手未下发/解析失败：护栏关闭（fail-open）。 */
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 10, report: [0x00f1, 0x0051], clear: [0x00f1, 0x0051], pdo: [],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+  const unguarded = pressOn('\\Device\\000000bb', 0x00f1);
+  check('PDO 白名单：空数组回落到旧行为（fail-open）',
+    unguarded.ptr.buf[3] === 0 && unguarded.self.hit === true);
+
+  ctx.handleCommand(JSON.stringify({ type: 'targets', generation: 11, report: [], clear: [] }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+}
+
 /* --------------------------- 8. 护栏仍然生效 */
 
 {
