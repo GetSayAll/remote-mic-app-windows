@@ -1,5 +1,5 @@
 /**
- * 第③步长时间重连与重置遥控器的排查卡（issue #104，2026-11-19；重置引导 2026-11-21）。
+ * 第②步长时间重连与重置遥控器的排查卡（issue #104，2026-11-19；重置引导 2026-11-21）。
  *
  * 组件级测试只覆盖计时与显示条件；文案的完整含义由纯逻辑测试
  * `src/onboarding/reconnect-guidance.test.ts` 锁定。
@@ -237,7 +237,8 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
       props: { ...baseProps, runtime: runtime("idle", 0, "stopped") },
     });
 
-    expect(wrapper.text()).toContain("找不到遥控器？先打开「高级」");
+    expect(wrapper.text()).toContain("找不到遥控器？部分电脑需要打开「高级」");
+    expect(wrapper.text()).toContain("如果在蓝牙列表里找不到遥控器，可以打开高级设置");
     expect(wrapper.text()).toContain(
       "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级",
     );
@@ -250,8 +251,21 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
       runtime: runtime("ready", 0, "ready"),
     });
     await nextTick();
-    expect(wrapper.text()).toContain("找不到遥控器？先打开「高级」");
+    expect(wrapper.text()).toContain("找不到遥控器？部分电脑需要打开「高级」");
     expect(wrapper.text()).not.toContain("打开后回到这里点「扫描已配对设备」");
+    wrapper.unmount();
+  });
+
+  it("连接页提示先用返回 / 音量±以外的键，收到按键后收起", async () => {
+    const wrapper = mount(RemoteStep, {
+      props: { ...baseProps, runtime: runtime("ready", 0, "ready") },
+    });
+    expect(wrapper.text()).toContain("连接测试请用返回 / 音量+ / 音量−以外的键");
+    expect(wrapper.text()).toContain("这三键要等后面开启全按键支持后才能使用");
+
+    await wrapper.setProps({ buttonObserved: true });
+    await nextTick();
+    expect(wrapper.text()).not.toContain("连接测试请用返回 / 音量+ / 音量−以外的键");
     wrapper.unmount();
   });
 });

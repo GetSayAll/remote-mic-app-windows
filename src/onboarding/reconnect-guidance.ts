@@ -10,7 +10,7 @@ import type { RawInputPhase } from "../lib/bridge";
 
 /** 约 60 秒：2/4/8/16/30 秒退避累计到第 5 次尝试。 */
 export const RECONNECT_GUIDANCE_DELAY_MS = 60_000;
-/** 次数兜底：用户中途进入第③步时，不必再等一个完整的 60 秒。 */
+/** 次数兜底：用户中途进入第②步时，不必再等一个完整的 60 秒。 */
 export const RECONNECT_GUIDANCE_ATTEMPT = 5;
 
 export interface ReconnectGuidanceInput {

@@ -61,7 +61,7 @@ const phaseLabel = computed(() => connectionPhaseLabel(connectionPhase.value));
  * 连续重连的本地计时（issue #104，2026-11-19）。
  *
  * 只用于决定「是否显示排查卡」，不参与连接逻辑；`reconnectAttempt >= 5`
- * 另有兜底，用户中途进入第③步时不必再等一个完整的 60 秒。
+ * 另有兜底，用户中途进入第②步时不必再等一个完整的 60 秒。
  */
 const reconnectWaitedMs = ref(0);
 let reconnectGuidanceTimer: number | undefined;
@@ -168,7 +168,7 @@ function isConnectedDevice(device: PairedRemote): boolean {
 
 /**
  * 按键行的说明句（2026-10-10 现场反馈）：系统侧按键通道可用 ≠ 应用自己的会话
- * 已建立——遥控器与电脑配对完成后，按键就能被收到（第③步的按键行随之变绿），
+ * 已建立——遥控器与电脑配对完成后，按键就能被收到（第②步的按键行随之变绿），
  * 但"继续"还要求应用连上遥控器。未连接时不再写"这一项可以继续了"（会与"先连接
  * 遥控器，再继续"打架），改成指出还差的那一步。
  * 2026-10-13 现场：连接就绪、按键也收到时**整行不再写任何说明句**——行本身已是
@@ -339,8 +339,10 @@ watch(
          添加设备列表里（现场截图：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 →
          蓝牙设备发现 → 高级）。路径常显；只有列表为空时再补"打开后怎么做"。 -->
     <div class="onboarding-card">
-      <h4>{{ t("找不到遥控器？先打开「高级」") }}</h4>
-      <p>{{ t("设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级") }}</p>
+      <h4>{{ t("找不到遥控器？部分电脑需要打开「高级」") }}</h4>
+      <p>
+        {{ t("如果在蓝牙列表里找不到遥控器，可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级") }}
+      </p>
       <p v-if="devices.length === 0 && !scanning">
         {{ t("打开后回到这里点「扫描已配对设备」；添加设备时选择「显示所有设备」。") }}
       </p>
@@ -394,6 +396,12 @@ watch(
         :desc="buttonRowDesc"
       />
     </div>
+
+    <!-- 2026-11-21 用户要求：连接页先让用户按系统默认可达的键；返回 / 音量±
+         要等第④步开启全按键支持后才可用。 -->
+    <p v-if="!buttonObserved" class="onboarding-muted">
+      {{ t("连接测试请用返回 / 音量+ / 音量−以外的键（如主页、OK、方向键）；这三键要等后面开启全按键支持后才能使用。") }}
+    </p>
 
     <p v-if="connected" class="onboarding-muted">
       {{ connectedModelLabel || connectedName }} · {{ phaseLabel }}

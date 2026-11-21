@@ -202,11 +202,11 @@ const captureHint = ref("");
 const captureSupport = ref<CaptureSupport | null>(null);
 const captureStatusLoading = ref(false);
 const captureLoadFailed = ref(false);
-/** 迟到回调保护：每次进入第②步都换一代，旧读取结果不得覆盖新状态。 */
+/** 迟到回调保护：每次进入第④步都换一代，旧读取结果不得覆盖新状态。 */
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
 const captureUnavailable = computed(() => captureSupport.value?.available === false);
-/** 第②步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
+/** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
   if (captureLoadFailed.value) {
     return t("读取全按键支持状态失败；可以重新进入这一步，或先继续。");
@@ -377,7 +377,7 @@ watch(
     stopButtonObservation();
     voiceKeyMistake.value = false;
     // 按键检测只收集边沿，绝不能触发用户已配置的按键动作（2026-10-05 用户要求：
-    // ③步原先不挂起，按下已映射的键会真的执行动作）。两处检测步骤统一挂起，
+    // ②步原先不挂起，按下已映射的键会真的执行动作）。两处检测步骤统一挂起，
     // 离开后立即恢复。
     const observingButtons = current === "remote" || current === "controls";
     const observedButtons = previous === "remote" || previous === "controls";
@@ -633,7 +633,7 @@ async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promis
   scanning.value = true;
   scanMessage.value = t("正在寻找小米遥控器…");
   const started = performance.now();
-  // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ③步自动连接触发）。
+  // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ②步自动连接触发）。
   reportStepAction("remote", "scan_requested", "unknown", { detail: mode });
   try {
     devices.value = await scanPairedRemotes();
@@ -715,7 +715,7 @@ async function openBluetoothSettings(): Promise<void> {
  * 第①步配对流程里的「打开蓝牙设置」（2026-10-13 现场）：只唤起系统设置页，
  * **成功不写任何提示**（①步是照做的清单，不需要"已打开…"回执）。
  * 失败原因仍写进 operationMessage 并落结构化日志——第①步没有消息区，
- * 用户走到第③步时能看到原因，日志里也有这一步的 action 记录。
+ * 用户走到第②步时能看到原因，日志里也有这一步的 action 记录。
  */
 async function openBluetoothSettingsFromWelcome(): Promise<void> {
   const started = performance.now();
@@ -739,7 +739,7 @@ async function openBluetoothSettingsFromWelcome(): Promise<void> {
 // ---- 遥控器步骤：自动连接（2026-10-10 现场反馈） ----
 //
 // 系统侧配对完成后，普通按键会先到（按键检查随之变绿），但"继续"还要求应用连上
-// 遥控器（语音会话）。为消除"按键已收到、连接未建立"这一中间状态：进入③步、
+// 遥控器（语音会话）。为消除"按键已收到、连接未建立"这一中间状态：进入②步、
 // 或系统侧遥控器刚出现时，若恰好只有一个已配对遥控器就自动连接。候选不唯一、
 // 一个都没有、连接已就绪/进行中/用户已手动断开时不触发；自动连接与手动点设备卡
 // 走同一条 connectDevice（保存设备 + 连接），日志用 detail=auto|manual 区分。
@@ -755,12 +755,12 @@ const shouldAutoConnectRemote = computed(() => {
 let autoConnectRunning = false;
 
 /**
- * ③步的自动动作（2026-10-13 现场扩了一条）：**进入③步先把已配对设备直接列出来**，
+ * ②步的自动动作（2026-10-13 现场扩了一条）：**进入②步先把已配对设备直接列出来**，
  * 再按原条件（未连接 + 输入通道在位 + 候选唯一）自动连接。
  *
  * 背景：原先只有"未连接且输入通道在位"才自动扫描，应用已连接 / 启动时恢复了会话时
- * 进③步看到的是空列表，用户必须自己点「扫描已配对设备」。现在两个触发点
- * （进入③步 / 遥控器在③步期间出现）共用本函数：先保证列表已带出，再决定要不要连。
+ * 进②步看到的是空列表，用户必须自己点「扫描已配对设备」。现在两个触发点
+ * （进入②步 / 遥控器在②步期间出现）共用本函数：先保证列表已带出，再决定要不要连。
  * 谁先跑到谁负责整轮，后到的由 `autoConnectRunning` 吸收，不会连扫两轮。
  */
 async function ensureRemoteListAndMaybeConnect(mode: "entry" | "auto"): Promise<void> {
@@ -812,19 +812,19 @@ watch(connectedRemoteIdentity, (identity) => {
   reportStepAction("remote", "button_observation_reset", "unknown", { detail: "remote_switched" });
 });
 
-// 触发点一：进入③步（不论连接状态，先把列表带出来）。
+// 触发点一：进入②步（不论连接状态，先把列表带出来）。
 watch(
   () => step.value,
   (value) => {
     if (value !== "remote") return;
-    // 进入③步时以当前计数为基线：只对"这一步里新增的"另一支按键反应（2026-10-13 现场）。
+    // 进入②步时以当前计数为基线：只对"这一步里新增的"另一支按键反应（2026-10-13 现场）。
     lastStaleRemoteEventCount = props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0;
     otherRemoteActivity.value = false;
     void ensureRemoteListAndMaybeConnect("entry");
   },
 );
 
-// 触发点二：停在③步期间系统侧遥控器出现（输入通道变为在位）。
+// 触发点二：停在②步期间系统侧遥控器出现（输入通道变为在位）。
 watch(shouldAutoConnectRemote, (should) => {
   if (!should) return;
   void ensureRemoteListAndMaybeConnect("auto");
@@ -978,7 +978,7 @@ async function openDownloadPage(): Promise<void> {
 // ---- 全按键支持步骤（可选增强）----
 
 /**
- * 进入第②步时读取开关与本机支持情况。读取失败不阻断继续（这一步是可选增强），
+ * 进入第④步时读取开关与本机支持情况。读取失败不阻断继续（这一步是可选增强），
  * 但要在开关旁说明；迟到结果按代数丢弃，不得覆盖重新进入后的新状态。
  */
 async function prepareFullKeyStep(): Promise<void> {
@@ -1175,8 +1175,8 @@ async function chooseOtherKeys(keys: KeyCode[]): Promise<void> {
 }
 
 /**
- * 开关操作日志的目标（2026-11-05）：同一个开关现在有两个入口——第②步说明页
- * 与第⑤步豆包卡片。按发起时所在步骤记录，别把第②步的操作记成 doubao。
+ * 开关操作日志的目标（2026-11-05）：同一个开关现在有两个入口——第④步说明页
+ * 与第⑤步豆包卡片。按发起时所在步骤记录，别把第④步的操作记成 doubao。
  */
 function captureLogTarget(): { step: OnboardingStep; detail: string } {
   return step.value === "full_key"
@@ -3008,7 +3008,7 @@ async function retryVoiceTest(): Promise<void> {
   outline: none;
 }
 
-/* ---- 全按键支持页（第②步）---- */
+/* ---- 全按键支持页（第④步）---- */
 /* 「建议开启」强调条（2026-11-05）：可选步骤也要让用户一眼看到收益；
    使用强调色底 + 实心标签，但不做成警告样式（不阻断继续）。 */
 .onboarding-recommend {
@@ -3057,7 +3057,7 @@ async function retryVoiceTest(): Promise<void> {
   padding-top: 16px;
   border-top: 1px solid var(--border);
 }
-/* 第②步的开关是卡片第一项：不画上方分隔线，也不留额外上边距。 */
+/* 第④步的开关是卡片第一项：不画上方分隔线，也不留额外上边距。 */
 .onboarding-switch-row--first {
   margin-top: 0;
   padding-top: 0;

@@ -24,12 +24,12 @@ export default {
     "Press and hold the TV button for about 3 seconds until the indicator light (on the bottom of the Xiaomi Bluetooth Voice Remote 2 Pro) starts flashing. This puts the remote in pairing mode.",
   "同时长按「主页」+「菜单」直到指示灯快速闪烁——重置遥控器的蓝牙并重新进入配对模式。":
     "Press and hold Home + Menu together until the indicator flashes quickly. This resets the remote's Bluetooth and returns it to pairing mode.",
-  "选中「小米蓝牙语音遥控器」，等待配对完成。列表里找不到设备时，先打开高级设备发现：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级；再点「显示所有设备」。":
-    "Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. If it is not listed, turn on Advanced device discovery first: Settings → Bluetooth & devices → Devices → scroll down → Bluetooth devices discovery → Advanced. Then select Show all devices.",
+  "选中「小米蓝牙语音遥控器」，等待配对完成。部分电脑在蓝牙列表里找不到遥控器时，可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级；再点「显示所有设备」。":
+    "Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. On some PCs, if the remote is not listed, open Advanced settings: Settings → Bluetooth & devices → Devices → scroll down → Bluetooth devices discovery → Advanced. Then select Show all devices.",
   "配对失败，或遥控器以前配对过别的设备：回到第 4 步重置蓝牙后重新配对。":
     "If pairing fails, or the remote was paired with another device before, go back to step 4, reset Bluetooth, and pair again.",
 
-  // ---- Step 3: remote connection ----
+  // ---- Step 2: remote connection ----
   "连接遥控器": "Connect the remote",
   "无线麦只支持小米蓝牙语音遥控器 2 和小米蓝牙语音遥控器 2 Pro（RC001 / RC003）。":
     "SayAll supports only the Xiaomi Bluetooth Voice Remote 2 and 2 Pro (RC001 / RC003).",
@@ -44,15 +44,17 @@ export default {
   "正在寻找小米遥控器…": "Looking for Xiaomi remotes…",
   "找到 1 个已配对的小米遥控器": "Found 1 paired Xiaomi remote",
   "找到 {count} 个已配对的小米遥控器": "Paired Xiaomi remotes found: {count}",
-  "找不到遥控器？先打开「高级」": "Can't find the remote? Turn on Advanced first",
-  "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级":
-    "Settings → Bluetooth & devices → Devices → scroll down → Bluetooth devices discovery → Advanced",
+  "找不到遥控器？部分电脑需要打开「高级」": "Can't find the remote? Some PCs need Advanced turned on",
+  "如果在蓝牙列表里找不到遥控器，可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级":
+    "If the remote is not listed, open Advanced settings: Settings → Bluetooth & devices → Devices → scroll down → Bluetooth devices discovery → Advanced",
   "打开后回到这里点「扫描已配对设备」；添加设备时选择「显示所有设备」。":
     "After turning it on, come back and select Scan for Paired Devices. When adding a device, select Show all devices.",
   "按一下遥控器上的普通按键（比如主页键），不要按语音键。":
     "Press a regular button on the remote, such as Home. Do not press the voice button.",
   "先按一下普通按键；仍无反应时，按下面的步骤重新配对。":
     "Press a regular button first. If nothing happens, follow the steps below to pair the remote again.",
+  "连接测试请用返回 / 音量+ / 音量−以外的键（如主页、OK、方向键）；这三键要等后面开启全按键支持后才能使用。":
+    "Use keys other than Back, Volume+, and Volume− for this test (such as Home, OK, or an arrow key). Those three work only after Full-key support is turned on in a later step.",
   "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。":
     "Button received. One more step: select Scan for Paired Devices and choose the remote to connect.",
   "按键已收到。还差一步：点遥控器一行右侧的“连接”。":
@@ -112,11 +114,9 @@ export default {
     "Bluetooth settings opened. After pairing, come back and select Scan for Paired Devices.",
   "无法打开蓝牙设置，请重试。": "Could not open Bluetooth settings. Try again.",
 
-  // ---- Step 2: full-key support (optional) ----
+  // ---- Step 4: full-key support (optional) ----
   "开启全按键支持": "Turn on Full-key support",
   "建议开启": "Recommended",
-  "建议先开启，再连接遥控器；这样连接后按返回 / 音量键也能直接使用。":
-    "Turn this on before connecting the remote so Back and Volume keys work right after it connects.",
   "开启后，返回 / 音量+ / 音量− 才能自定义；豆包语音输入也需要它。":
     "When on, Back, Volume+, and Volume− can be customized, and Doubao voice input needs it too.",
   "开启后，遥控器上的所有按键都能设置自定义功能，包括 Windows 默认收不到的返回 / 音量+ / 音量−。":
@@ -136,7 +136,7 @@ export default {
   "全按键支持已开启": "Full-key support is on",
   "这台电脑暂不支持全按键支持": "Full-key support is not available on this PC",
 
-  // ---- Step 4: audio device ----
+  // ---- Step 3: audio device ----
   "选择语音设备": "Choose an audio device",
   "无线麦把遥控器的声音送到播放端（CABLE Input）；语音工具再从录音端（CABLE Output）读取声音。":
     "SayAll sends the remote's audio to CABLE Input; your voice app reads it from CABLE Output.",

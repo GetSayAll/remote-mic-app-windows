@@ -1242,7 +1242,7 @@ fn windows_settings_section_name(section: WindowsSettingsSection) -> &'static st
     }
 }
 
-/// 打开固定的 Windows 设置页（向导第①/③步的「打开蓝牙设置」等入口）。
+/// 打开固定的 Windows 设置页（向导第①/②步的「打开蓝牙设置」等入口）。
 #[tauri::command]
 fn open_windows_settings(section: WindowsSettingsSection) -> Result<(), String> {
     let name = windows_settings_section_name(section);
@@ -4311,7 +4311,7 @@ async fn complete_onboarding(
     }
 }
 
-/// 第④步暂存语音绑定：落回滚快照 + 应用正式配置，并把工具/快捷键推给平台。
+/// 第⑤步暂存语音绑定：落回滚快照 + 应用正式配置，并把工具/快捷键推给平台。
 ///
 /// 平台应用与 `restore_voice_input_tool` / `set_voice_hold_hotkey` 同一条链路：
 /// 保证第⑤步真实验证时按下语音键就能按 staged 组合触发。这里**不做选中即对齐**

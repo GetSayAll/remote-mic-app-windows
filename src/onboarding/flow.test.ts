@@ -49,12 +49,12 @@ function makeContext(
 }
 
 describe("onboarding step order", () => {
-  it("puts the optional full-key step before the remote connection (2026-11-21)", () => {
+  it("keeps the optional full-key step after the audio device (2026-11-21 决定)", () => {
     expect(ONBOARDING_STEPS).toEqual([
       "welcome",
-      "full_key",
       "remote",
       "audio",
+      "full_key",
       "voice_tool",
       "voice_test",
       "controls",
@@ -75,16 +75,16 @@ describe("onboarding step order", () => {
 
   it("navigates forward and backward without auto-skipping", () => {
     expect(previousStep("welcome")).toBeNull();
-    expect(nextStep("welcome")).toBe("full_key");
-    expect(nextStep("full_key")).toBe("remote");
+    expect(nextStep("welcome")).toBe("remote");
     expect(nextStep("remote")).toBe("audio");
-    expect(nextStep("audio")).toBe("voice_tool");
-    expect(previousStep("remote")).toBe("full_key");
-    expect(previousStep("voice_tool")).toBe("audio");
+    expect(nextStep("audio")).toBe("full_key");
+    expect(nextStep("full_key")).toBe("voice_tool");
+    expect(previousStep("full_key")).toBe("audio");
+    expect(previousStep("voice_tool")).toBe("full_key");
     expect(previousStep("audio")).toBe("remote");
     expect(nextStep("controls")).toBe("complete");
     expect(nextStep("complete")).toBeNull();
-    expect(previousStep("full_key")).toBe("welcome");
+    expect(previousStep("remote")).toBe("welcome");
   });
 
   it("derives a strictly increasing progress percent from the step order", () => {
@@ -96,7 +96,8 @@ describe("onboarding step order", () => {
     expect(percentages[0]).toBeGreaterThan(0);
     expect(percentages.at(-1)).toBe(100);
     expect(stepProgressPercent("welcome")).toBe(4);
-    expect(stepProgressPercent("full_key")).toBe(18);
+    expect(stepProgressPercent("remote")).toBe(18);
+    expect(stepProgressPercent("full_key")).toBe(45);
     expect(stepProgressPercent("complete")).toBe(100);
   });
 

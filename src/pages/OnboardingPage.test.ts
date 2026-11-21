@@ -386,7 +386,7 @@ describe("Onboarding wizard shell", () => {
     expect(onboardingEvents("step_entered").some((p) => p.step === "remote")).toBe(true);
   });
 
-  it("advances from welcome to the full-key step and persists the new step", async () => {
+  it("advances from welcome to remote and persists the new step", async () => {
     const wrapper = await mountWizard(runtimeWith());
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
     // 标题位置稳定（2026-10-05 要求）：第①步没有上一步，但保留同高占位，
@@ -398,25 +398,12 @@ describe("Onboarding wizard shell", () => {
     await continueButton.trigger("click");
     await flushPromises();
 
-    // 2026-11-21：全按键支持前置到遥控器连接之前（先开启，再连接）。
-    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
-    expect(wrapper.text()).toContain("开启全按键支持");
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
+    expect(wrapper.text()).toContain("连接遥控器");
     expect(wrapper.find(".onboarding-back").exists()).toBe(true);
     expect(wrapper.find(".onboarding-back--placeholder").exists()).toBe(false);
     const passed = onboardingEvents("step_passed");
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
-  });
-
-  it("全按键支持步骤之后才进入遥控器连接（2026-11-21 前置）", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper.find(".onboarding-actions .primary-button").trigger("click");
-    await flushPromises();
-
-    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
-    expect(wrapper.text()).toContain("连接遥控器");
-    expect(wrapper.text()).toContain("扫描已配对设备");
   });
 
   it("全按键支持说明页：默认可继续，并说明会同时打开支持更多输入工具", async () => {
@@ -480,7 +467,7 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("已开启。返回 / 音量+ / 音量− 现在也能自定义。");
     expect(wrapper.text()).not.toContain("现在不开启也可以继续");
-    // 授权日志按第②步记录，不得沿用第⑤步的 doubao 标记。
+    // 授权日志按第④步记录，不得沿用第⑤步的 doubao 标记。
     const auth = onboardingEvents("authorization");
     expect(auth.map((p) => p.result)).toEqual(["unknown", "passed"]);
     expect(auth.every((p) => p.step === "full_key" && p.detail === "full_key")).toBe(true);
@@ -568,6 +555,7 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("长按「TV」键约 3 秒");
     expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    expect(wrapper.text()).toContain("部分电脑在蓝牙列表里找不到遥控器时，可以打开高级设置");
     expect(wrapper.text()).toContain(
       "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级",
     );
@@ -1091,7 +1079,7 @@ describe("Onboarding wizard shell", () => {
   });
 
   it("navigates back without losing the wizard and logs the user action", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(runtimeWith());
 
     // 新外壳（2026-10-05 反馈后）：返回在内容列左上；不再有整幅页脚横幅；
@@ -1107,7 +1095,7 @@ describe("Onboarding wizard shell", () => {
 
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
     const nav = onboardingEvents("navigation");
-    expect(nav.some((p) => p.reason === "user_back" && p.step === "full_key" && p.detail === "welcome")).toBe(true);
+    expect(nav.some((p) => p.reason === "user_back" && p.step === "remote" && p.detail === "welcome")).toBe(true);
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("welcome");
   });
 
@@ -1158,11 +1146,14 @@ describe("Onboarding wizard shell", () => {
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(continueButton.attributes("disabled")).toBeUndefined();
 
-    // 继续 → 第⑤步（输入工具）；全按键支持已在第②步完成。
+    // 继续 → 第④步（全按键支持说明）；再继续才进入第⑤步输入工具。
     await continueButton.trigger("click");
     await flushPromises();
-    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("voice_tool");
-    expect(wrapper.text()).toContain("选择你要用的输入工具");
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
+    expect(wrapper.text()).toContain("开启全按键支持");
+    expect(wrapper.text()).toContain(
+      "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。",
+    );
   });
 
   it("keeps a recoverable state-read error with a retry entry", async () => {
