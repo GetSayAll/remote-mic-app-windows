@@ -24,9 +24,9 @@ export default {
     "Press and hold the TV button for about 3 seconds until the indicator light (on the bottom of the Xiaomi Bluetooth Voice Remote 2 Pro) starts flashing. This puts the remote in pairing mode.",
   "同时长按「主页」+「菜单」直到指示灯快速闪烁——重置遥控器的蓝牙并重新进入配对模式。":
     "Press and hold Home + Menu together until the indicator flashes quickly. This resets the remote's Bluetooth and returns it to pairing mode.",
-  "选中「小米蓝牙语音遥控器」，等待配对完成。部分电脑在蓝牙列表里找不到遥控器时，可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级；再点「显示所有设备」。":
-    "Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. On some PCs, if the remote is not listed, open Advanced settings: Settings → Bluetooth & devices → Devices → scroll down → Bluetooth devices discovery → Advanced. Then select Show all devices.",
-  "配对失败，或遥控器以前配对过别的设备：回到第 4 步重置蓝牙后重新配对。":
+  "选中「小米蓝牙语音遥控器」，等待配对完成，找不到时可以点开「显示所有设备」。部分电脑在蓝牙列表里找不到遥控器时，可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级。":
+    "Select Xiaomi Bluetooth Voice Remote and wait for pairing to finish. If it does not appear, select Show all devices. On some PCs, if the remote is not listed, open Advanced settings: Settings → Bluetooth & devices → Devices → scroll down → Bluetooth devices discovery → Advanced.",
+  "若配对失败，或遥控器以前配对过别的设备：回到第 4 步重置蓝牙后重新配对。":
     "If pairing fails, or the remote was paired with another device before, go back to step 4, reset Bluetooth, and pair again.",
 
   // ---- Step 2: remote connection ----
@@ -53,8 +53,6 @@ export default {
     "Press a regular button on the remote, such as Home. Do not press the voice button.",
   "先按一下普通按键；仍无反应时，按下面的步骤重新配对。":
     "Press a regular button first. If nothing happens, follow the steps below to pair the remote again.",
-  "连接测试请用返回 / 音量+ / 音量−以外的键（如主页、OK、方向键）；这三键要等后面开启全按键支持后才能使用。":
-    "Use keys other than Back, Volume+, and Volume− for this test (such as Home, OK, or an arrow key). Those three work only after Full-key support is turned on in a later step.",
   "按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。":
     "Button received. One more step: select Scan for Paired Devices and choose the remote to connect.",
   "按键已收到。还差一步：点遥控器一行右侧的“连接”。":
@@ -92,8 +90,8 @@ export default {
     "Press and hold Home + Menu together until the indicator flashes quickly. This resets the remote's Bluetooth.",
   "在 Windows 蓝牙设置里删除这支遥控器。":
     "Remove this remote in Windows Bluetooth settings.",
-  "长按「TV」键约 3 秒重新配对；回到这里点「重新扫描」，再点设备行右侧的「连接」。":
-    "Hold the TV button for about 3 seconds to pair it again. Come back, select Scan Again, then select Connect on the right side of the remote row.",
+  "配对完成后回到这里点「重新扫描」，再点设备行右侧的「连接」。":
+    "After pairing is complete, come back and select Scan Again, then select Connect on the right side of the remote row.",
   "刚才按的是语音键": "That was the voice button",
   "请按遥控器上除语音键以外的普通按键（比如主页键）。":
     "Press a regular button on the remote, such as Home. Do not press the voice button.",
@@ -352,8 +350,8 @@ export default {
   "按键监听正在启动，请稍等一下。": "Button detection is starting. Wait a moment.",
   "Windows 还没有识别到这支遥控器的按键通道。打开蓝牙设置重新配对。":
     "Windows has not detected this remote's button channel. Open Bluetooth settings and pair the remote again.",
-  "连接已就绪。按一下遥控器上的普通按键（比如主页键），不要按语音键。":
-    "The connection is ready. Press a regular button on the remote, such as Home, not the voice button.",
+  "连接已就绪。按一下遥控器上的除返回 / 音量+ / 音量−以外的键（如主页、OK、方向键），这三键要等后面开启全按键支持后才能使用，另外不要按语音键。":
+    "The connection is ready. Press a key on the remote other than Back, Volume+, and Volume− (such as Home, OK, or an arrow key). Those three keys work only after Full-key support is turned on later. Do not press the voice button.",
   "完成一次真实的语音上屏测试，再继续。":
     "Complete one real voice-to-text test to continue.",
   "按 3 个不同的普通按键（推荐主页 / OK / 方向键），再继续。":

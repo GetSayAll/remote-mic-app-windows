@@ -164,7 +164,13 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
     vi.advanceTimersByTime(20_000);
     await nextTick();
     expect(wrapper.text()).toContain("遥控器名称是 MI RC");
-    expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    const text = wrapper.text();
+    const remove = text.indexOf("在 Windows 蓝牙设置里删除这支遥控器。");
+    const reset = text.indexOf("同时长按「主页」+「菜单」");
+    const repair = text.indexOf("配对完成后回到这里点「重新扫描」");
+    expect(remove).toBeGreaterThanOrEqual(0);
+    expect(remove).toBeLessThan(reset);
+    expect(reset).toBeLessThan(repair);
     wrapper.unmount();
   });
 
@@ -232,7 +238,7 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
     wrapper.unmount();
   });
 
-  it("常显 Windows「高级」的完整路径；列表为空时再补打开后的下一步", async () => {
+  it("只有找不到已配对遥控器时才显示 Windows「高级」提示，并与下方留间距", async () => {
     const wrapper = mount(RemoteStep, {
       props: { ...baseProps, runtime: runtime("idle", 0, "stopped") },
     });
@@ -243,29 +249,33 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
       "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级",
     );
     expect(wrapper.text()).toContain("打开后回到这里点「扫描已配对设备」");
+    expect(wrapper.find(".onboarding-advanced-card").exists()).toBe(true);
+
+    await wrapper.setProps({ scanning: true });
+    await nextTick();
+    expect(wrapper.find(".onboarding-advanced-card").exists()).toBe(false);
 
     await wrapper.setProps({
+      scanning: false,
       devices: [
         { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
       ],
       runtime: runtime("ready", 0, "ready"),
     });
     await nextTick();
-    expect(wrapper.text()).toContain("找不到遥控器？部分电脑需要打开「高级」");
-    expect(wrapper.text()).not.toContain("打开后回到这里点「扫描已配对设备」");
+    expect(wrapper.find(".onboarding-advanced-card").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("找不到遥控器？部分电脑需要打开「高级」");
     wrapper.unmount();
   });
 
-  it("连接页提示先用返回 / 音量±以外的键，收到按键后收起", async () => {
+  it("连接页不再重复页脚的按键提示，按键行只保留短说明", () => {
     const wrapper = mount(RemoteStep, {
       props: { ...baseProps, runtime: runtime("ready", 0, "ready") },
     });
-    expect(wrapper.text()).toContain("连接测试请用返回 / 音量+ / 音量−以外的键");
-    expect(wrapper.text()).toContain("这三键要等后面开启全按键支持后才能使用");
-
-    await wrapper.setProps({ buttonObserved: true });
-    await nextTick();
     expect(wrapper.text()).not.toContain("连接测试请用返回 / 音量+ / 音量−以外的键");
+    expect(wrapper.text()).toContain(
+      "按一下遥控器上的普通按键（比如主页键），不要按语音键。",
+    );
     wrapper.unmount();
   });
 });

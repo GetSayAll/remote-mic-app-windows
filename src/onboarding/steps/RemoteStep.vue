@@ -335,15 +335,17 @@ watch(
       </button>
     </div>
 
-    <!-- 2026-11-21 用户要求：Windows「高级」没打开时，遥控器根本不会出现在
-         添加设备列表里（现场截图：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 →
-         蓝牙设备发现 → 高级）。路径常显；只有列表为空时再补"打开后怎么做"。 -->
-    <div class="onboarding-card">
+    <!-- 2026-11-21 用户要求：只有找不到已配对遥控器时才显示这张提示卡，
+         并让它与下方设备行/状态行留出间距。 -->
+    <div
+      v-if="devices.length === 0 && !scanning"
+      class="onboarding-card onboarding-advanced-card"
+    >
       <h4>{{ t("找不到遥控器？部分电脑需要打开「高级」") }}</h4>
       <p>
         {{ t("如果在蓝牙列表里找不到遥控器，可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级") }}
       </p>
-      <p v-if="devices.length === 0 && !scanning">
+      <p>
         {{ t("打开后回到这里点「扫描已配对设备」；添加设备时选择「显示所有设备」。") }}
       </p>
     </div>
@@ -396,12 +398,6 @@ watch(
         :desc="buttonRowDesc"
       />
     </div>
-
-    <!-- 2026-11-21 用户要求：连接页先让用户按系统默认可达的键；返回 / 音量±
-         要等第④步开启全按键支持后才可用。 -->
-    <p v-if="!buttonObserved" class="onboarding-muted">
-      {{ t("连接测试请用返回 / 音量+ / 音量−以外的键（如主页、OK、方向键）；这三键要等后面开启全按键支持后才能使用。") }}
-    </p>
 
     <p v-if="connected" class="onboarding-muted">
       {{ connectedModelLabel || connectedName }} · {{ phaseLabel }}
@@ -512,16 +508,16 @@ watch(
       <ul class="onboarding-numlist">
         <li>
           <span class="onboarding-num">1</span>
-          <span>{{ t("同时长按「主页」+「菜单」直到指示灯快速闪烁——重置遥控器的蓝牙。") }}</span>
+          <span>{{ t("在 Windows 蓝牙设置里删除这支遥控器。") }}</span>
         </li>
         <li>
           <span class="onboarding-num">2</span>
-          <span>{{ t("在 Windows 蓝牙设置里删除这支遥控器。") }}</span>
+          <span>{{ t("同时长按「主页」+「菜单」直到指示灯快速闪烁——重置遥控器的蓝牙。") }}</span>
         </li>
         <li>
           <span class="onboarding-num">3</span>
           <span>
-            {{ t("长按「TV」键约 3 秒重新配对；回到这里点「重新扫描」，再点设备行右侧的「连接」。") }}
+            {{ t("配对完成后回到这里点「重新扫描」，再点设备行右侧的「连接」。") }}
           </span>
         </li>
       </ul>

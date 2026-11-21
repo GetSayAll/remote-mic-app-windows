@@ -1,14 +1,18 @@
-# Step 5: rotate old diag log, start app WITH SAYALL_GATT_LOG, wait, poll UI
+﻿# Step 5: rotate old diag log, start app WITH SAYALL_GATT_LOG, wait, poll UI
 # ASCII only.
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# Keep diagnostic overrides inside the product Logs folder. Root-level logs from
+# older one-off runs are not the app default and make "open log folder" ambiguous.
+$logDir = Join-Path $env:LOCALAPPDATA 'SayAll\Logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$log = Join-Path $logDir 'sayall-diag.log'
 # rotate old log (keep history; do not delete per repo rule)
-$old = "$env:USERPROFILE\sayall-diag.log"
-if (Test-Path $old) {
-    Move-Item $old "$env:USERPROFILE\sayall-diag-20260906.log" -Force
+if (Test-Path $log) {
+    Move-Item $log (Join-Path $logDir 'sayall-diag-20260906.log') -Force
     Write-Output 'OLD_LOG_ROTATED'
 }
 
@@ -22,7 +26,7 @@ foreach ($d in Get-ChildItem $env:LOCALAPPDATA -Directory) {
 if (-not $exe) { Write-Output 'EXE_NOT_FOUND'; exit 1 }
 Write-Output "EXE=$exe"
 
-$env:SAYALL_GATT_LOG = "$env:USERPROFILE\sayall-diag.log"
+$env:SAYALL_GATT_LOG = $log
 Start-Process -FilePath $exe
 Write-Output 'APP_STARTED_WITH_DIAG'
 
@@ -32,8 +36,8 @@ $proc = Get-Process -Name 'sayall-windows-app'
 if (-not $proc) { Write-Output 'APP_NOT_RUNNING_AFTER_START'; exit 2 }
 Write-Output "RUNNING PID=$($proc.Id)"
 
-if (Test-Path "$env:USERPROFILE\sayall-diag.log") {
-    $sz = (Get-Item "$env:USERPROFILE\sayall-diag.log").Length
+if (Test-Path $log) {
+    $sz = (Get-Item $log).Length
     Write-Output "DIAG_LOG_SIZE=$sz"
 } else {
     Write-Output 'DIAG_LOG_NOT_CREATED_YET'

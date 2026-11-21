@@ -416,7 +416,8 @@ const BLOCK_COPY: Record<OnboardingBlockCode, string> = {
   "remote.listener_not_ready": "按键监听正在启动，请稍等一下。",
   "remote.hid_interface_missing":
     "Windows 还没有识别到这支遥控器的按键通道。打开蓝牙设置重新配对。",
-  "remote.button_not_ready": "连接已就绪。按一下遥控器上的普通按键（比如主页键），不要按语音键。",
+  "remote.button_not_ready":
+    "连接已就绪。按一下遥控器上的除返回 / 音量+ / 音量−以外的键（如主页、OK、方向键），这三键要等后面开启全按键支持后才能使用，另外不要按语音键。",
   "audio.install_required": "这台电脑还没有 VB-CABLE 语音设备，先安装再继续。",
   "audio.not_selected": "选择带「推荐」标记的语音设备，再继续。",
   "audio.not_ready": "语音设备没准备好；重新选择或刷新设备列表后再试。",
@@ -2373,9 +2374,12 @@ async function retryVoiceTest(): Promise<void> {
           <!-- 门禁提示独立占一整行（2026-10-13 现场要求：提示句保持一行不换行）；
                行高固定，提示出现/消失时按钮不跳位。 -->
           <div class="onboarding-block-line" aria-live="polite">
-            <span v-if="!continueEnabled && blockMessage" class="onboarding-block-hint">{{
-              blockMessage
-            }}</span>
+            <span
+              v-if="!continueEnabled && blockMessage"
+              class="onboarding-block-hint"
+              :class="{ 'onboarding-block-hint--wrap': gate.code === 'remote.button_not_ready' }"
+              >{{ blockMessage }}</span
+            >
           </div>
           <div class="onboarding-actions-left">
             <button
@@ -2727,6 +2731,10 @@ async function retryVoiceTest(): Promise<void> {
 }
 .onboarding-card + .onboarding-card {
   margin-top: 14px;
+}
+/* ② 步「高级」提示卡：只在找不到已配对设备时出现，并与下方设备行留出间距。 */
+.onboarding-card.onboarding-advanced-card {
+  margin-bottom: 16px;
 }
 .onboarding-card.accent {
   border-color: var(--accent-border);
@@ -3246,6 +3254,13 @@ async function retryVoiceTest(): Promise<void> {
   text-align: right;
   /* 保持一行不换行（2026-10-13 现场要求）；本行独占整行宽度，最长提示也放得下。 */
   white-space: nowrap;
+}
+/* 连接页的按键提示包含三键限制、全按键支持和语音键三项，单行会越界；
+   只让这一条在整行内换行，其他门禁提示仍保持单行。 */
+.onboarding-block-hint--wrap {
+  max-width: 100%;
+  line-height: 1.5;
+  white-space: normal;
 }
 /* 「打开日志目录」：过不去时的报障入口，低频动作，弱化为文字链接（无下划线）。 */
 .onboarding-diagnostics-button {

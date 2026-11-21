@@ -555,12 +555,16 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("长按「TV」键约 3 秒");
     expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    expect(wrapper.text()).toContain(
+      "选中「小米蓝牙语音遥控器」，等待配对完成，找不到时可以点开「显示所有设备」。",
+    );
     expect(wrapper.text()).toContain("部分电脑在蓝牙列表里找不到遥控器时，可以打开高级设置");
     expect(wrapper.text()).toContain(
       "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级",
     );
-    expect(wrapper.text()).toContain("再点「显示所有设备」");
-    expect(wrapper.text()).toContain("回到第 4 步重置蓝牙后重新配对");
+    expect(wrapper.text()).toContain(
+      "若配对失败，或遥控器以前配对过别的设备：回到第 4 步重置蓝牙后重新配对。",
+    );
     // 底部那段提示按现场要求删掉。
     expect(wrapper.text()).not.toContain("设置中途可以随时退出");
     // 编号连续 1–5（第 2 条下方是「打开蓝牙设置」按钮行，不占编号）。
@@ -608,7 +612,11 @@ describe("Onboarding wizard shell", () => {
     expect(readyBlocked).toHaveLength(1);
     expect(String(readyBlocked[0].detail)).toContain("p_r");
     expect(String(readyBlocked[0].detail)).toContain("raw_r");
-    expect(wrapper.text()).toContain("按一下遥控器上的普通按键");
+    expect(wrapper.text()).toContain(
+      "连接已就绪。按一下遥控器上的除返回 / 音量+ / 音量−以外的键",
+    );
+    expect(wrapper.text()).toContain("另外不要按语音键");
+    expect(wrapper.find(".onboarding-block-hint--wrap").exists()).toBe(true);
 
     // 收到生产链路普通按键：门禁通过，恢复事件落日志。
     mocks.buttonHandler?.({ button: "home", isPressed: true });

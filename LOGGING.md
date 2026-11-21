@@ -36,8 +36,10 @@ windows_build=<build 或 unknown>
 构建时写入 `source_revision`，运行时不得读取 Git 工作区。无法可靠取得的值写 `unknown`，不能省略字段。
 
 正式应用默认写入 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`，不再要求用户
-预先设置环境变量。受控测试仍可用 `SAYALL_GATT_LOG` 覆盖写入位置；日志正文不得
-打印实际文件路径。应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
+预先设置环境变量。受控测试仍可用 `SAYALL_GATT_LOG` 覆盖写入位置；手动覆盖也默认应放在
+`%LOCALAPPDATA%\SayAll\Logs\` 下，只有需要隔离并发进程时才使用临时目录。日志正文不得
+打印实际文件路径。`%LOCALAPPDATA%\SayAll` 根目录里的旧诊断文件是历史手动覆盖产物，
+不是应用默认路径。应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
 在用户看到主页面前后分别留痕，确保安装后白屏可以区分为宿主、WebView、脚本、
 Vue 渲染或 IPC 阶段故障。
 
