@@ -48,12 +48,12 @@ function makeContext(
 }
 
 describe("onboarding step order", () => {
-  it("keeps the confirmed order plus the optional full-key step after the audio device", () => {
+  it("puts the optional full-key step before the remote connection (2026-11-21)", () => {
     expect(ONBOARDING_STEPS).toEqual([
       "welcome",
+      "full_key",
       "remote",
       "audio",
-      "full_key",
       "voice_tool",
       "voice_test",
       "controls",
@@ -74,15 +74,16 @@ describe("onboarding step order", () => {
 
   it("navigates forward and backward without auto-skipping", () => {
     expect(previousStep("welcome")).toBeNull();
-    expect(nextStep("welcome")).toBe("remote");
+    expect(nextStep("welcome")).toBe("full_key");
+    expect(nextStep("full_key")).toBe("remote");
     expect(nextStep("remote")).toBe("audio");
-    expect(nextStep("audio")).toBe("full_key");
-    expect(previousStep("full_key")).toBe("audio");
-    expect(previousStep("voice_tool")).toBe("full_key");
+    expect(nextStep("audio")).toBe("voice_tool");
+    expect(previousStep("remote")).toBe("full_key");
+    expect(previousStep("voice_tool")).toBe("audio");
     expect(previousStep("audio")).toBe("remote");
     expect(nextStep("controls")).toBe("complete");
     expect(nextStep("complete")).toBeNull();
-    expect(previousStep("remote")).toBe("welcome");
+    expect(previousStep("full_key")).toBe("welcome");
   });
 
   it("normalizes unknown persisted steps to welcome (older/newer writers must not strand the flow)", () => {

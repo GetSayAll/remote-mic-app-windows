@@ -6,7 +6,6 @@ import type {
   AudioSnapshot,
   CaptureSupport,
   ConnectionPhase,
-  DiagnosticReport,
   RawInputPhase,
   Rc003BridgeSnapshot,
   RuntimeSnapshot,
@@ -46,7 +45,7 @@ const mocks = vi.hoisted(() => ({
   setMappingSuspension: vi.fn(),
   completeOnboarding: vi.fn(),
   getRuntimeSnapshot: vi.fn(),
-  getDiagnosticReport: vi.fn(),
+  openLogDirectory: vi.fn(),
   beginKeyObservation: vi.fn(),
   endKeyObservation: vi.fn(),
   rc003Disabled: {
@@ -95,7 +94,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     setMappingSuspension: mocks.setMappingSuspension,
     completeOnboarding: mocks.completeOnboarding,
     getRuntimeSnapshot: mocks.getRuntimeSnapshot,
-    getDiagnosticReport: mocks.getDiagnosticReport,
+    openLogDirectory: mocks.openLogDirectory,
     beginKeyObservation: mocks.beginKeyObservation,
     endKeyObservation: mocks.endKeyObservation,
   };
@@ -200,81 +199,6 @@ function onboardingEvents(phase: string): Array<Record<string, unknown>> {
     .filter((payload) => payload.event === "onboarding" && payload.phase === phase);
 }
 
-/** 诊断报告夹具：与 Rust `get_diagnostic_report`（schema v2）同形。 */
-function diagnosticReport(): DiagnosticReport {
-  return {
-    schemaVersion: 4,
-    appVersion: "0.5.0",
-    appBuild: "unknown",
-    sourceRevision: "fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901",
-    buildChannel: "local-test",
-    windowsVersion: "10.0.26100",
-    processArchitecture: "x86_64",
-    bootType: "full",
-    fastStartupEnabled: false,
-    platform: "windows",
-    verificationStatus: "真机验证中",
-    capabilities: {
-      windowsApiAvailable: true,
-      bleScanAvailable: true,
-      bleVoiceReady: false,
-      wasapiReady: true,
-      rawInputReady: false,
-      sendInputReady: true,
-    },
-    connection: {
-      phase: "idle",
-      capabilitiesConfirmed: false,
-      sampleRate: null,
-      frameSize: null,
-      decodedSamples: 0,
-      generation: 0,
-      reconnectAttempt: 0,
-      powerNotificationsAvailable: false,
-      errorPresent: false,
-    },
-    audio: {
-      phase: "unconfigured",
-      endpointConfigured: false,
-      queuedSamples: 0,
-      submittedSamples: 0,
-      generation: 0,
-      errorPresent: false,
-    },
-    rawInput: {
-      phase: "stopped",
-      matchedDeviceCount: 0,
-      rawEventCount: 0,
-      semanticEdgeCount: 0,
-      lastButton: null,
-      lastIsPressed: null,
-      errorPresent: false,
-    },
-    sendInput: {
-      available: true,
-      submittedBatches: 0,
-      submittedEvents: 0,
-      errorPresent: false,
-    },
-    buttonMapping: {
-      enabled: true,
-      gateActive: false,
-      listenerActive: false,
-      swallowedEdges: 0,
-      leakedDowns: 0,
-      firedGestures: 0,
-      errorPresent: false,
-    },
-    ime: {
-      detected: true,
-      activeName: "微软拼音",
-      installedNames: ["微软拼音", "微信输入法"],
-      expectedName: "微信输入法",
-      matchesExpected: false,
-    },
-  };
-}
-
 async function mountWizard(
   runtime: RuntimeSnapshot,
   options: { attach?: boolean } = {},
@@ -357,7 +281,7 @@ function resetWizardMocks(): void {
     mocks.setMappingSuspension.mockReset();
     mocks.completeOnboarding.mockReset();
     mocks.getRuntimeSnapshot.mockReset();
-    mocks.getDiagnosticReport.mockReset();
+    mocks.openLogDirectory.mockReset();
     mocks.beginKeyObservation.mockReset();
     mocks.endKeyObservation.mockReset();
 
@@ -415,7 +339,7 @@ function resetWizardMocks(): void {
     mocks.setMappingSuspension.mockResolvedValue(true);
     mocks.completeOnboarding.mockImplementation(async () => activeState("complete"));
     mocks.getRuntimeSnapshot.mockImplementation(async () => runtimeWith());
-    mocks.getDiagnosticReport.mockImplementation(async () => diagnosticReport());
+    mocks.openLogDirectory.mockResolvedValue("C:\\Logs");
     let observationId = 0;
     mocks.beginKeyObservation.mockImplementation(async () => {
       observationId += 1;
@@ -462,7 +386,7 @@ describe("Onboarding wizard shell", () => {
     expect(onboardingEvents("step_entered").some((p) => p.step === "remote")).toBe(true);
   });
 
-  it("advances from welcome to remote and persists the new step", async () => {
+  it("advances from welcome to the full-key step and persists the new step", async () => {
     const wrapper = await mountWizard(runtimeWith());
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
     // 标题位置稳定（2026-10-05 要求）：第①步没有上一步，但保留同高占位，
@@ -474,12 +398,25 @@ describe("Onboarding wizard shell", () => {
     await continueButton.trigger("click");
     await flushPromises();
 
-    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
-    expect(wrapper.text()).toContain("连接遥控器");
+    // 2026-11-21：全按键支持前置到遥控器连接之前（先开启，再连接）。
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
+    expect(wrapper.text()).toContain("开启全按键支持");
     expect(wrapper.find(".onboarding-back").exists()).toBe(true);
     expect(wrapper.find(".onboarding-back--placeholder").exists()).toBe(false);
     const passed = onboardingEvents("step_passed");
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
+  });
+
+  it("全按键支持步骤之后才进入遥控器连接（2026-11-21 前置）", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    await wrapper.find(".onboarding-actions .primary-button").trigger("click");
+    await flushPromises();
+
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("remote");
+    expect(wrapper.text()).toContain("连接遥控器");
+    expect(wrapper.text()).toContain("扫描已配对设备");
   });
 
   it("全按键支持说明页：默认可继续，并说明会同时打开支持更多输入工具", async () => {
@@ -631,7 +568,10 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("长按「TV」键约 3 秒");
     expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
-    expect(wrapper.text()).toContain("打开高级设置或者点开「显示所有设备」");
+    expect(wrapper.text()).toContain(
+      "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级",
+    );
+    expect(wrapper.text()).toContain("再点「显示所有设备」");
     expect(wrapper.text()).toContain("回到第 4 步重置蓝牙后重新配对");
     // 底部那段提示按现场要求删掉。
     expect(wrapper.text()).not.toContain("设置中途可以随时退出");
@@ -1151,11 +1091,11 @@ describe("Onboarding wizard shell", () => {
   });
 
   it("navigates back without losing the wizard and logs the user action", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
     const wrapper = await mountWizard(runtimeWith());
 
     // 新外壳（2026-10-05 反馈后）：返回在内容列左上；不再有整幅页脚横幅；
-    // 复制诊断在动作行左侧、主按钮在右侧。
+    // 打开日志目录在动作行左侧、主按钮在右侧。
     expect(wrapper.find("footer").exists()).toBe(false);
     expect(wrapper.find(".onboarding-actions-left .onboarding-diagnostics-button").exists()).toBe(true);
     expect(wrapper.find(".onboarding-actions-right .primary-button").exists()).toBe(true);
@@ -1167,7 +1107,7 @@ describe("Onboarding wizard shell", () => {
 
     expect(wrapper.text()).toContain("欢迎使用无线麦 SayAll");
     const nav = onboardingEvents("navigation");
-    expect(nav.some((p) => p.reason === "user_back" && p.step === "remote" && p.detail === "welcome")).toBe(true);
+    expect(nav.some((p) => p.reason === "user_back" && p.step === "full_key" && p.detail === "welcome")).toBe(true);
     expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("welcome");
   });
 
@@ -1179,7 +1119,7 @@ describe("Onboarding wizard shell", () => {
     // 2026-10-05 用户要求：检测按键时不得触发用户已配置的自定义动作。
     expect(mocks.setMappingSuspension).toHaveBeenCalledWith(true);
 
-    // 离开检测步骤（② → ①）立即恢复执行。
+    // 离开检测步骤（③ → ②）立即恢复执行。
     await wrapper.find(".onboarding-back").trigger("click");
     await flushPromises();
     expect(mocks.setMappingSuspension).toHaveBeenLastCalledWith(false);
@@ -1218,14 +1158,11 @@ describe("Onboarding wizard shell", () => {
     expect(continueButton.attributes("data-gate-ready")).toBe("true");
     expect(continueButton.attributes("disabled")).toBeUndefined();
 
-    // 继续 → 第④步（全按键支持说明）；再继续才进入第⑤步输入工具。
+    // 继续 → 第⑤步（输入工具）；全按键支持已在第②步完成。
     await continueButton.trigger("click");
     await flushPromises();
-    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("full_key");
-    expect(wrapper.text()).toContain("开启全按键支持");
-    expect(wrapper.text()).toContain(
-      "开启后会同时打开“支持更多输入工具”；只有打开它，才能用豆包输入法进行语音输入。",
-    );
+    expect(mocks.saveOnboardingStep).toHaveBeenCalledWith("voice_tool");
+    expect(wrapper.text()).toContain("选择你要用的输入工具");
   });
 
   it("keeps a recoverable state-read error with a retry entry", async () => {
@@ -1245,224 +1182,39 @@ describe("Onboarding wizard shell", () => {
   });
 });
 
-describe("Onboarding diagnostics copy", () => {
+describe("Onboarding log directory entry", () => {
   installWizardHooks();
 
-  const clipboard = { writeText: vi.fn<(text: string) => Promise<void>>() };
-
-  beforeEach(() => {
-    clipboard.writeText.mockReset();
-    clipboard.writeText.mockResolvedValue();
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText: clipboard.writeText },
-    });
-  });
-
-  afterEach(() => {
-    delete (navigator as { clipboard?: unknown }).clipboard;
-  });
-
-  it("一次复制出含 Windows 版本 / App 版本 / Build 与向导状态的诊断块", async () => {
+  it("opens the log directory and logs a paired action", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 音频端点只读刷新：复制时读真实列表，而不是第①/②步可能还没加载的页面状态。
-    mocks.listAudioEndpoints.mockResolvedValue([cableEndpoint]);
-    mocks.getAudioSnapshot.mockResolvedValue({
-      phase: "ready",
-      selectedEndpointId: cableEndpoint.id,
-      selectedEndpointName: cableEndpoint.name,
-      queuedSamples: 0,
-      submittedSamples: 0,
-      generation: 1,
-      lastError: null,
-    } satisfies AudioSnapshot);
     const wrapper = await mountWizard(runtimeWith());
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
+      .find((button) => button.text() === "打开日志目录")!
       .trigger("click");
     await flushPromises();
 
-    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("App version: 0.5.0");
-    expect(text).toContain("Build: fe326f8a1b2c3d4e5f60718293a4b5c6d7e8f901");
-    expect(text).toContain("Windows version: 10.0.26100");
-    expect(text).toContain("Wizard step: remote (2/8)");
-    expect(text).toContain("Gate: remote.not_connected");
-    expect(text).toContain("Blocked: yes");
-    expect(text).toContain("Audio: phase=ready recommended=1 selected=yes");
-    // 2026-10-10 新增：②步按键观察、输入通道计数、错误位与语音测试状态
-    // （②步"按键已收到但未连接"的现场靠这几项就能自证）。
-    expect(text).toContain("button_observed=no");
-    expect(text).toContain(
-      "Raw input: phase=stopped matched=0 raw_events=0 semantic_edges=0 stale_events=0",
-    );
-    expect(text).toContain("Voice test: phase=waiting_start terminal=none");
-    expect(text).toContain("error=no");
-    // 内容全英文（用户要求）；界面提示仍是中文。
-    expect(text).not.toMatch(/[\u3000-\u9fff\uff00-\uffef]/);
-    // 脱敏：设备 id / 端点身份不进剪贴板（挡住将来加错字段）。
-    expect(text).not.toContain("cable-input");
-    expect(text).not.toContain("CABLE Input");
-    expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
-    // 2026-10-13 现场：复制成功只留下方那条绿色提示——按钮文字不再变成"已复制到剪贴板"。
-    expect(wrapper.text()).not.toContain("已复制到剪贴板");
-    const copyButton = wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"));
-    expect(copyButton).toBeDefined();
-    const copy = onboardingEvents("action").filter((p) => p.reason === "copy_diagnostics");
-    expect(copy.map((p) => p.result)).toEqual(["unknown", "passed"]);
+    expect(mocks.openLogDirectory).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("已打开日志目录；把其中的日志文件发给开发者。");
+    const open = onboardingEvents("action").filter((p) => p.reason === "open_log_directory");
+    expect(open.map((p) => p.result)).toEqual(["unknown", "passed"]);
   });
 
-  it("①/②步复制时只读刷新输入工具与快捷键，不沿用页面未加载的 unset", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 页面在②步还没读过这两项（⑤/⑥步才加载）：复制时应直接读磁盘真值。
-    mocks.getVoiceInputTool.mockResolvedValue("doubao");
-    mocks.getVoiceHoldHotkey.mockResolvedValue({ keys: ["right_alt"] });
+  it("failure is not silent: shows a retry hint and logs the failed end", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
+    mocks.openLogDirectory.mockRejectedValue(new Error("denied"));
     const wrapper = await mountWizard(runtimeWith());
 
     await wrapper
       .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
+      .find((button) => button.text() === "打开日志目录")!
       .trigger("click");
     await flushPromises();
 
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("Input tool: doubao hotkey=right_alt full_key_support=off capture=off");
-  });
-
-  it("②步复制读回「全按键支持」的真实状态：开关开着但没生效也自证（2026-10-14）", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 开关设置在磁盘上是开的（②步页面上从没读过它，旧行为会误报 off）；
-    // 同时捕获状态是"没生效"——两者并列写进块里，不用日志就能分流。
-    mocks.getRc003TaskStatus.mockResolvedValue({
-      installed: true,
-      authorizationRequired: false,
-      enabled: true,
-      helperPath: null,
-      lastError: null,
-    });
-    mocks.getRc003BridgeSnapshot.mockResolvedValue(
-      rc003BridgeSnapshot({ captureHealth: "inactive" }),
-    );
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
-      .trigger("click");
-    await flushPromises();
-
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("full_key_support=on capture=inactive");
-  });
-
-  it("捕获状态读不到时写 capture=unknown，复制本身不失败", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    mocks.getRc003BridgeSnapshot.mockRejectedValue(new Error("read failed"));
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
-      .trigger("click");
-    await flushPromises();
-
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("capture=unknown");
-    expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
-    // 失败也留痕：块里只有 unknown 时，靠这条行动日志分流「读不到」与「真 off」。
-    expect(
-      onboardingEvents("action").some(
-        (p) => p.reason === "read_capture_state" && p.result === "failed",
-      ),
-    ).toBe(true);
-  });
-
-  it("载荷里出现未知捕获状态时回落 capture=unknown（白名单校验）", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    // 类型约束在运行时不存在：后端多回了一个未知 token 也不能原样进块。
-    mocks.getRc003BridgeSnapshot.mockResolvedValue(
-      rc003BridgeSnapshot({ captureHealth: "bogus" as never }),
-    );
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
-      .trigger("click");
-    await flushPromises();
-
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("capture=unknown");
-  });
-
-  it("复制时开关读失败退回页面状态、捕获读失败写 unknown，都不影响复制", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("voice_tool"));
-    // ⑤步加载时读到「开启」；复制时的只读刷新失败 → 退回页面状态（on）。
-    mocks.getRc003TaskStatus.mockResolvedValueOnce({
-      installed: true,
-      authorizationRequired: false,
-      enabled: true,
-      helperPath: null,
-      lastError: null,
-    });
-    mocks.getRc003TaskStatus.mockRejectedValueOnce(new Error("read failed"));
-    mocks.getRc003BridgeSnapshot.mockRejectedValue(new Error("read failed"));
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
-      .trigger("click");
-    await flushPromises();
-
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("full_key_support=on capture=unknown");
-    // 恰好两次：⑤步加载一次 + 复制时刷新一次——第二次失败被独立留痕，
-    // 断言调用次数可防「⑤步不再读」时该用例退化成假绿。
-    expect(mocks.getRc003TaskStatus).toHaveBeenCalledTimes(2);
-    expect(
-      onboardingEvents("action").some(
-        (p) => p.reason === "read_capture_switch" && p.result === "failed",
-      ),
-    ).toBe(true);
-  });
-
-  it("只读刷新失败时退回页面状态，复制本身不失败", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    mocks.getVoiceInputTool.mockRejectedValue(new Error("read failed"));
-    mocks.getVoiceHoldHotkey.mockRejectedValue(new Error("read failed"));
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
-      .trigger("click");
-    await flushPromises();
-
-    const text = clipboard.writeText.mock.calls[0][0];
-    expect(text).toContain("Input tool: unset hotkey=unset");
-    expect(wrapper.text()).toContain("已复制，可直接粘贴发给开发者");
-  });
-
-  it("剪贴板不可用时不静默：给出失败提示并落 failed 日志", async () => {
-    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
-    clipboard.writeText.mockRejectedValue(new Error("denied"));
-    const wrapper = await mountWizard(runtimeWith());
-
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("复制诊断信息"))!
-      .trigger("click");
-    await flushPromises();
-
-    expect(wrapper.text()).toContain("复制失败");
-    const copy = onboardingEvents("action").filter((p) => p.reason === "copy_diagnostics");
-    expect(copy.map((p) => p.result)).toEqual(["unknown", "failed"]);
+    expect(wrapper.text()).toContain("无法打开日志目录，请稍后重试。");
+    const open = onboardingEvents("action").filter((p) => p.reason === "open_log_directory");
+    expect(open.map((p) => p.result)).toEqual(["unknown", "failed"]);
   });
 });
 

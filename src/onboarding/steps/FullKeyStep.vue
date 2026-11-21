@@ -4,11 +4,14 @@ import { CAPTURE_MORE_INPUT_TOOLS_NOTE } from "../../lib/capture-switch";
 import { t } from "../../lib/i18n";
 
 /**
- * 第④步「全按键支持」说明与引导（2026-11-05 用户要求；位于语音设备之后）。
+ * 第②步「全按键支持」说明与引导（2026-11-05 用户要求；2026-11-21 前置到
+ * 遥控器连接之前）。
  *
  * 这一步只做两件事：说清开关的作用与代价，并给出开启入口。全按键支持是可选增强
  * ——基础语音与普通按键不依赖系统授权，所以开关状态不参与「继续」判定（ARM64 等
- * 本机不可用场景也必须能走完向导）。文案规范见 docs/product-copy.md。
+ * 本机不可用场景也必须能走完向导）。前置的原因：没开它时返回 / 音量键不会到达
+ * Windows，用户连接后按这些键没有任何反应，会误判成连接失败。文案规范见
+ * docs/product-copy.md。
  */
 const props = defineProps<{
   /** 开关设置（用户意图）。 */
@@ -64,6 +67,9 @@ watch(
       <span class="onboarding-recommend-tag">{{ t("建议开启") }}</span>
       <span>{{ t("开启后，返回 / 音量+ / 音量− 才能自定义；豆包语音输入也需要它。") }}</span>
     </div>
+    <p class="onboarding-muted">
+      {{ t("建议先开启，再连接遥控器；这样连接后按返回 / 音量键也能直接使用。") }}
+    </p>
 
     <div class="onboarding-card">
       <div class="onboarding-switch-row onboarding-switch-row--first">

@@ -1927,7 +1927,7 @@ export interface ImeStatus {
 
 
 /**
- * **只读**查询输入法状态（不切输入法）。复制诊断信息时用它，避免"复制一下顺手改了
+ * **只读**查询输入法状态（不切输入法）。向导的输入法核对用它，避免"查一下顺手改了
  * 用户输入法"。浏览器预览下返回"读不到"。
  */
 export async function getImeStatus(): Promise<ImeStatus> {

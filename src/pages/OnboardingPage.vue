@@ -10,7 +10,6 @@ import {
   getImeStatus,
   getAudioSnapshot,
   getCaptureSupport,
-  getDiagnosticReport,
   getOnboardingState,
   getOtherVoiceHotkey,
   getRc003BridgeSnapshot,
@@ -22,6 +21,7 @@ import {
   isRecommendedVoiceEndpoint,
   launchVokie,
   listAudioEndpoints,
+  openLogDirectory,
   openVbCableDownloadPage,
   openVokieHomepage,
   openWindowsSettings,
@@ -37,7 +37,6 @@ import {
   type AudioSnapshot,
   type ButtonEdge,
   type CaptureSupport,
-  type ImeStatus,
   type KeyChord,
   type KeyCode,
   type PairedRemote,
@@ -66,7 +65,6 @@ import {
   type OnboardingStep,
 } from "../onboarding/flow";
 import { buildSidePanel } from "../onboarding/panel";
-import { formatOnboardingDiagnostics } from "../onboarding/diagnostics-text";
 import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
@@ -203,11 +201,11 @@ const captureHint = ref("");
 const captureSupport = ref<CaptureSupport | null>(null);
 const captureStatusLoading = ref(false);
 const captureLoadFailed = ref(false);
-/** 迟到回调保护：每次进入第④步都换一代，旧读取结果不得覆盖新状态。 */
+/** 迟到回调保护：每次进入第②步都换一代，旧读取结果不得覆盖新状态。 */
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
 const captureUnavailable = computed(() => captureSupport.value?.available === false);
-/** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
+/** 第②步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
   if (captureLoadFailed.value) {
     return t("读取全按键支持状态失败；可以重新进入这一步，或先继续。");
@@ -388,7 +386,7 @@ watch(
     stopButtonObservation();
     voiceKeyMistake.value = false;
     // 按键检测只收集边沿，绝不能触发用户已配置的按键动作（2026-10-05 用户要求：
-    // ②步原先不挂起，按下已映射的键会真的执行动作）。两处检测步骤统一挂起，
+    // ③步原先不挂起，按下已映射的键会真的执行动作）。两处检测步骤统一挂起，
     // 离开后立即恢复。
     const observingButtons = current === "remote" || current === "controls";
     const observedButtons = previous === "remote" || previous === "controls";
@@ -469,9 +467,9 @@ onUnmounted(() => {
     window.clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
-  if (diagnosticsResetTimer !== null) {
-    window.clearTimeout(diagnosticsResetTimer);
-    diagnosticsResetTimer = null;
+  if (logDirectoryResetTimer !== null) {
+    window.clearTimeout(logDirectoryResetTimer);
+    logDirectoryResetTimer = null;
   }
   stopButtonObservation();
   stopVoiceTestSession();
@@ -644,7 +642,7 @@ async function scanRemotes(mode: "auto" | "manual" | "entry" = "manual"): Promis
   scanning.value = true;
   scanMessage.value = t("正在寻找小米遥控器…");
   const started = performance.now();
-  // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ②步自动连接触发）。
+  // 脱敏：device.id / 名称不进日志，只记录扫描方式与数量（auto = ③步自动连接触发）。
   reportStepAction("remote", "scan_requested", "unknown", { detail: mode });
   try {
     devices.value = await scanPairedRemotes();
@@ -726,7 +724,7 @@ async function openBluetoothSettings(): Promise<void> {
  * 第①步配对流程里的「打开蓝牙设置」（2026-10-13 现场）：只唤起系统设置页，
  * **成功不写任何提示**（①步是照做的清单，不需要"已打开…"回执）。
  * 失败原因仍写进 operationMessage 并落结构化日志——第①步没有消息区，
- * 用户走到第②步时能看到原因，诊断块里也有这一步的 action 记录。
+ * 用户走到第③步时能看到原因，日志里也有这一步的 action 记录。
  */
 async function openBluetoothSettingsFromWelcome(): Promise<void> {
   const started = performance.now();
@@ -750,7 +748,7 @@ async function openBluetoothSettingsFromWelcome(): Promise<void> {
 // ---- 遥控器步骤：自动连接（2026-10-10 现场反馈） ----
 //
 // 系统侧配对完成后，普通按键会先到（按键检查随之变绿），但"继续"还要求应用连上
-// 遥控器（语音会话）。为消除"按键已收到、连接未建立"这一中间状态：进入②步、
+// 遥控器（语音会话）。为消除"按键已收到、连接未建立"这一中间状态：进入③步、
 // 或系统侧遥控器刚出现时，若恰好只有一个已配对遥控器就自动连接。候选不唯一、
 // 一个都没有、连接已就绪/进行中/用户已手动断开时不触发；自动连接与手动点设备卡
 // 走同一条 connectDevice（保存设备 + 连接），日志用 detail=auto|manual 区分。
@@ -766,12 +764,12 @@ const shouldAutoConnectRemote = computed(() => {
 let autoConnectRunning = false;
 
 /**
- * ②步的自动动作（2026-10-13 现场扩了一条）：**进入②步先把已配对设备直接列出来**，
+ * ③步的自动动作（2026-10-13 现场扩了一条）：**进入③步先把已配对设备直接列出来**，
  * 再按原条件（未连接 + 输入通道在位 + 候选唯一）自动连接。
  *
  * 背景：原先只有"未连接且输入通道在位"才自动扫描，应用已连接 / 启动时恢复了会话时
- * 进②步看到的是空列表，用户必须自己点「扫描已配对设备」。现在两个触发点
- * （进入②步 / 遥控器在②步期间出现）共用本函数：先保证列表已带出，再决定要不要连。
+ * 进③步看到的是空列表，用户必须自己点「扫描已配对设备」。现在两个触发点
+ * （进入③步 / 遥控器在③步期间出现）共用本函数：先保证列表已带出，再决定要不要连。
  * 谁先跑到谁负责整轮，后到的由 `autoConnectRunning` 吸收，不会连扫两轮。
  */
 async function ensureRemoteListAndMaybeConnect(mode: "entry" | "auto"): Promise<void> {
@@ -823,19 +821,19 @@ watch(connectedRemoteIdentity, (identity) => {
   reportStepAction("remote", "button_observation_reset", "unknown", { detail: "remote_switched" });
 });
 
-// 触发点一：进入②步（不论连接状态，先把列表带出来）。
+// 触发点一：进入③步（不论连接状态，先把列表带出来）。
 watch(
   () => step.value,
   (value) => {
     if (value !== "remote") return;
-    // 进入②步时以当前计数为基线：只对"这一步里新增的"另一支按键反应（2026-10-13 现场）。
+    // 进入③步时以当前计数为基线：只对"这一步里新增的"另一支按键反应（2026-10-13 现场）。
     lastStaleRemoteEventCount = props.runtime?.platform.rawInput.staleRemoteEventCount ?? 0;
     otherRemoteActivity.value = false;
     void ensureRemoteListAndMaybeConnect("entry");
   },
 );
 
-// 触发点二：停在②步期间系统侧遥控器出现（输入通道变为在位）。
+// 触发点二：停在③步期间系统侧遥控器出现（输入通道变为在位）。
 watch(shouldAutoConnectRemote, (should) => {
   if (!should) return;
   void ensureRemoteListAndMaybeConnect("auto");
@@ -989,7 +987,7 @@ async function openDownloadPage(): Promise<void> {
 // ---- 全按键支持步骤（可选增强）----
 
 /**
- * 进入第④步时读取开关与本机支持情况。读取失败不阻断继续（这一步是可选增强），
+ * 进入第②步时读取开关与本机支持情况。读取失败不阻断继续（这一步是可选增强），
  * 但要在开关旁说明；迟到结果按代数丢弃，不得覆盖重新进入后的新状态。
  */
 async function prepareFullKeyStep(): Promise<void> {
@@ -1186,8 +1184,8 @@ async function chooseOtherKeys(keys: KeyCode[]): Promise<void> {
 }
 
 /**
- * 开关操作日志的目标（2026-11-05）：同一个开关现在有两个入口——第④步说明页
- * 与第⑤步豆包卡片。按发起时所在步骤记录，别把第④步的操作记成 doubao。
+ * 开关操作日志的目标（2026-11-05）：同一个开关现在有两个入口——第②步说明页
+ * 与第⑤步豆包卡片。按发起时所在步骤记录，别把第②步的操作记成 doubao。
  */
 function captureLogTarget(): { step: OnboardingStep; detail: string } {
   return step.value === "full_key"
@@ -1449,153 +1447,50 @@ async function onStartUsing(): Promise<void> {
   }
 }
 
-// ---- 复制诊断信息（2026-10-05 用户要求：过不去时一次复制即可报障）----
+// ---- 打开日志目录（2026-11-21 用户要求：过不去时直接拿到本机日志）----
+//
+// 现场：用户卡在向导的蓝牙连接步骤时，复制出的诊断块只有状态与计数，看不到
+// 连接重试的每一步、GATT 错误与服务发现细节；这些只在本机日志里。这里打开由
+// Rust 侧推导的日志目录（前端不拼路径），让用户把日志直接发给开发者。
 
-const diagnosticsCopyState = ref<"idle" | "busy" | "copied" | "failed">("idle");
-const diagnosticsCopyMessage = ref("");
-let diagnosticsResetTimer: number | null = null;
+const logDirectoryState = ref<"idle" | "busy" | "opened" | "failed">("idle");
+const logDirectoryMessage = ref("");
+let logDirectoryResetTimer: number | null = null;
 
-const diagnosticsCopyText = computed(() => {
-  if (diagnosticsCopyState.value === "busy") return t("正在整理…");
-  // 成功不再改按钮文字（2026-10-13 现场：复制后只留下方那条绿色提示，
-  // 按钮上的「已复制到剪贴板」与它重复）。
-  return t("复制诊断信息");
+const logDirectoryButtonText = computed(() => {
+  if (logDirectoryState.value === "busy") return t("正在打开…");
+  return t("打开日志目录");
 });
 
 /**
- * 复制给支持人员的诊断块：Rust 侧 `get_diagnostic_report`（版本 / Build / Windows
- * 版本 / 架构，全部真实读回）+ 向导当前状态（步骤、门禁、连接 / 音频 / 工具）。
- * 只含稳定 token、计数与布尔；设备与端点身份一律不进（见 diagnostics-text.ts）。
+ * 打开诊断日志目录。成功只给一句回执（用户可以把整个目录打包发给支持）；
+ * 失败给出可重试的提示，并落成对的 action 日志（begin=unknown → end=failed）。
  */
-async function copyDiagnostics(): Promise<void> {
-  if (diagnosticsCopyState.value === "busy") return;
+async function openLogDirectoryFromOnboarding(): Promise<void> {
+  if (logDirectoryState.value === "busy") return;
   const started = performance.now();
   const target = step.value;
-  diagnosticsCopyState.value = "busy";
-  diagnosticsCopyMessage.value = "";
-  reportStepAction(target, "copy_diagnostics", "unknown");
+  logDirectoryState.value = "busy";
+  logDirectoryMessage.value = "";
+  reportStepAction(target, "open_log_directory", "unknown");
   try {
-    const report = await getDiagnosticReport();
-    const platform = props.runtime?.platform;
-    // 音频端点先做一次**只读**刷新（不触发自动选中）：向导只在进入第③步时
-    // 加载过列表，沿用页面状态会让第①/②步复制出的「推荐设备」恒为 0，误导
-    // 支持判断。读取失败退回页面在用状态——复制本身不因此失败。
-    let endpoints = audioEndpoints.value;
-    let audio = audioSnapshot.value;
-    try {
-      [endpoints, audio] = await Promise.all([listAudioEndpoints(), getAudioSnapshot()]);
-    } catch {
-      // 保持页面状态。
-    }
-    const recommended = endpoints.filter(isRecommendedVoiceEndpoint);
-    const selectedId = audio?.selectedEndpointId ?? platform?.audio.selectedEndpointId ?? null;
-    // 输入工具与按住说话快捷键同理做一次**只读**读取（2026-10-13 现场）：向导只在
-    // ⑤/⑥步加载过它们，①–④步复制出的「unset」会把已配置豆包的机器误导成未配置。
-    // 读取失败退回页面状态——复制本身不因此失败。
-    let toolFromDisk: VoiceInputTool | null = null;
-    let hotkeyFromDisk: KeyChord | null = null;
-    try {
-      [toolFromDisk, hotkeyFromDisk] = await Promise.all([
-        getVoiceInputTool(),
-        getVoiceHoldHotkey(),
-      ]);
-    } catch {
-      // 保持页面状态。
-    }
-    // 输入法状态**只读**读一次（2026-10-13 现场）：用户报"语音没出字"时，先看这行是不是
-    // "没切输入法"。这里只查询、不切换——复制诊断信息不该顺手改用户的输入法。
-    // 读取失败按"读不到"写（detected=no），复制本身不因此失败。
-    let ime: ImeStatus | null = null;
-    try {
-      ime = await getImeStatus();
-    } catch {
-      ime = null;
-    }
-    // 「全按键支持」的两层事实各做一次**只读**读取（2026-10-14 现场）：
-    // ① `full_key_support=` 是开关设置——向导只在④/⑤/⑧步读过它，①–③步复制出的
-    //    `off` 会把开着开关的机器误导成未开启；
-    // ② 开关开着 ≠ 生效：真实捕获状态读回 `CaptureHealth`——只有 `active` 才算
-    //    生效；`inactive`（过宽限仍无所有权）与可能长期停留的 `starting`（助手/
-    //    桥未就绪）都是没生效。
-    // 读取失败各自回落（页面状态 / unknown）并各留一条失败日志——复制本身不失败。
-    const [rc003FromDisk, captureSnapshot] = await Promise.all([
-      getRc003TaskStatus().catch(() => null),
-      getRc003BridgeSnapshot().catch(() => null),
-    ]);
-    if (rc003FromDisk === null) {
-      reportStepAction(target, "read_capture_switch", "failed", { detail: "fallback_page_state" });
-    }
-    if (captureSnapshot === null) {
-      reportStepAction(target, "read_capture_state", "failed", { detail: "capture_unknown" });
-    }
-    // 载荷与类型不符（缺字段 / 未知 token）时同样回落 unknown——块里只允许稳定 token。
-    const captureHealth: Rc003CaptureHealth | "unknown" = normalizeCaptureHealth(
-      captureSnapshot?.captureHealth,
-    );
-    const chord =
-      currentHotkey.value ??
-      hotkeyFromDisk ??
-      (stagedTool.value ? hotkeyForTool(stagedTool.value) : null);    const hotkeyTokens = chord
-      ? chord.keys.length > 0
-        ? chord.keys.join("+")
-        : "none"
-      : "unset";
-    const text = formatOnboardingDiagnostics(report, {
-      step: target,
-      gateCode: gate.value.code,
-      blocked: !gate.value.ok,
-      model: platform?.connection.remoteModel ?? "unknown",
-      connectionPhase: platform?.connection.phase ?? "idle",
-      bleVoiceReady: platform?.bleVoiceReady ?? false,
-      rawInputPhase: platform?.rawInput.phase ?? "stopped",
-      reconnectAttempt: platform?.connection.reconnectAttempt ?? 0,
-      // 错误只给布尔（原文不进诊断块；错误文本属内部细节）。
-      connectionErrorPresent: (platform?.connection.lastError ?? null) !== null,
-      remoteButtonObserved: remoteButtonObserved.value,
-      rawInputMatchedDeviceCount: platform?.rawInput.matchedDeviceCount ?? 0,
-      rawInputRawEventCount: platform?.rawInput.rawEventCount ?? 0,
-      rawInputSemanticEdgeCount: platform?.rawInput.semanticEdgeCount ?? 0,
-      rawInputStaleEventCount: platform?.rawInput.staleRemoteEventCount ?? 0,
-      audioPhase: audio?.phase ?? platform?.audio.phase ?? "unconfigured",
-      recommendedEndpointCount: recommended.length,
-      selectedRecommended: recommended.some((endpoint) => endpoint.id === selectedId),
-      queuedSamples: audio?.queuedSamples ?? platform?.audio.queuedSamples ?? 0,
-      audioErrorPresent: (audio?.lastError ?? platform?.audio.lastError ?? null) !== null,
-      tool: stagedTool.value ?? toolFromDisk ?? configuredTool.value ?? "unset",
-      hotkey: hotkeyTokens,
-      captureEnabled: (rc003FromDisk?.enabled ?? rc003Status.value?.enabled) === true,
-      captureHealth,
-      vokieInstalled: vokie.value?.installed === true,
-      vokieRunning: vokie.value?.running === true,
-      voiceTestPhase: voicePhase.value,
-      voiceTerminalCode: voiceStepTerminalCode.value,
-      voiceLateAccepted: voiceLateAccepted.value,
-      distinctButtonCount: observedButtons.value.size,
-      mappingSuspended: mappingSuspended.value,
-      imeDetected: ime?.detected === true,
-      imeMatchesExpected: ime?.matchesExpected ?? null,
-      imeInstalledCount: ime?.installed.length ?? 0,
-    });
-    if (!navigator.clipboard?.writeText) throw new Error("clipboard write unavailable");
-    await navigator.clipboard.writeText(text);
-    diagnosticsCopyState.value = "copied";
-    diagnosticsCopyMessage.value = t("已复制，可直接粘贴发给开发者");
-    reportStepAction(target, "copy_diagnostics", "passed", {
-      detail: `chars_${text.length}`,
+    await openLogDirectory();
+    logDirectoryState.value = "opened";
+    logDirectoryMessage.value = t("已打开日志目录；把其中的日志文件发给开发者。");
+    reportStepAction(target, "open_log_directory", "passed", {
       elapsedMs: actionElapsed(started),
     });
-    if (diagnosticsResetTimer !== null) window.clearTimeout(diagnosticsResetTimer);
-    diagnosticsResetTimer = window.setTimeout(() => {
-      diagnosticsCopyState.value = "idle";
-      diagnosticsCopyMessage.value = "";
-      diagnosticsResetTimer = null;
-    }, 4000);
+    if (logDirectoryResetTimer !== null) window.clearTimeout(logDirectoryResetTimer);
+    logDirectoryResetTimer = window.setTimeout(() => {
+      logDirectoryState.value = "idle";
+      logDirectoryMessage.value = "";
+      logDirectoryResetTimer = null;
+    }, 6000);
   } catch (error) {
-    logRawError("copy_diagnostics", error);
-    diagnosticsCopyState.value = "failed";
-    diagnosticsCopyMessage.value = t("复制失败，请重试。");
-    reportStepAction(target, "copy_diagnostics", "failed", {
-      detail: "clipboard",
+    logRawError("open_log_directory", error);
+    logDirectoryState.value = "failed";
+    logDirectoryMessage.value = t("无法打开日志目录，请稍后重试。");
+    reportStepAction(target, "open_log_directory", "failed", {
       elapsedMs: actionElapsed(started),
     });
   }
@@ -2096,7 +1991,7 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
             audioHealth,
           );
           // 分流采用了哪一支要留痕（2026-10-14 / LOGGING.md 的"一次报障一次日志"：
-          // 失败瞬间的 capture 值与几十秒后复制诊断时的当前值可能不同，没有这行
+          // 失败瞬间的 capture 值与几十秒后排查时的当前值可能不同，没有这行
           // 就分不清"分流判错"还是"现场已变"）。
           reportStepAction("voice_test", "failure_text_branch", "passed", {
             detail: `capture_${captureHealth}_audio_${audioHealth}`,
@@ -2363,18 +2258,18 @@ async function retryVoiceTest(): Promise<void> {
             <button
               class="onboarding-diagnostics-button"
               type="button"
-              :disabled="diagnosticsCopyState === 'busy'"
-              @click="copyDiagnostics"
+              :disabled="logDirectoryState === 'busy'"
+              @click="openLogDirectoryFromOnboarding"
             >
-              {{ diagnosticsCopyText }}
+              {{ logDirectoryButtonText }}
             </button>
             <span
-              v-if="diagnosticsCopyMessage"
+              v-if="logDirectoryMessage"
               class="onboarding-diagnostics-message"
-              :class="{ ok: diagnosticsCopyState === 'copied', bad: diagnosticsCopyState === 'failed' }"
+              :class="{ ok: logDirectoryState === 'opened', bad: logDirectoryState === 'failed' }"
               role="status"
             >
-              {{ diagnosticsCopyMessage }}
+              {{ logDirectoryMessage }}
             </span>
           </div>
           <div class="onboarding-actions-right">
@@ -2484,7 +2379,7 @@ async function retryVoiceTest(): Promise<void> {
   visibility: hidden;
   pointer-events: none;
 }
-/* 底部动作行（2026-10-05 用户要求）：去掉整幅页脚横幅；复制诊断在左、主按钮在右。 */
+/* 底部动作行（2026-10-05 用户要求）：去掉整幅页脚横幅；打开日志目录在左、主按钮在右。 */
 .onboarding-actions {
   flex: 0 0 auto;
   display: flex;
@@ -3116,7 +3011,7 @@ async function retryVoiceTest(): Promise<void> {
   outline: none;
 }
 
-/* ---- 全按键支持页（第④步）---- */
+/* ---- 全按键支持页（第②步）---- */
 /* 「建议开启」强调条（2026-11-05）：可选步骤也要让用户一眼看到收益；
    使用强调色底 + 实心标签，但不做成警告样式（不阻断继续）。 */
 .onboarding-recommend {
@@ -3165,7 +3060,7 @@ async function retryVoiceTest(): Promise<void> {
   padding-top: 16px;
   border-top: 1px solid var(--border);
 }
-/* 第④步的开关是卡片第一项：不画上方分隔线，也不留额外上边距。 */
+/* 第②步的开关是卡片第一项：不画上方分隔线，也不留额外上边距。 */
 .onboarding-switch-row--first {
   margin-top: 0;
   padding-top: 0;
@@ -3229,7 +3124,7 @@ async function retryVoiceTest(): Promise<void> {
   /* 保持一行不换行（2026-10-13 现场要求）；本行独占整行宽度，最长提示也放得下。 */
   white-space: nowrap;
 }
-/* 「复制诊断信息」：过不去时的报障入口，低频动作，弱化为文字链接（无下划线）。 */
+/* 「打开日志目录」：过不去时的报障入口，低频动作，弱化为文字链接（无下划线）。 */
 .onboarding-diagnostics-button {
   padding: 0;
   border: 0;

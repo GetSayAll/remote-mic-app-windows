@@ -14,6 +14,7 @@ function runtime(
   phase: "idle" | "reconnecting" | "ready",
   reconnectAttempt: number,
   rawInputPhase: "stopped" | "starting" | "ready" | "awaiting",
+  remoteName: string | null = null,
 ): RuntimeSnapshot {
   return {
     platform: {
@@ -21,7 +22,7 @@ function runtime(
         phase,
         reconnectAttempt,
         remoteModel: "unknown",
-        remoteName: null,
+        remoteName,
         remoteToken: null,
       },
       rawInput: { phase: rawInputPhase },
@@ -91,6 +92,82 @@ describe("RemoteStep 长时间重连指引", () => {
     });
 
     expect(wrapper.text()).toContain("遥控器还没有真正连上");
+    wrapper.unmount();
+  });
+});
+
+describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
+  it("已连接 20 秒仍无按键时提示重置并重新配对", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: { ...baseProps, runtime: runtime("ready", 0, "ready") },
+    });
+
+    expect(wrapper.text()).not.toContain("遥控器已连接，但没有收到按键");
+    vi.advanceTimersByTime(19_999);
+    await nextTick();
+    expect(wrapper.text()).not.toContain("遥控器已连接，但没有收到按键");
+
+    vi.advanceTimersByTime(1);
+    await nextTick();
+    expect(wrapper.text()).toContain("遥控器已连接，但没有收到按键");
+    expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    expect(wrapper.text()).toContain("在 Windows 蓝牙设置里删除这支遥控器。");
+    wrapper.unmount();
+  });
+
+  it("收到按键后立即撤掉重置提示", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: { ...baseProps, runtime: runtime("ready", 0, "ready") },
+    });
+    vi.advanceTimersByTime(20_000);
+    await nextTick();
+    expect(wrapper.text()).toContain("遥控器已连接，但没有收到按键");
+
+    await wrapper.setProps({ buttonObserved: true });
+    await nextTick();
+    expect(wrapper.text()).not.toContain("遥控器已连接，但没有收到按键");
+    wrapper.unmount();
+  });
+
+  it("Windows 报出通用名 MI RC 时立即提示重置", () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: {
+        ...baseProps,
+        devices: [
+          { id: "dev-1", name: "MI RC", model: "unknown", isSupportedCandidate: true },
+        ],
+        runtime: runtime("idle", 0, "stopped", "MI RC"),
+      },
+    });
+
+    expect(wrapper.text()).toContain("遥控器名称是 MI RC");
+    expect(wrapper.text()).toContain("重新配对");
+    wrapper.unmount();
+  });
+
+  it("常显 Windows「高级」的完整路径；列表为空时再补打开后的下一步", async () => {
+    const wrapper = mount(RemoteStep, {
+      props: { ...baseProps, runtime: runtime("idle", 0, "stopped") },
+    });
+
+    expect(wrapper.text()).toContain("找不到遥控器？先打开「高级」");
+    expect(wrapper.text()).toContain(
+      "设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级",
+    );
+    expect(wrapper.text()).toContain("打开后回到这里点「扫描已配对设备」");
+
+    await wrapper.setProps({
+      devices: [
+        { id: "dev-1", name: "小米蓝牙语音遥控器 2 Pro", model: "rc003", isSupportedCandidate: true },
+      ],
+      runtime: runtime("ready", 0, "ready"),
+    });
+    await nextTick();
+    expect(wrapper.text()).toContain("找不到遥控器？先打开「高级」");
+    expect(wrapper.text()).not.toContain("打开后回到这里点「扫描已配对设备」");
     wrapper.unmount();
   });
 });

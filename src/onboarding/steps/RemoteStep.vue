@@ -9,10 +9,16 @@ import {
 import OptionCard from "../../components/onboarding/OptionCard.vue";
 import StatusRow from "../../components/onboarding/StatusRow.vue";
 import { t } from "../../lib/i18n";
+import { reportOnboardingEvent } from "../diagnostics";
 import {
   RECONNECT_GUIDANCE_DELAY_MS,
   shouldShowReconnectGuidance,
 } from "../reconnect-guidance";
+import {
+  RESET_GUIDANCE_DELAY_MS,
+  isGenericRemoteName,
+  shouldShowResetGuidance,
+} from "../reset-guidance";
 
 const props = defineProps<{
   runtime: RuntimeSnapshot | null;
@@ -54,7 +60,7 @@ const phaseLabel = computed(() => connectionPhaseLabel(connectionPhase.value));
  * 连续重连的本地计时（issue #104，2026-11-19）。
  *
  * 只用于决定「是否显示排查卡」，不参与连接逻辑；`reconnectAttempt >= 5`
- * 另有兜底，用户中途进入第②步时不必再等一个完整的 60 秒。
+ * 另有兜底，用户中途进入第③步时不必再等一个完整的 60 秒。
  */
 const reconnectWaitedMs = ref(0);
 let reconnectGuidanceTimer: number | undefined;
@@ -80,7 +86,40 @@ watch(
   { immediate: true },
 );
 
-onUnmounted(clearReconnectGuidanceTimer);
+/**
+ * 「已连接但没有按键」的本地计时（2026-11-21 用户要求）。
+ *
+ * 连接就绪后 20 秒仍没有普通按键，才提示重置遥控器；正常按下按键或断开时
+ * 立即清零。与重连计时相互独立：两者不会同时显示。
+ */
+const connectedWithoutButtonMs = ref(0);
+let connectedWithoutButtonTimer: number | undefined;
+
+function clearConnectedWithoutButtonTimer(): void {
+  if (connectedWithoutButtonTimer !== undefined) {
+    window.clearTimeout(connectedWithoutButtonTimer);
+    connectedWithoutButtonTimer = undefined;
+  }
+}
+
+watch(
+  () => connected.value && !props.buttonObserved,
+  (waiting) => {
+    clearConnectedWithoutButtonTimer();
+    connectedWithoutButtonMs.value = 0;
+    if (waiting) {
+      connectedWithoutButtonTimer = window.setTimeout(() => {
+        connectedWithoutButtonMs.value = RESET_GUIDANCE_DELAY_MS;
+      }, RESET_GUIDANCE_DELAY_MS);
+    }
+  },
+  { immediate: true },
+);
+
+onUnmounted(() => {
+  clearReconnectGuidanceTimer();
+  clearConnectedWithoutButtonTimer();
+});
 
 const showReconnectGuidance = computed(() =>
   shouldShowReconnectGuidance({
@@ -128,7 +167,7 @@ function isConnectedDevice(device: PairedRemote): boolean {
 
 /**
  * 按键行的说明句（2026-10-10 现场反馈）：系统侧按键通道可用 ≠ 应用自己的会话
- * 已建立——遥控器与电脑配对完成后，按键就能被收到（第②步的按键行随之变绿），
+ * 已建立——遥控器与电脑配对完成后，按键就能被收到（第③步的按键行随之变绿），
  * 但"继续"还要求应用连上遥控器。未连接时不再写"这一项可以继续了"（会与"先连接
  * 遥控器，再继续"打架），改成指出还差的那一步。
  * 2026-10-13 现场：连接就绪、按键也收到时**整行不再写任何说明句**——行本身已是
@@ -201,6 +240,52 @@ const fixPrefersSettings = computed(
     props.gateCode === "remote.hid_interface_missing",
 );
 const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_failed");
+
+/**
+ * 通用名 `MI RC`（2026-11-21 用户要求）：小米遥控器没有初始化或仍停在旧配对
+ * 状态时，Windows 上报的就是这个通用名。运行时名称、连接后名称或设备列表任一
+ * 命中即算——用户可能还没连接，但列表里已经能看到它。
+ */
+const genericRemoteName = computed(
+  () =>
+    isGenericRemoteName(props.runtime?.platform.connection.remoteName) ||
+    isGenericRemoteName(connectedName.value) ||
+    props.devices.some((device) => isGenericRemoteName(device.name)),
+);
+
+/**
+ * 重置遥控器引导：只在没有更具体的失败修复卡时显示，避免同一屏出现两张
+ * 都让用户"重新配对"的卡片（`remote.hid_interface_missing` 的修复卡本身
+ * 已包含重置步骤）。
+ */
+const showResetGuidance = computed(
+  () =>
+    !fixTitle.value &&
+    shouldShowResetGuidance({
+      connected: connected.value,
+      buttonObserved: props.buttonObserved,
+      genericRemoteName: genericRemoteName.value,
+      connectedWithoutButtonMs: connectedWithoutButtonMs.value,
+      rawInputPhase: props.runtime?.platform.rawInput.phase ?? "stopped",
+    }),
+);
+
+// 只在首次出现时记一条（状态未变化不重复刷）；support 靠它区分"用户看到的是
+// 通用名提示还是已连接无按键提示"。
+watch(
+  showResetGuidance,
+  (shown, previous) => {
+    if (!shown || previous === true) return;
+    reportOnboardingEvent({
+      kind: "remote_observed",
+      result: "unknown",
+      reason: "reset_guidance_shown",
+      step: "remote",
+      detail: genericRemoteName.value ? "generic_name" : "no_button",
+    });
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -221,6 +306,17 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       >
         {{ scanning ? t("正在扫描…") : t("扫描已配对设备") }}
       </button>
+    </div>
+
+    <!-- 2026-11-21 用户要求：Windows「高级」没打开时，遥控器根本不会出现在
+         添加设备列表里（现场截图：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 →
+         蓝牙设备发现 → 高级）。路径常显；只有列表为空时再补"打开后怎么做"。 -->
+    <div class="onboarding-card">
+      <h4>{{ t("找不到遥控器？先打开「高级」") }}</h4>
+      <p>{{ t("设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级") }}</p>
+      <p v-if="devices.length === 0 && !scanning">
+        {{ t("打开后回到这里点「扫描已配对设备」；添加设备时选择「显示所有设备」。") }}
+      </p>
     </div>
 
     <div class="onboarding-rows">
@@ -334,6 +430,52 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       </ul>
     </div>
 
+    <!-- 2026-11-21 用户要求：已显示「已连接」但一直收不到按键，或 Windows 报出
+         通用名 MI RC，都说明遥控器侧需要重置后重新配对；否则用户会一直等。 -->
+    <div v-if="showResetGuidance" class="onboarding-card warn">
+      <h4>
+        {{
+          genericRemoteName
+            ? t("遥控器名称是 MI RC")
+            : t("遥控器已连接，但没有收到按键")
+        }}
+      </h4>
+      <div class="onboarding-chips">
+        <button
+          class="onboarding-chip strong"
+          type="button"
+          @click="$emit('openBluetoothSettings')"
+        >
+          {{ t("打开蓝牙设置") }}
+        </button>
+        <button class="onboarding-chip" type="button" :disabled="scanning" @click="$emit('scan')">
+          {{ scanning ? t("正在扫描…") : t("重新扫描") }}
+        </button>
+      </div>
+      <p v-if="genericRemoteName">
+        {{ t("这通常表示遥控器还没有完成初始化，或仍停在上一次的配对状态。请重置遥控器，再从 Windows 重新配对并连接。") }}
+      </p>
+      <p v-else>
+        {{ t("按键可能没有到达 Windows。请重置遥控器后重新配对；如果这支遥控器还连着电视或手机，先断开那边的连接。") }}
+      </p>
+      <ul class="onboarding-numlist">
+        <li>
+          <span class="onboarding-num">1</span>
+          <span>{{ t("同时长按「主页」+「菜单」直到指示灯快速闪烁——重置遥控器的蓝牙。") }}</span>
+        </li>
+        <li>
+          <span class="onboarding-num">2</span>
+          <span>{{ t("在 Windows 蓝牙设置里删除这支遥控器。") }}</span>
+        </li>
+        <li>
+          <span class="onboarding-num">3</span>
+          <span>
+            {{ t("长按「TV」键约 3 秒重新配对；回到这里点「重新扫描」，再点设备行右侧的「连接」。") }}
+          </span>
+        </li>
+      </ul>
+    </div>
+
     <div v-if="voiceKeyMistake && !buttonObserved" class="onboarding-card warn">
       <h4>{{ t("刚才按的是语音键") }}</h4>
       <p>{{ t("请按遥控器上除语音键以外的普通按键（比如主页键）。") }}</p>
@@ -366,7 +508,7 @@ const fixShowsSettings = computed(() => props.gateCode !== "remote.connect_faile
       <p v-if="gateCode === 'remote.hid_interface_missing'">
         {{
           t(
-            "应用已经连上遥控器，但 Windows 还没有提供它的按键通道。先按一下普通按键；仍无反应时，在蓝牙设置里删除这支遥控器，再按「TV」键 3 秒重新配对；还是不行就重启这台电脑（用「重启」，不要用「关机」再开机）。",
+            "应用已经连上遥控器，但 Windows 还没有提供它的按键通道。先按一下普通按键；仍无反应时，同时长按「主页」+「菜单」重置遥控器，再在蓝牙设置里删除这支遥控器，按「TV」键 3 秒重新配对；还是不行就重启这台电脑（用「重启」，不要用「关机」再开机）。",
           )
         }}
       </p>

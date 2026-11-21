@@ -4,8 +4,9 @@
  * 规范来源：Mac 仓 origin/main `feature/first-run-onboarding/PRODUCT_SPEC.md`
  * 与 Windows 设计稿 `artifacts/design/2026-10-04-onboarding-design.html`：
  * - 步骤顺序按 D1 确认的 Mac 可见顺序（欢迎 → 遥控器 → 语音设备 → 输入工具
- *   → 按住说话验证 → 普通按键体验 → 完成）；2026-11-05 在遥控器之后加入
- *   「全按键支持」说明页（可选增强，不阻断继续；放在语音设备之后、输入工具之前）；
+ *   → 按住说话验证 → 普通按键体验 → 完成）；2026-11-05 加入「全按键支持」说明页
+ *   （可选增强，不阻断继续）；2026-11-21 把它前置到遥控器连接之前——
+ *   没开全按键支持时，用户按返回 / 音量键收不到按键，会误判成连接问题；
  * - 每一步「能否继续」都由实时能力状态决定（页面访问与点击不是通过条件）；
  * - 阻断一律返回稳定失败码（小写 token），供页面显示与结构化日志使用。
  */
@@ -26,9 +27,9 @@ export type OnboardingPhase = "prepare" | "setup" | "try_it";
 /** 顺序即导航顺序；不提供「跳过」，完成前没有进入主界面的旁路。 */
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   "welcome",
+  "full_key",
   "remote",
   "audio",
-  "full_key",
   "voice_tool",
   "voice_test",
   "controls",

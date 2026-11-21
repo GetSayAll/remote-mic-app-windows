@@ -817,3 +817,31 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   「TV」键约 3 秒重新配对；动作按钮「打开蓝牙设置」「重新扫描」。落点：
   `src/onboarding/reconnect-guidance.ts`、`src/onboarding/steps/RemoteStep.vue`、
   `src/lib/i18n/en/onboarding.ts`。
+
+- 2026-11-21（向导连接步骤现场反馈，Andy 指定四项）：
+  ① **向导左下「复制诊断信息」改为「打开日志目录」**（2026-10-05 的复制入口随之移除）。
+     原因是连接失败卡在向导时，诊断块只有状态与计数，看不到逐次连接、GATT 与服务发现
+     细节；这些只在本机日志里。按钮复用设置页同一条 `open_log_directory` 命令（前端
+     不拼路径），成功提示「已打开日志目录；把其中的日志文件发给开发者。」，失败提示
+     「无法打开日志目录，请稍后重试。」；日志落成对 action `open_log_directory`
+     （begin=`unknown` → end=`passed|failed`）。落点：`src/pages/OnboardingPage.vue`、
+     `src/lib/bridge.ts`；原 `src/onboarding/diagnostics-text.ts` 及单测删除。
+  ② **Windows「高级」设备发现的完整路径写进连接页**：第①步第 5 条改为
+     「列表里找不到设备时，先打开高级设备发现：设置 → 蓝牙和其他设备 → 设备 →
+     向下滚动 → 蓝牙设备发现 → 高级；再点「显示所有设备」」；第③步（连接遥控器）常显
+     一张小卡「找不到遥控器？先打开「高级」」+ 同一路径，列表为空时再补「打开后回到
+     这里点「扫描已配对设备」；添加设备时选择「显示所有设备」」。
+  ③ **已连接但没有按键 / 通用名 `MI RC` 时提示重置遥控器**：第③步在以下任一条件满足
+     时显示「遥控器已连接，但没有收到按键」或「遥控器名称是 MI RC」提示卡——已连接后
+     20 秒仍无按键、`raw_input` 为 `awaiting`、或运行时名称/扫描列表出现 `MI RC`；
+     已收到按键后立即撤掉。卡内步骤：同时长按「主页」+「菜单」重置 → 在 Windows 删除
+     这支遥控器 → 按「TV」约 3 秒重新配对 → 回来「重新扫描」并点「连接」。与
+     `remote.hid_interface_missing` 修复卡同时成立时不重复显示；该修复卡自身也补上了
+     「主页 + 菜单」重置一句。判据：`src/onboarding/reset-guidance.ts`；落点：
+     `src/onboarding/steps/RemoteStep.vue`。
+  ④ **「全按键支持」步骤前置到遥控器连接之前**：顺序改为欢迎 → 全按键支持 → 遥控器 →
+     语音设备 → 输入工具 → 按住说话验证 → 普通按键 → 完成。原因是未开启时返回 / 音量±
+     不会到达 Windows，用户连接后按这些键没有反应，会误判成连接失败；该步骤仍为可选
+     增强、不参与门禁。页内补一句「建议先开启，再连接遥控器；这样连接后按返回 / 音量键
+     也能直接使用。」。落点：`src/onboarding/flow.ts`、`src/onboarding/steps/FullKeyStep.vue`、
+     `src/lib/i18n/en/onboarding.ts`；验收手册的步骤号同步更新。
