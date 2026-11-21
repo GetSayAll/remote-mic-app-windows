@@ -195,16 +195,20 @@ if (found.length === 0) return;      // ← 只含哨兵键的报告在这里就
 代次：接管到旧实例时日志会打 `[AGENT-STALE] running=… embedded=…`。
 **看到这一条，就必须先让宿主换新（重启机器最稳），再重跑验收，否则又是白跑一轮。**
 （2026-10-14 起助手会自动换代：同一"旧代→内嵌代"组合只自动刷新一次。
-2026-11-21 起，新的 build 对首次刷新改用 **30 秒去抖**，不再等 1 小时全局冷却；
-同一组合仍只刷新一次。否则本地升级后 WUDFHost 会长期停留在旧 agent，遥控器/
-语音键全部失效。`[AGENT-REFRESH]` 以 `requested`+`completed` 成对出现，跳过时带
-`terminal_result=skipped reason=host_scan_failed|already_attempted_once|rc003_members_not_one`。
+2026-11-21 起，新的 build 对首次刷新改用 **30 秒最小间隔**，不再等 1 小时
+全局冷却；同一组合仍只刷新一次。若 30 秒未到，`[AGENT-REFRESH]` 记
+`skipped reason=min_interval wait_ms=…`，由 `serve_connection` 在到期后重试，
+不依赖旧 agent 重新发 `[HELLO]`。否则本地升级后 WUDFHost 会长期停留在旧
+agent，遥控器/语音键全部失效。`[AGENT-REFRESH]` 以 `requested`+`completed`
+成对出现，跳过时带 `terminal_result=skipped
+reason=host_scan_failed|already_attempted_once|rc003_members_not_one|min_interval`。
 2026-11-12 起共享宿主不再只跳过：恰好一个 RC003 成员时走
 `recover_shared_host_device_node`——只 remove/scan RC003 设备节点，**不结束共享宿主**；
 日志 `mode=shared_device_node` → `[HOST] action=recover_device_node` →
 `new_host_ready` → `terminal_result=passed`。设备节点恢复自身的跳过原因是
-`shared_host_no_gadget|no_instance|bridge_down|cooldown`。**该路径真机 deferred**；
-失败时仍需宿主重建/设备重连。）
+`shared_host_no_gadget|no_instance|bridge_down|cooldown`；其中 10 分钟
+`DEVICE_RECOVERY_COOLDOWN_SECS` 到期前的新 build 对不会自动重试，需要等待或
+重启。**该路径真机 deferred**；失败时仍需宿主重建/设备重连。）
 
 **修复已在真机上验证（2026-09-26 21:48，见 §3.1）**：`canary_hits` 会随主页键增长、
 `clears_ok` 从 0 涨到 14，同一轮里"未武装 → 武装"的对照闭合，E2 判据成立。

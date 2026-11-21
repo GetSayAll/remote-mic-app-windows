@@ -85,7 +85,8 @@ mod imp {
     /// 只刷新一次。旧实现的 1 小时全局冷却会把本地升级后的新 build 对也挡住，
     /// 导致 WUDFHost 长时间停留在旧 agent、遥控器/语音键失效。
     const AGENT_REFRESH_MIN_INTERVAL_SECS: u64 = 30;
-    /// 冷却时间戳文件名（放运行时目录，跨助手进程重启仍生效）。
+    /// 自动刷新记录文件名（放运行时目录，跨助手进程重启仍生效）：
+    /// `last_refresh` 供 30 秒最小间隔使用，`tried` 记录已尝试的 build 组合。
     const AGENT_REFRESH_STAMP: &str = "agent-refresh.stamp";
     /// 共享宿主设备节点恢复的冷却时间：`remove-device` 可能耗时 60s 以上并短暂
     /// 中断 RC003 的 HID/ATVV 链路，失败后不能跟着应用的 38 秒重启节奏反复做。
@@ -1043,6 +1044,27 @@ mod imp {
         }
     }
 
+    /// 30 秒最小间隔还剩多久（纯函数，单测覆盖）。
+    ///
+    /// `Some(wait)` = 本次 stale 握手被最小间隔挡住，调用方应在 `wait` 后重试；
+    /// `None` = 已过间隔/没有上次记录/时钟回拨（时钟回拨不自动重试，避免把
+    /// 未来时间戳当成立即到期）。把"重试"放在 `serve_connection` 循环里，而不是
+    /// 依赖 agent 重新发 `[HELLO]`：旧 agent 的 socket 通常会一直保持。
+    fn min_interval_remaining(last_refresh_unix: Option<u64>, now_unix: u64) -> Option<Duration> {
+        let last = last_refresh_unix?;
+        if now_unix < last {
+            return None;
+        }
+        let elapsed = now_unix - last;
+        if elapsed >= AGENT_REFRESH_MIN_INTERVAL_SECS {
+            None
+        } else {
+            Some(Duration::from_secs(
+                AGENT_REFRESH_MIN_INTERVAL_SECS - elapsed,
+            ))
+        }
+    }
+
     /// 纯决策（可自检）：stale 自动刷新前的独占安全闸（2026-10-14）。
     ///
     /// 只对"独自承载 RC003"的宿主走**结束宿主**刷新：共享宿主同时承载用户别的
@@ -1085,7 +1107,7 @@ mod imp {
 
     /// 自动刷新记录（`agent-refresh.stamp`，放运行时目录，跨助手进程重启仍生效）。
     ///
-    /// - `last_refresh_unix`：上次自动刷新时刻（全局冷却用）；
+    /// - `last_refresh_unix`：上次自动刷新时刻（30 秒最小间隔用）；
     /// - `tried`：已尝试过的"旧代→内嵌代"组合（每个组合只自动刷新一次）。
     ///
     /// 兼容旧格式（历史文件只有一个 unix 秒）：只恢复冷却时刻、尝试记录为空——
@@ -1195,34 +1217,55 @@ mod imp {
 
     /// stale 分支入口：条件满足就后台自动刷新宿主里的 agent（不阻塞连接线程）。
     ///
-    /// 2026-10-14 加固（外部报障"设备约每小时中断一次"复核）：
-    /// - **独占闸门**：共享宿主一律跳过（不写尝试记录，宿主恢复独占后仍可再试）；
-    /// - **每组合一次**：同一"旧代→内嵌代"组合只自动刷新一次，之后只落折叠日志。
+    /// - **独占宿主**：结束旧宿主 → 等新宿主 → 重新注入；
+    /// - **共享宿主**：只移除/重扫 RC003 设备节点，**不结束宿主**；受
+    ///   `DEVICE_RECOVERY_COOLDOWN_SECS` 的 10 分钟设备节点恢复冷却约束；
+    /// - **每组合一次**：同一"旧代→内嵌代"组合只自动刷新一次；
+    /// - **30 秒最小间隔**：未到期时返回 `Some(wait)`，调用方应在 `wait` 后重试；
+    ///   `None` 表示已启动或已跳过（不再重试）。
     fn spawn_agent_refresh_if_needed(
         running_build: &str,
         host_pid: u32,
         bridge: Option<&AppBridge>,
         logger: &Logger,
-    ) {
+    ) -> Option<Duration> {
         let Some(dll) = PREPARED_GADGET_DLL.get().cloned() else {
-            return; // 本轮没准备好 DLL（dry-run / 自检路径），不刷新
+            return None; // 本轮没准备好 DLL（dry-run / 自检路径），不刷新
         };
         let dir = dll.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let mut stamp = read_refresh_stamp(&dir);
         let key = refresh_attempt_key(running_build, AGENT_BUILD);
         let already_attempted = stamp.tried.iter().any(|tried| tried == &key);
+        if !is_elevated() || running_build.is_empty() || running_build == AGENT_BUILD {
+            return None;
+        }
+        if already_attempted {
+            log_refresh_skipped_already_attempted(logger, running_build, host_pid);
+            return None;
+        }
+        let now = now_unix();
+        if let Some(wait) = min_interval_remaining(stamp.last_refresh_unix, now) {
+            logger.kv(
+                "[AGENT-REFRESH]",
+                &[
+                    ("phase", "completed".into()),
+                    ("terminal_result", "skipped".into()),
+                    ("reason", "min_interval".into()),
+                    ("wait_ms", wait.as_millis().to_string()),
+                    ("host_pid", host_pid.to_string()),
+                ],
+            );
+            return Some(wait);
+        }
         if !should_auto_refresh_agent(
-            is_elevated(),
+            true,
             running_build,
             AGENT_BUILD,
             already_attempted,
             stamp.last_refresh_unix,
-            now_unix(),
+            now,
         ) {
-            if already_attempted {
-                log_refresh_skipped_already_attempted(logger, running_build, host_pid);
-            }
-            return;
+            return None;
         }
         let Some((members, rc003_members)) = host_membership(host_pid) else {
             logger.kv(
@@ -1234,7 +1277,7 @@ mod imp {
                     ("host_pid", host_pid.to_string()),
                 ],
             );
-            return;
+            return None;
         };
         let route = stale_refresh_route(members, rc003_members);
         if route == StaleRefreshRoute::Skip {
@@ -1249,7 +1292,7 @@ mod imp {
                     ("rc003_members", rc003_members.to_string()),
                 ],
             );
-            return;
+            return None;
         }
 
         // 共享宿主分支的全部破坏性动作都走 `recover_shared_host_device_node`：
@@ -1298,7 +1341,7 @@ mod imp {
                         ("gadget_maps", gadget_maps.to_string()),
                     ],
                 );
-                return;
+                return None;
             }
             shared_instance = instance;
             shared_gadget_maps = gadget_maps;
@@ -1324,7 +1367,7 @@ mod imp {
                     if let Some(bridge) = bridge {
                         bridge.push_recovering(false);
                     }
-                    return;
+                    return None;
                 };
                 let notifier = bridge.map(|bridge| bridge.tx.clone());
                 write_device_recovery_stamp(&dir, now_unix());
@@ -1357,6 +1400,7 @@ mod imp {
             }
             StaleRefreshRoute::Skip => unreachable!("skip route returned above"),
         }
+        None
     }
 
     /// 同一组合已被尝试过：不再自动刷新，只折叠落日志（前 3 条 + 每 30 条一条）。
@@ -5760,6 +5804,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         /// 把日志刷爆；现在只在状态变化或每 `HB_LOG_EVERY` 记一条，
         /// ownership 续约等协议动作不受影响。
         last_hb_log: Option<(Instant, (bool, bool, bool))>,
+        /// 最近一次旧代 agent 握手：非空表示需要刷新；`serve_connection` 的循环在
+        /// 30 秒最小间隔到期后重试，不能只依赖旧 agent 再发 `[HELLO]`。
+        stale_agent_build: Option<String>,
+        stale_agent_host_pid: u32,
+        /// 30 秒最小间隔未到期的下次重试时刻；None = 无待重试。
+        agent_refresh_retry_at: Option<Instant>,
     }
 
     fn now_ms() -> u128 {
@@ -5883,16 +5933,26 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 // 代次核对：宿主里的实例是上一代脚本时，本轮改的逻辑**不会生效**。
                 // 不打这一条，现象是"日志一切正常，但行为还是旧的"——最难查的一类。
                 let build = extract_str(line, "build").unwrap_or_default();
+                let hello_host_pid = hello_pid as u32;
                 if !build.is_empty() && build != AGENT_BUILD {
                     // 旧代 agent 不会自愈（脚本在宿主里只加载一次）：满足提权/独占
-                    // 闸门、冷却与"每组合一次"条件时后台刷新——结束旧宿主、等新
-                    // 宿主、重新注入。
-                    spawn_agent_refresh_if_needed(
-                        &build,
-                        extract_num(line, "pid").unwrap_or(0) as u32,
-                        bridge,
-                        logger,
-                    );
+                    // 闸门与"每组合一次"条件时后台刷新——结束旧宿主、等新宿主、
+                    // 重新注入。30 秒最小间隔未到时不丢失这次请求：记录待重试，
+                    // 由 `serve_connection` 循环在到期后再次调用。
+                    session.stale_agent_build = Some(build.clone());
+                    session.stale_agent_host_pid = hello_host_pid;
+                    session.agent_refresh_retry_at = None;
+                    if let Some(wait) =
+                        spawn_agent_refresh_if_needed(&build, hello_host_pid, bridge, logger)
+                    {
+                        session.agent_refresh_retry_at = Some(Instant::now() + wait);
+                    }
+                } else {
+                    session.stale_agent_build = None;
+                    session.stale_agent_host_pid = 0;
+                    session.agent_refresh_retry_at = None;
+                }
+                if !build.is_empty() && build != AGENT_BUILD {
                     logger.kv(
                         "[AGENT-STALE]",
                         &[
@@ -5900,7 +5960,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             ("embedded", AGENT_BUILD.to_string()),
                             (
                                 "host_pid",
-                                extract_num(line, "pid").unwrap_or(0).to_string(),
+                                hello_host_pid.to_string(),
                             ),
                             (
                                 "note",
@@ -7205,6 +7265,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             config_sent: false,
             target_ack: None,
             last_hb_log: None,
+            stale_agent_build: None,
+            stale_agent_host_pid: 0,
+            agent_refresh_retry_at: None,
         };
         let mut last_hb_warn = Instant::now();
         // 是否曾经接到过**已鉴权**的 agent。注意不能用 `session.authenticated`：
@@ -7652,6 +7715,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         config_sent: false,
                         target_ack: None,
                         last_hb_log: None,
+                        stale_agent_build: None,
+                        stale_agent_host_pid: 0,
+                        agent_refresh_retry_at: None,
                     };
                     if let Ok(mut guard) = shared.lock() {
                         // 续约线程用的是 clone。Windows 的 `TcpStream::try_clone`
@@ -8132,6 +8198,29 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             if let Some(d) = deadline {
                 if Instant::now() >= d {
                     return; // 主循环会打 [TIMEUP] 并收尾
+                }
+            }
+
+            /* 30 秒最小间隔挡住的 stale 刷新不能丢：旧 agent 的 socket 通常保持，
+            不会重新发 `[HELLO]`。在 30 秒到期后从当前循环重试一次。 */
+            if let Some(build) = session.stale_agent_build.clone() {
+                let retry_due = session
+                    .agent_refresh_retry_at
+                    .map(|at| Instant::now() >= at)
+                    .unwrap_or(false);
+                if retry_due {
+                    session.agent_refresh_retry_at = None;
+                    if let Some(wait) = spawn_agent_refresh_if_needed(
+                        &build,
+                        session.stale_agent_host_pid,
+                        bridge,
+                        logger,
+                    ) {
+                        session.agent_refresh_retry_at = Some(Instant::now() + wait);
+                    } else {
+                        session.stale_agent_build = None;
+                        session.stale_agent_host_pid = 0;
+                    }
                 }
             }
 
@@ -8931,6 +9020,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                         config_sent: false,
                         target_ack: None,
                         last_hb_log: None,
+                        stale_agent_build: None,
+                        stale_agent_host_pid: 0,
+                        agent_refresh_retry_at: None,
                     };
                     let quiet = Logger::new(None);
                     let stop = Arc::new(AtomicBool::new(false));
@@ -9802,6 +9894,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 config_sent: false,
                                 target_ack: None,
                                 last_hb_log: None,
+                                stale_agent_build: None,
+                                stale_agent_host_pid: 0,
+                                agent_refresh_retry_at: None,
                             };
                             let quiet = Logger::new(None);
                             let stop = Arc::new(AtomicBool::new(false));
@@ -10836,10 +10931,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     #[cfg(test)]
     mod agent_refresh_tests {
         use super::{
-            format_refresh_stamp, parse_refresh_stamp, refresh_attempt_key,
+            format_refresh_stamp, min_interval_remaining, parse_refresh_stamp, refresh_attempt_key,
             should_auto_refresh_agent, should_refresh_stale_agent_host, stale_refresh_route,
             AgentRefreshStamp, StaleRefreshRoute, AGENT_REFRESH_MIN_INTERVAL_SECS,
         };
+
+        #[test]
+        fn min_interval_remaining_schedules_a_retry_after_30s() {
+            let now = 1_000_000_u64;
+            assert_eq!(min_interval_remaining(None, now), None);
+            assert_eq!(
+                min_interval_remaining(Some(now - 29), now),
+                Some(std::time::Duration::from_secs(1))
+            );
+            assert_eq!(min_interval_remaining(Some(now - 30), now), None);
+            // 时钟回拨：未来记录不当作立即到期，也不自动重试。
+            assert_eq!(min_interval_remaining(Some(now + 1), now), None);
+        }
 
         #[test]
         fn refresh_new_build_pair_even_within_the_old_one_hour_cooldown() {
@@ -11198,6 +11306,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 config_sent: false,
                 target_ack: None,
                 last_hb_log: None,
+                stale_agent_build: None,
+                stale_agent_host_pid: 0,
+                agent_refresh_retry_at: None,
             }
         }
 
