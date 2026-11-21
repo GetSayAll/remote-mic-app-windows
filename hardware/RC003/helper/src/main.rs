@@ -80,9 +80,11 @@ mod imp {
     /// RC003 的硬件 token（VID 0x2717 / PID 0x32B8 / REV 00a4），与仓库既有取证一致。
     const RC003_HARDWARE_TOKEN: &str = "vid&012717_pid&32b8_rev&00a4";
 
-    /// 检测到宿主里跑的是上一代 agent 时自动刷新的冷却时间：
-    /// 一台机器一小时内最多自动刷新一次，防"刷新→仍旧→再刷新"的循环。
-    const AGENT_REFRESH_COOLDOWN_SECS: u64 = 3600;
+    /// 新 agent build 对的首次刷新最小间隔（2026-11-21）：用于避免多个宿主/多次
+    /// 快速安装在同一时刻连续结束宿主；同一"旧代→内嵌代"组合仍由 `tried` 保证
+    /// 只刷新一次。旧实现的 1 小时全局冷却会把本地升级后的新 build 对也挡住，
+    /// 导致 WUDFHost 长时间停留在旧 agent、遥控器/语音键失效。
+    const AGENT_REFRESH_MIN_INTERVAL_SECS: u64 = 30;
     /// 冷却时间戳文件名（放运行时目录，跨助手进程重启仍生效）。
     const AGENT_REFRESH_STAMP: &str = "agent-refresh.stamp";
     /// 共享宿主设备节点恢复的冷却时间：`remove-device` 可能耗时 60s 以上并短暂
@@ -1018,9 +1020,9 @@ mod imp {
     ///
     /// 条件：提权（结束 session 0 宿主必需）＋ 宿主代次非空且与内嵌代次不同
     /// ＋ **该"旧代→内嵌代"组合尚未尝试过**（2026-10-14：同一组合只自动刷新
-    /// 一次——刷新后仍不收敛时不再反复结束宿主；原"冷却后无限重试"在报障
-    /// 场景里会退化成"每小时杀一次宿主"）＋ 距上次自动刷新超过冷却时间
-    /// （防抖动，多个宿主/组合之间至少隔一个冷却）。
+    /// 一次——刷新后仍不收敛时不再反复结束宿主）＋ 距上次自动刷新至少 30 秒
+    /// （2026-11-21：旧实现是 1 小时全局冷却，导致新 build 对的首次刷新被挡，
+    /// 升级后 WUDFHost 继续跑旧 agent；30 秒只用于多宿主/连续安装的去抖）。
     fn should_auto_refresh_agent(
         elevated: bool,
         running_build: &str,
@@ -1036,7 +1038,7 @@ mod imp {
             return false;
         }
         match last_refresh_unix {
-            Some(last) => now_unix >= last && now_unix - last >= AGENT_REFRESH_COOLDOWN_SECS,
+            Some(last) => now_unix >= last && now_unix - last >= AGENT_REFRESH_MIN_INTERVAL_SECS,
             None => true,
         }
     }
@@ -5903,8 +5905,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             (
                                 "note",
                                 "宿主里跑的是上一代脚本（本轮接管的是旧实例）。\
-                                同一代次组合只自动刷新一次（结束旧宿主 → 等新宿主 → 重新注入）；
-                                共享宿主不刷新（见 [AGENT-REFRESH] reason=shared_host）。\
+                                同一代次组合只自动刷新一次：独占宿主结束旧宿主，\
+                                共享宿主只恢复 RC003 设备节点、不结束宿主。\
                                 若本条持续出现而功能未恢复，可重启机器或以管理员结束该 WUDFHost 进程。\
                                  另一条会因租约过期停清键，不适合做验收判据。"
                                     .into(),
@@ -10836,11 +10838,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         use super::{
             format_refresh_stamp, parse_refresh_stamp, refresh_attempt_key,
             should_auto_refresh_agent, should_refresh_stale_agent_host, stale_refresh_route,
-            AgentRefreshStamp, StaleRefreshRoute, AGENT_REFRESH_COOLDOWN_SECS,
+            AgentRefreshStamp, StaleRefreshRoute, AGENT_REFRESH_MIN_INTERVAL_SECS,
         };
 
         #[test]
-        fn refresh_only_when_stale_elevated_and_outside_cooldown() {
+        fn refresh_new_build_pair_even_within_the_old_one_hour_cooldown() {
             let now = 1_000_000_u64;
             // 代次一致 / 提权不足 / 代次未知：都不刷新。
             assert!(!should_auto_refresh_agent(true, "a", "a", false, None, now));
@@ -10854,13 +10856,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             assert!(should_auto_refresh_agent(
                 true, "old", "new", false, None, now
             ));
-            // 冷却内：不刷新；冷却外：刷新。
+            // 回归用例：距上次刷新 6 分钟（旧实现 3600 秒冷却会挡住）。
+            assert!(should_auto_refresh_agent(
+                true,
+                "old",
+                "new",
+                false,
+                Some(now - 6 * 60),
+                now
+            ));
+            // 30 秒去抖：29 秒内不刷新，30 秒整刷新。
             assert!(!should_auto_refresh_agent(
                 true,
                 "old",
                 "new",
                 false,
-                Some(now - (AGENT_REFRESH_COOLDOWN_SECS - 1)),
+                Some(now - (AGENT_REFRESH_MIN_INTERVAL_SECS - 1)),
                 now
             ));
             assert!(should_auto_refresh_agent(
@@ -10868,7 +10879,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 "old",
                 "new",
                 false,
-                Some(now - AGENT_REFRESH_COOLDOWN_SECS),
+                Some(now - AGENT_REFRESH_MIN_INTERVAL_SECS),
+                now
+            ));
+            // 时钟回拨：记录在未来时不刷新。
+            assert!(!should_auto_refresh_agent(
+                true,
+                "old",
+                "new",
+                false,
+                Some(now + 1),
                 now
             ));
         }
@@ -10876,9 +10896,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         #[test]
         fn same_build_pair_is_never_refreshed_twice() {
             // 2026-10-14：同一"旧代→内嵌代"组合只自动刷新一次——刷新后仍不
-            // 收敛时不再等冷却反复结束宿主（原行为会变成每小时杀一次宿主）。
+            // 收敛时不再反复结束宿主；`tried` 记录是唯一判据。
             let now = 1_000_000_u64;
-            let long_after = now + AGENT_REFRESH_COOLDOWN_SECS * 24;
+            let long_after = now + 3600;
             assert!(!should_auto_refresh_agent(
                 true, "old", "new", true, None, long_after
             ));
@@ -10890,7 +10910,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 Some(now),
                 long_after
             ));
-            // 没有尝试记录时仍按冷却节奏走（阳性对照：不能把开关写死成"永不刷新"）。
+            // 没有尝试记录时允许（阳性对照：不能把开关写死成"永不刷新"）。
             assert!(should_auto_refresh_agent(
                 true, "old", "new", false, None, now
             ));

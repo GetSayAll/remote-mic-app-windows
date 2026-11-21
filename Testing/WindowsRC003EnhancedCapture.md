@@ -195,7 +195,9 @@ if (found.length === 0) return;      // ← 只含哨兵键的报告在这里就
 代次：接管到旧实例时日志会打 `[AGENT-STALE] running=… embedded=…`。
 **看到这一条，就必须先让宿主换新（重启机器最稳），再重跑验收，否则又是白跑一轮。**
 （2026-10-14 起助手会自动换代：同一"旧代→内嵌代"组合只自动刷新一次。
-`[AGENT-REFRESH]` 以 `requested`+`completed` 成对出现，跳过时带
+2026-11-21 起，新的 build 对首次刷新改用 **30 秒去抖**，不再等 1 小时全局冷却；
+同一组合仍只刷新一次。否则本地升级后 WUDFHost 会长期停留在旧 agent，遥控器/
+语音键全部失效。`[AGENT-REFRESH]` 以 `requested`+`completed` 成对出现，跳过时带
 `terminal_result=skipped reason=host_scan_failed|already_attempted_once|rc003_members_not_one`。
 2026-11-12 起共享宿主不再只跳过：恰好一个 RC003 成员时走
 `recover_shared_host_device_node`——只 remove/scan RC003 设备节点，**不结束共享宿主**；
