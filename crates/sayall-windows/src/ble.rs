@@ -3956,20 +3956,27 @@ static DIAGNOSTIC_LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static DIAGNOSTIC_LOG_METADATA: OnceLock<DiagnosticLogMetadata> = OnceLock::new();
 
 /// 在任何功能组件启动前配置生产诊断日志。环境变量仍可覆盖路径，方便受控取证；
+/// 但落在产品根目录 `%LOCALAPPDATA%\SayAll`（而非其下的 `Logs`）的覆盖会归一到
+/// `Logs\<原文件名>`，避免历史测试变量把日志和「打开日志目录」带到上一层。
 /// 正式应用由宿主传入 LocalAppData 下的固定路径，日志内容绝不打印该路径。
 pub fn initialize_diagnostic_log(
     default_path: std::path::PathBuf,
     metadata: DiagnosticLogMetadata,
 ) -> bool {
-    let path = std::env::var_os("SAYALL_GATT_LOG")
-        .map(std::path::PathBuf::from)
-        .unwrap_or(default_path);
+    let override_path = std::env::var_os("SAYALL_GATT_LOG").map(std::path::PathBuf::from);
+    let path = crate::diagnostic_log::resolve_log_path(default_path, override_path.clone());
     let parent_ready = path
         .parent()
         .map(|parent| std::fs::create_dir_all(parent).is_ok())
         .unwrap_or(false);
-    let _ = DIAGNOSTIC_LOG_PATH.set(path);
+    let _ = DIAGNOSTIC_LOG_PATH.set(path.clone());
     let _ = DIAGNOSTIC_LOG_METADATA.set(metadata);
+    if override_path
+        .as_ref()
+        .is_some_and(|original| original != &path)
+    {
+        gatt_note("diagnostic_log path_normalized reason=override_outside_logs".to_owned());
+    }
     parent_ready
         && diagnostic_log_path()
             .map(|path| crate::diagnostic_log::probe(&path))

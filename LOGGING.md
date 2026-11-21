@@ -37,9 +37,12 @@ windows_build=<build 或 unknown>
 
 正式应用默认写入 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`，不再要求用户
 预先设置环境变量。受控测试仍可用 `SAYALL_GATT_LOG` 覆盖写入位置；手动覆盖也默认应放在
-`%LOCALAPPDATA%\SayAll\Logs\` 下，只有需要隔离并发进程时才使用临时目录。日志正文不得
-打印实际文件路径。`%LOCALAPPDATA%\SayAll` 根目录里的旧诊断文件是历史手动覆盖产物，
-不是应用默认路径。应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
+`%LOCALAPPDATA%\SayAll\Logs\` 下，只有需要隔离并发进程时才使用临时目录。若覆盖路径落在
+`%LOCALAPPDATA%\SayAll` 根目录或它的非 `Logs` 子目录，启动时会归一到
+`Logs\<原文件名>`，并在日志里记一条 `diagnostic_log path_normalized
+reason=override_outside_logs`；产品目录之外的临时路径原样保留。日志正文不得打印实际文件
+路径。`%LOCALAPPDATA%\SayAll` 根目录里的旧诊断文件是历史手动覆盖产物，不是应用默认路径。
+应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
 在用户看到主页面前后分别留痕，确保安装后白屏可以区分为宿主、WebView、脚本、
 Vue 渲染或 IPC 阶段故障。
 
