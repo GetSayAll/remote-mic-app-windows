@@ -143,7 +143,7 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
       },
     });
 
-    expect(wrapper.text()).not.toContain("遥控器名称是 MI RC");
+    expect(wrapper.text()).not.toContain("遥控器连不上或者一直收不到按键");
     expect(wrapper.text()).not.toContain("遥控器已连接，但没有收到按键");
     wrapper.unmount();
   });
@@ -160,10 +160,10 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
       },
     });
 
-    expect(wrapper.text()).not.toContain("遥控器名称是 MI RC");
+    expect(wrapper.text()).not.toContain("遥控器连不上或者一直收不到按键");
     vi.advanceTimersByTime(20_000);
     await nextTick();
-    expect(wrapper.text()).toContain("遥控器名称是 MI RC");
+    expect(wrapper.text()).toContain("遥控器连不上或者一直收不到按键");
     const text = wrapper.text();
     const remove = text.indexOf("在 Windows 蓝牙设置里删除这支遥控器。");
     const reset = text.indexOf("同时长按「主页」+「菜单」");
@@ -196,7 +196,7 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
     vi.advanceTimersByTime(20_000);
     await nextTick();
     expect(wrapper.text()).toContain("遥控器已连接，但没有收到按键");
-    expect(wrapper.text()).not.toContain("遥控器名称是 MI RC");
+    expect(wrapper.text()).not.toContain("遥控器连不上或者一直收不到按键");
     wrapper.unmount();
   });
 

@@ -872,3 +872,7 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
      `Testing/investigation/start-with-diag.ps1`、`Testing/investigation/start-with-diag.cmd`。
      英文文案同步 `src/lib/i18n/en/onboarding.ts`；验收手册同步
      `Testing/WindowsOnboardingWizard.md`。
+- 2026-11-21（向导现场反馈第六轮）：`MI RC` 重置卡的标题由「遥控器名称是 MI RC」改为
+  「遥控器连不上或者一直收不到按键」；触发条件、正文与三步操作不变。落点：
+  `src/onboarding/steps/RemoteStep.vue`、`src/lib/i18n/en/onboarding.ts`、
+  `Testing/WindowsOnboardingWizard.md`。

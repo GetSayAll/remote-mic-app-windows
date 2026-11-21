@@ -477,7 +477,7 @@ watch(
           resetGuidanceKind === "not_connected"
             ? t("遥控器一直没有连上")
             : resetGuidanceKind === "generic_name"
-              ? t("遥控器名称是 MI RC")
+              ? t("遥控器连不上或者一直收不到按键")
               : t("遥控器已连接，但没有收到按键")
         }}
       </h4>

@@ -77,7 +77,7 @@ export default {
     "Windows reports this remote as MI RC, which usually means it has not finished initializing or is still in its previous pairing state.",
   "仍无反应：同时长按「主页」+「菜单」重置遥控器，在 Windows 蓝牙设置里删除这支遥控器，再按「TV」键约 3 秒重新配对；回来后点「重新扫描」。":
     "If nothing happens, press and hold Home + Menu together to reset the remote, remove it in Windows Bluetooth settings, then hold the TV button for about 3 seconds to pair it again. Come back and select Scan Again.",
-  "遥控器名称是 MI RC": "The remote is named MI RC",
+  "遥控器连不上或者一直收不到按键": "The remote won't connect or keeps missing button presses",
   "遥控器已连接，但没有收到按键": "The remote is connected, but no button was received",
   "遥控器一直没有连上": "The remote still won't connect",
   "应用已经自动重试超过约 60 秒，仍没有建立连接。请重置遥控器后重新配对；如果这支遥控器还连着电视或手机，先断开那边的连接。":
