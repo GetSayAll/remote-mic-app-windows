@@ -6,6 +6,7 @@ import {
   normalizeStep,
   phaseOf,
   previousStep,
+  stepProgressPercent,
   type OnboardingContext,
   type OnboardingStep,
 } from "./flow";
@@ -84,6 +85,19 @@ describe("onboarding step order", () => {
     expect(nextStep("controls")).toBe("complete");
     expect(nextStep("complete")).toBeNull();
     expect(previousStep("full_key")).toBe("welcome");
+  });
+
+  it("derives a strictly increasing progress percent from the step order", () => {
+    const percentages = ONBOARDING_STEPS.map(stepProgressPercent);
+    // 2026-11-21 顺序变更回归：手写映射曾让进度条从 44% 倒退到 16%。
+    for (let i = 1; i < percentages.length; i += 1) {
+      expect(percentages[i]).toBeGreaterThan(percentages[i - 1]);
+    }
+    expect(percentages[0]).toBeGreaterThan(0);
+    expect(percentages.at(-1)).toBe(100);
+    expect(stepProgressPercent("welcome")).toBe(4);
+    expect(stepProgressPercent("full_key")).toBe(18);
+    expect(stepProgressPercent("complete")).toBe(100);
   });
 
   it("normalizes unknown persisted steps to welcome (older/newer writers must not strand the flow)", () => {

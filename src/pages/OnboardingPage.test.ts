@@ -480,7 +480,7 @@ describe("Onboarding wizard shell", () => {
     );
     expect(wrapper.text()).toContain("已开启。返回 / 音量+ / 音量− 现在也能自定义。");
     expect(wrapper.text()).not.toContain("现在不开启也可以继续");
-    // 授权日志按第④步记录，不得沿用第⑤步的 doubao 标记。
+    // 授权日志按第②步记录，不得沿用第⑤步的 doubao 标记。
     const auth = onboardingEvents("authorization");
     expect(auth.map((p) => p.result)).toEqual(["unknown", "passed"]);
     expect(auth.every((p) => p.step === "full_key" && p.detail === "full_key")).toBe(true);

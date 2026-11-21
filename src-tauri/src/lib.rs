@@ -1242,7 +1242,7 @@ fn windows_settings_section_name(section: WindowsSettingsSection) -> &'static st
     }
 }
 
-/// 打开固定的 Windows 设置页（向导第②步「打开蓝牙设置」等入口）。
+/// 打开固定的 Windows 设置页（向导第①/③步的「打开蓝牙设置」等入口）。
 #[tauri::command]
 fn open_windows_settings(section: WindowsSettingsSection) -> Result<(), String> {
     let name = windows_settings_section_name(section);

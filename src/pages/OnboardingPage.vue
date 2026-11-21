@@ -60,6 +60,7 @@ import {
   normalizeStep,
   phaseOf,
   previousStep,
+  stepProgressPercent,
   type OnboardingBlockCode,
   type OnboardingContext,
   type OnboardingStep,
@@ -272,17 +273,7 @@ const continueEnabled = computed(() => {
 const currentPhase = computed(() => phaseOf(step.value));
 
 /** 阶段进度条（设计稿 2026-10-05）：只画位置感，不写步数与百分比。 */
-const PROGRESS_PERCENT: Record<OnboardingStep, number> = {
-  welcome: 4,
-  remote: 16,
-  audio: 30,
-  full_key: 44,
-  voice_tool: 58,
-  voice_test: 72,
-  controls: 87,
-  complete: 100,
-};
-const progressPercent = computed(() => PROGRESS_PERCENT[step.value]);
+const progressPercent = computed(() => stepProgressPercent(step.value));
 
 /** 右栏「检查卡」输入快照：全部来自既有状态，不发起调用、不改判据。 */
 const sidePanel = computed(() => {
@@ -378,7 +369,7 @@ watch(
 );
 
 // 步骤进入的副作用：遥控器/普通按键步骤订阅按键边沿；语音设备步骤刷新端点；
-// 按键检测步骤（②遥控器 / ⑦普通按键）期间暂挂映射执行（离开恢复）；切换步骤时
+// 按键检测步骤（③遥控器 / ⑦普通按键）期间暂挂映射执行（离开恢复）；切换步骤时
 // 清除误按提示。
 watch(
   step,
@@ -1468,6 +1459,12 @@ const logDirectoryButtonText = computed(() => {
  */
 async function openLogDirectoryFromOnboarding(): Promise<void> {
   if (logDirectoryState.value === "busy") return;
+  // 新一次操作必须取消上一次的自动收起：否则旧计时器会在新请求进行中
+  // 把状态改回 idle，甚至清掉新的失败提示。
+  if (logDirectoryResetTimer !== null) {
+    window.clearTimeout(logDirectoryResetTimer);
+    logDirectoryResetTimer = null;
+  }
   const started = performance.now();
   const target = step.value;
   logDirectoryState.value = "busy";

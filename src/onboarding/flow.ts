@@ -98,6 +98,20 @@ export function phaseOf(step: OnboardingStep): OnboardingPhase {
   return PHASES[step];
 }
 
+/**
+ * 阶段进度条的位置（设计稿 2026-10-05：只画位置感，不写步数与百分比）。
+ *
+ * 由导航顺序推导，禁止再维护一份手写映射：2026-11-21 把「全按键支持」前置后，
+ * 旧的 `PROGRESS_PERCENT` 仍按旧顺序写死，进度条会从 44% 倒退到 16%。
+ */
+export function stepProgressPercent(step: OnboardingStep): number {
+  const index = stepIndex(step);
+  if (index < 0) return 0;
+  if (ONBOARDING_STEPS.length <= 1) return 100;
+  // 保持设计稿的 4%（第①步）→ 100%（完成）跨度，只按顺序插值。
+  return Math.round(4 + (index / (ONBOARDING_STEPS.length - 1)) * 96);
+}
+
 /** 门禁上下文：由页面从运行快照/设备探测组装，本模块不发起任何调用。 */
 export interface OnboardingContext {
   remote: {
