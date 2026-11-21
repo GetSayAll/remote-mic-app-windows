@@ -66,6 +66,12 @@ import {
   type OnboardingStep,
 } from "../onboarding/flow";
 import { buildSidePanel } from "../onboarding/panel";
+import {
+  connectionPhaseCode,
+  rawInputPhaseCode,
+  remoteStateToken,
+  type RemoteStateOptions,
+} from "../onboarding/remote-state";
 import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
@@ -132,13 +138,18 @@ let heartbeatTimer: number | null = null;
 function heartbeatDetail(): string | undefined {
   switch (step.value) {
     case "remote":
-      return `obs_${remoteButtonObserved.value ? 1 : 0}_n${devices.value.length}`;
+      // 连接阶段 / BLE 语音 / Raw Input 阶段 / 接口数 / 报文与边沿计数 / 重连次数 /
+      // 设备数 / 按键观察 / 错误位，全部脱敏为稳定 token。
+      return currentRemoteState();
     case "full_key":
       return `capture_${rc003Status.value?.enabled ? 1 : 0}_available_${
         captureSupport.value?.available === false ? 0 : 1
       }`;
     case "controls":
-      return `n${observedButtons.value.size}`;
+      return `d_${observedButtons.value.size}_${currentRemoteState({
+        includeDeviceCount: false,
+        includeButtonObserved: false,
+      })}`;
     case "voice_test":
       return voicePhase.value;
     default:
@@ -177,6 +188,92 @@ let lastStaleRemoteEventCount = 0;
 const voiceKeyMistake = ref(false);
 let buttonEdgeUnsubscribe: (() => void) | null = null;
 let buttonEdgeSubscribed = false;
+
+/**
+ * 连接/按键步骤的脱敏快照（2026-11-21 用户要求：现场卡住时只靠日志定位）。
+ *
+ * 只带阶段 token 与计数；设备名、地址、HID 路径、错误原文一律不进。
+ * `detail` 在 Rust 侧上限 64 字节，计数已按上限截断。
+ */
+function currentRemoteState(options: RemoteStateOptions = {}): string {
+  const platform = props.runtime?.platform;
+  return remoteStateToken(
+    {
+      connectionPhase: platform?.connection.phase ?? "idle",
+      bleVoiceReady: platform?.bleVoiceReady ?? false,
+      rawInputPhase: platform?.rawInput.phase ?? "stopped",
+      matchedDeviceCount: platform?.rawInput.matchedDeviceCount ?? 0,
+      rawEventCount: platform?.rawInput.rawEventCount ?? 0,
+      semanticEdgeCount: platform?.rawInput.semanticEdgeCount ?? 0,
+      staleRemoteEventCount: platform?.rawInput.staleRemoteEventCount ?? 0,
+      reconnectAttempt: platform?.connection.reconnectAttempt ?? 0,
+      deviceCount: devices.value.length,
+      buttonObserved: remoteButtonObserved.value,
+      connectionErrorPresent: (platform?.connection.lastError ?? null) !== null,
+      rawInputErrorPresent: (platform?.rawInput.lastError ?? null) !== null,
+      remoteModel: platform?.connection.remoteModel ?? "unknown",
+    },
+    options,
+  );
+}
+
+/** 按键订阅日志用的短绑定快照：Raw Input 阶段 + 匹配接口数。 */
+function currentRawBindingDetail(): string {
+  const raw = props.runtime?.platform.rawInput;
+  const matched = Math.max(0, Math.min(raw?.matchedDeviceCount ?? 0, 9));
+  return `raw_${rawInputPhaseCode(raw?.phase ?? "stopped")}_m_${matched}`;
+}
+
+/** 门禁/步骤日志用：只给遥控器与普通按键步骤附带连接快照。 */
+function remoteStateDetailForStep(target: OnboardingStep): string | undefined {
+  if (target !== "remote" && target !== "controls") return undefined;
+  return currentRemoteState({
+    includeCounters: false,
+    includeModel: true,
+    includeRawInputError: true,
+    includeDeviceCount: target === "remote",
+    includeButtonObserved: target === "remote",
+  });
+}
+
+/**
+ * 状态跳变签名：只包含阶段/匹配数/重连次数/错误位/型号，不含高频报文计数——
+ * 报文计数每按一次就变，放进签名会让日志刷屏；它们只随 30 秒心跳输出。
+ */
+const remoteStateSignature = computed(() => {
+  const platform = props.runtime?.platform;
+  return [
+    platform?.connection.phase ?? "idle",
+    platform?.bleVoiceReady ? 1 : 0,
+    platform?.rawInput.phase ?? "stopped",
+    platform?.rawInput.matchedDeviceCount ?? 0,
+    platform?.connection.reconnectAttempt ?? 0,
+    (platform?.connection.lastError ?? null) !== null ? 1 : 0,
+    (platform?.rawInput.lastError ?? null) !== null ? 1 : 0,
+    platform?.connection.remoteModel ?? "unknown",
+  ].join("|");
+});
+
+watch(
+  () => [step.value, remoteStateSignature.value] as const,
+  ([current]) => {
+    if (current !== "remote" && current !== "controls") return;
+    reportOnboardingEvent({
+      kind: "remote_observed",
+      result: "unknown",
+      reason: "remote_state",
+      step: current,
+      detail: currentRemoteState({
+        includeCounters: false,
+        includeModel: true,
+        includeRawInputError: true,
+        includeDeviceCount: current === "remote",
+        includeButtonObserved: current === "remote",
+      }),
+    });
+  },
+  { immediate: true },
+);
 
 // ---- 语音设备步骤 ----
 const audioEndpoints = ref<AudioEndpoint[]>([]);
@@ -345,11 +442,13 @@ watch(
       if (blockedStep === currentStep) {
         blockedStep = null;
         blockedCode = null;
+        const detail = remoteStateDetailForStep(currentStep);
         reportOnboardingEvent({
           kind: "step_recovered",
           result: "passed",
           reason: "gate_satisfied",
           step: currentStep,
+          ...(detail ? { detail } : {}),
         });
       }
       return;
@@ -357,12 +456,14 @@ watch(
     if (blockedStep === currentStep && blockedCode === status) return;
     blockedStep = currentStep;
     blockedCode = status;
+    const detail = remoteStateDetailForStep(currentStep);
     reportOnboardingEvent({
       kind: "step_blocked",
       result: "failed",
       reason: "gate_blocked",
       step: currentStep,
       code: status,
+      ...(detail ? { detail } : {}),
     });
   },
   { immediate: true },
@@ -381,6 +482,21 @@ watch(
     // 离开后立即恢复。
     const observingButtons = current === "remote" || current === "controls";
     const observedButtons = previous === "remote" || previous === "controls";
+    if (previous === "remote" || previous === "controls") {
+      // 离开检测步骤时补一条带 Raw Input 计数的终态快照：用户可能按了很多次才通过，
+      // 只靠 30 秒心跳会丢掉最后的报文/边沿计数。
+      reportOnboardingEvent({
+        kind: "remote_observed",
+        result: "unknown",
+        reason: "remote_state_exit",
+        step: previous,
+        detail: currentRemoteState({
+          includeCounters: true,
+          includeDeviceCount: previous === "remote",
+          includeButtonObserved: previous === "remote",
+        }),
+      });
+    }
     if (observedButtons && !observingButtons) {
       void setMappingSuspensionState(false);
     }
@@ -565,25 +681,29 @@ async function startButtonObservation(): Promise<void> {
   if (buttonEdgeSubscribed) return;
   buttonEdgeSubscribed = true;
   const started = performance.now();
-  reportStepAction(step.value, "button_observation", "unknown");
+  reportStepAction(step.value, "button_observation", "unknown", {
+    detail: currentRawBindingDetail(),
+  });
   try {
     const unsubscribe = await subscribeButtonEdges(handleButtonEdge);
     if (step.value !== "remote" && step.value !== "controls") {
       unsubscribe();
       buttonEdgeSubscribed = false;
       reportStepAction(step.value, "button_observation", "passed", {
-        detail: "detached",
+        detail: `detached_${currentRawBindingDetail()}`,
         elapsedMs: actionElapsed(started),
       });
       return;
     }
     buttonEdgeUnsubscribe = unsubscribe;
     reportStepAction(step.value, "button_observation", "passed", {
+      detail: `subscribed_${currentRawBindingDetail()}`,
       elapsedMs: actionElapsed(started),
     });
   } catch {
     buttonEdgeSubscribed = false;
     reportStepAction(step.value, "button_observation", "failed", {
+      detail: "subscribe_failed",
       elapsedMs: actionElapsed(started),
     });
   }
@@ -671,21 +791,23 @@ async function connectDevice(device: PairedRemote, mode: "auto" | "manual" = "ma
   // 脱敏：device.id / 名称不进日志，只记录连接请求、方式与结果。
   reportStepAction("remote", "connect_requested", "unknown", { detail: mode });
   try {
-    await connectRemote(device.id);
+    const snapshot = await connectRemote(device.id);
     connectedDeviceId.value = device.id;
     // 成功不写进度消息（2026-10-13 现场要求：那条"正在确认语音功能…"与下方按键行
     // 引导重复、按键已收到后还会变成过期信息）。连接过程由连接检查卡片的
     // 进行中/已就绪表达；失败仍给出原因。
     operationMessage.value = "";
     reportStepAction("remote", "connect_requested", "passed", {
-      detail: mode,
+      // 命令返回时的阶段/型号：配合随后的 remote_state 跳变，能看出是
+      // 「命令成功但链路还没就绪」还是「命令本身失败」。
+      detail: `${mode}_p_${connectionPhaseCode(snapshot.phase)}_md_${snapshot.remoteModel}`,
       elapsedMs: actionElapsed(started),
     });
   } catch (error) {
     logRawError("connect_requested", error);
     operationMessage.value = t("连接遥控器失败，请重试。");
     reportStepAction("remote", "connect_requested", "failed", {
-      detail: mode,
+      detail: `${mode}_failed`,
       elapsedMs: actionElapsed(started),
     });
   } finally {
@@ -843,7 +965,9 @@ watch(
     if (!grew) return;
     if (step.value !== "remote" || remoteButtonObserved.value || otherRemoteActivity.value) return;
     otherRemoteActivity.value = true;
-    reportStepAction("remote", "other_remote_button", "passed");
+    reportStepAction("remote", "other_remote_button", "passed", {
+      detail: `stale_${Math.min(count, 999)}`,
+    });
   },
 );
 

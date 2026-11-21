@@ -266,6 +266,45 @@
   音频端点 id/名称、文件路径、错误原文与任何用户输入内容（自动化用例对
   遥控器/端点身份字段做了"绝不出现"断言）。
 
+### 连接 / 按键卡点快照（2026-11-21）
+
+遥控器与普通按键步骤会在**进入步骤、连接阶段跳变、Raw Input 阶段跳变、匹配接口数/
+重连次数/错误位/型号变化**时落一条：
+
+```text
+frontend event=onboarding phase=remote_observed result=unknown reason=remote_state
+  step=remote detail=p_r_ble_1_raw_a_m_0_rc_0_n_0_obs_0_err_0_md_rc003
+```
+
+`detail` 是单个稳定 token（≤64 字符，不含设备名/地址/路径/错误原文）：
+
+- `p_` 连接阶段：`i` idle / `c` connecting / `d` discovering / `ac` awaiting_capabilities /
+  `r` ready / `s` streaming / `dr` draining / `rc` reconnecting / `su` suspended /
+  `dc` disconnected / `f` failed
+- `ble_`：BLE 语音会话是否就绪（0/1）
+- `raw_`：Raw Input 阶段：`s` stopped / `st` starting / `a` awaiting / `r` ready /
+  `f` failed / `u` unsupported
+- `m_`：匹配到遥控器的 HID 接口数（上限 9）
+- `rc_`：重连次数（上限 99）；`n_`：扫描到的已配对遥控器数（上限 9）
+- `obs_`：本向导会话是否已收到普通按键；`err_`：连接层是否有错误记录
+- `ce_`：Raw Input 层是否有错误记录（仅状态跳变行）
+- `md_`：型号 token（`rc001` / `rc003` / `unknown`）
+
+`phase=heartbeat` 的 `detail` 额外带 Raw Input 计数：`re_` 原始报文数、`se_` 语义边沿数、
+`st_` 被路径过滤丢弃的报文数（均上限 999）。离开②/⑦步时另落一条
+`reason=remote_state_exit`，其 `detail` 也带这组计数，避免用户按了很多次才通过时
+最后几次计数只等心跳而丢失。判读：
+
+- `p_r_..._raw_a_m_0`：BLE 已就绪，但系统没有这支遥控器的 HID 按键接口；
+- `p_r_..._raw_r_m_1_..._obs_0`：按键通道在位但一直没收到按键，对照心跳 `re_/se_` 是否增长；
+- `p_rc_..._rc_5`：仍在重连，链路没有建立；
+- `err_1`：连接层有错误记录，按同一时间戳查 Rust 的 `ble_*` / `gatt_*` 行。
+
+扫描另落 Rust 行 `ble_scan phase=completed terminal_result=passed found_count=N` /
+`ble_scan filter total_paired_count=N supported_count=M`。**`total_paired_count>0` 且
+`supported_count=0` = Windows 里有配对设备，但名称不在支持列表**（现场常见于系统名异常/
+未初始化）；失败时 `error_domain` + `error_code` 给分类，不写 Windows 错误原文。
+
 失败判定：正常路径判定失败或看不到文字；键盘打字仍判通过（含失败后用键盘打字）；焦点类失败文案缺失；快速点按导致卡死、重复 attempt、或出现两个终态；日志缺 attempt 配对或含文字内容。
 
 ## 用例四：步骤⑦⑧（普通按键体验 / 完成）

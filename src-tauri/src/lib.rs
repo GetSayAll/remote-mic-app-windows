@@ -1351,15 +1351,49 @@ fn set_app_icon(
     Ok(applied)
 }
 
+/// 扫描失败只记稳定错误分类，不写 Windows 错误原文（可能含设备/系统细节）。
+fn scan_error_code(error: &sayall_windows::PlatformError) -> &'static str {
+    match error {
+        sayall_windows::PlatformError::UnsupportedPlatform => "unsupported_platform",
+        sayall_windows::PlatformError::WindowsApi(_) => "windows_api",
+        sayall_windows::PlatformError::WorkerUnavailable => "worker_unavailable",
+        sayall_windows::PlatformError::OperationTimedOut => "operation_timed_out",
+        _ => "platform",
+    }
+}
+
 #[tauri::command]
 async fn scan_paired_remotes(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<PairedRemote>, String> {
+    let started = std::time::Instant::now();
+    sayall_windows::gatt_note("ble_scan phase=requested".to_owned());
     let platform = Arc::clone(&state.platform);
-    tauri::async_runtime::spawn_blocking(move || platform.scan_paired_remotes())
-        .await
-        .map_err(|error| format!("扫描任务失败：{error}"))?
-        .map_err(|error| error.to_string())
+    match tauri::async_runtime::spawn_blocking(move || platform.scan_paired_remotes()).await {
+        Ok(Ok(remotes)) => {
+            sayall_windows::gatt_note(format!(
+                "ble_scan phase=completed terminal_result=passed found_count={} elapsed_ms={}",
+                remotes.len(),
+                started.elapsed().as_millis()
+            ));
+            Ok(remotes)
+        }
+        Ok(Err(error)) => {
+            sayall_windows::gatt_note(format!(
+                "ble_scan phase=completed terminal_result=failed error_domain=platform error_code={} retryable=true elapsed_ms={}",
+                scan_error_code(&error),
+                started.elapsed().as_millis()
+            ));
+            Err(error.to_string())
+        }
+        Err(error) => {
+            sayall_windows::gatt_note(format!(
+                "ble_scan phase=completed terminal_result=failed error_domain=task error_code=join_failed retryable=true elapsed_ms={}",
+                started.elapsed().as_millis()
+            ));
+            Err(format!("扫描任务失败：{error}"))
+        }
+    }
 }
 
 #[tauri::command]
@@ -6907,6 +6941,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 扫描失败日志只落稳定分类 token，方便现场按 `error_code` 归因。
+    #[test]
+    fn scan_error_codes_are_stable_tokens() {
+        assert_eq!(
+            scan_error_code(&sayall_windows::PlatformError::UnsupportedPlatform),
+            "unsupported_platform"
+        );
+        assert_eq!(
+            scan_error_code(&sayall_windows::PlatformError::WindowsApi("x".into())),
+            "windows_api"
+        );
+        assert_eq!(
+            scan_error_code(&sayall_windows::PlatformError::OperationTimedOut),
+            "operation_timed_out"
+        );
+        assert_eq!(
+            scan_error_code(&sayall_windows::PlatformError::Gatt("x".into())),
+            "platform"
+        );
+    }
 
     /// Issue #367 的回归锁：启动恢复/旧配置推断走 `Restore` 时，绝不能调用
     /// `set_voice_input_tool`（后者会布防 `tool_select`，失焦后用

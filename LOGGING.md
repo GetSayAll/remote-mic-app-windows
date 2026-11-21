@@ -90,6 +90,20 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 
 失败应带 `error_domain`、`error_code`、`reason` 和 `retryable=true|false`。状态未变化时不得重复刷相同日志；高频 HID、音频包和轮询只记录首尾、聚合计数、字节/帧数、丢弃数量和耗时。
 
+### 向导连接 / 按键卡点快照（2026-11-21）
+
+首次设置向导的连接步骤不能用"看不到设备"或"按键没反应"作为唯一证据。该步骤在进入、
+连接阶段跳变、Raw Input 阶段跳变、匹配接口数/重连次数/错误位/型号变化时落
+`frontend event=onboarding phase=remote_observed reason=remote_state step=remote detail=<token>`，
+30 秒心跳与离开步骤时的 `reason=remote_state_exit` 再带 Raw Input 报文/语义边沿/丢弃计数。token 由
+`src/onboarding/remote-state.ts` 生成，只含阶段代码与计数（≤64 字节），不含设备名、
+地址、HID 路径或错误原文。Rust 侧扫描另落 `ble_scan phase=requested|completed`（成功给 `found_count`，另落
+`ble_scan filter total_paired_count/supported_count`，用于区分"没有配对设备"与
+"有配对设备但名称不在支持列表"），失败只给 `error_domain` + `error_code`；
+连接与 Raw Input 的详细 stage 仍由既有
+`ble_connect*` / `raw_input*` 行提供。现场只取一份 `sayall-diagnostic.log`，即可区分
+「没连上」「连上但无 HID 按键通道」「通道在位但按键没有到达」。
+
 ## 隐私红线
 
 不得记录语音或转写正文、用户输入、剪贴板、用户名/邮箱/手机号、完整路径、窗口标题、蓝牙 MAC/UUID/序列号、HID 路径、IP、Token/API Key/密码/私钥/证书、第三方 App 私有状态或原始音频字节。不要用敏感值的稳定哈希替代脱敏。允许记录稳定产品分类、布尔结果、错误 domain/code、采样率、帧数、耗时和脱敏计数。

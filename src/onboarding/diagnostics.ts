@@ -14,6 +14,11 @@
  * - `step_entered` / `step_blocked` / `step_recovered` / 各步骤的领域事件
  *   （remote_observed/audio_route/tool_selected/authorization/voice_attempt…）
  *   共同构成"最后一条日志 = 当时所处环节"的证据链。
+ * - 遥控器 / 普通按键步骤每次进入、连接阶段跳变、Raw Input 阶段跳变、
+ *   匹配接口数/重连次数/错误位变化都落 `remote_observed reason=remote_state`；
+ *   `detail` 是 `remote-state.ts` 生成的脱敏快照（阶段 + 计数，≤64 字符），
+ *   30 秒心跳额外带 raw 报文/语义边沿/丢弃报文计数。现场只需一份日志即可区分
+ *   「没连上」「连上但无按键通道」「通道在位但按键没到达」。
  *
  * 脱敏红线（LOGGING.md 隐私红线）：detail/step/code 只允许稳定 token 与计数，
  * 不含设备 id/名称、音频端点 id/名称、文件路径、错误原文或任何用户输入内容。

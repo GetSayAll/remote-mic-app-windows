@@ -591,8 +591,12 @@ describe("Onboarding wizard shell", () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
     const wrapper = await mountWizard(runtimeWith());
 
-    // 未连接：阻断，且给用户可读原因。
-    expect(onboardingEvents("step_blocked").some((p) => p.code === "remote.not_connected")).toBe(true);
+    // 未连接：阻断，且给用户可读原因 + 脱敏连接快照。
+    const notConnected = onboardingEvents("step_blocked").find(
+      (p) => p.code === "remote.not_connected",
+    );
+    expect(notConnected).toBeTruthy();
+    expect(String(notConnected!.detail)).toContain("p_i");
     expect(wrapper.text()).toContain("先连接遥控器");
 
     // 已连接但还没按键：换成 button_not_ready，日志只记一次（状态未变化不重复刷）。
@@ -602,6 +606,8 @@ describe("Onboarding wizard shell", () => {
       (p) => p.code === "remote.button_not_ready",
     );
     expect(readyBlocked).toHaveLength(1);
+    expect(String(readyBlocked[0].detail)).toContain("p_r");
+    expect(String(readyBlocked[0].detail)).toContain("raw_r");
     expect(wrapper.text()).toContain("按一下遥控器上的普通按键");
 
     // 收到生产链路普通按键：门禁通过，恢复事件落日志。
@@ -2326,6 +2332,41 @@ describe("Onboarding per-step diagnostics", () => {
     wrapper.unmount();
   });
 
+  it("连接/按键阶段变化落 remote_state 快照，能区分没连上/无通道/未按键", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    const states = () =>
+      onboardingEvents("remote_observed").filter((p) => p.reason === "remote_state");
+    expect(
+      states().some(
+        (p) =>
+          String(p.detail).includes("p_i") &&
+          String(p.detail).includes("raw_s") &&
+          String(p.detail).includes("obs_0"),
+      ),
+    ).toBe(true);
+
+    await wrapper.setProps({
+      runtime: runtimeWith({
+        connectionPhase: "ready",
+        rawInputPhase: "awaiting",
+        remoteModel: "rc003",
+      }),
+    });
+    await flushPromises();
+
+    const last = states().at(-1)!;
+    expect(String(last.detail)).toContain("p_r");
+    expect(String(last.detail)).toContain("raw_a");
+    expect(String(last.detail)).toContain("m_0");
+    expect(String(last.detail)).toContain("md_rc003");
+    // 快照只允许稳定 token：不含设备名/地址/HID 路径。
+    expect(String(last.detail)).not.toContain("小米");
+    expect(String(last.detail)).not.toContain("bth");
+    wrapper.unmount();
+  });
+
   it("emits a periodic heartbeat carrying the current step for stuck localization", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
     try {
@@ -2335,6 +2376,9 @@ describe("Onboarding per-step diagnostics", () => {
       const beats = onboardingEvents("heartbeat");
       expect(beats.length).toBeGreaterThanOrEqual(1);
       expect(beats[0].step).toBe("remote");
+      expect(String(beats[0].detail)).toContain("p_i");
+      expect(String(beats[0].detail)).toContain("raw_s");
+      expect(String(beats[0].detail)).toContain("obs_0");
       wrapper.unmount();
     } finally {
       vi.useRealTimers();

@@ -1752,7 +1752,8 @@ fn scan_paired_remotes() -> Result<Vec<PairedRemote>, PlatformError> {
     let devices = futures::executor::block_on(operation.into_future()).map_err(windows_error)?;
 
     let mut remotes = Vec::new();
-    for index in 0..devices.Size().map_err(windows_error)? {
+    let total_paired_count = devices.Size().map_err(windows_error)?;
+    for index in 0..total_paired_count {
         let device = devices.GetAt(index).map_err(windows_error)?;
         let name = device.Name().map_err(windows_error)?.to_string();
         if !is_supported_remote_name(&name) {
@@ -1767,6 +1768,12 @@ fn scan_paired_remotes() -> Result<Vec<PairedRemote>, PlatformError> {
             is_supported_candidate: true,
         });
     }
+    // 只记数量：total > 0 且 supported = 0 = Windows 有配对设备但名称不在支持列表
+    // （现场常见于系统名异常/未初始化）；不记录任何设备名或地址。
+    crate::ble::gatt_note(format!(
+        "ble_scan filter total_paired_count={total_paired_count} supported_count={}",
+        remotes.len()
+    ));
     Ok(remotes)
 }
 
