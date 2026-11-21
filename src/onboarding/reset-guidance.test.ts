@@ -1,6 +1,6 @@
 /**
- * 「重置遥控器」引导的判据（2026-11-21 用户要求）：只有确认按键不会到达时才提示，
- * 已收到按键后绝不能提示——重置会打断一条已经工作的链路。
+ * 「重置遥控器」引导的判据（2026-11-21 用户澄清）：只有已连接但收不到按键时才提示；
+ * 仅看到 `MI RC` 这个名字不算卡住，不能因此打扰用户。
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -24,7 +24,6 @@ describe("shouldShowResetGuidance", () => {
   const base = {
     connected: false,
     buttonObserved: false,
-    genericRemoteName: false,
     connectedWithoutButtonMs: 0,
     rawInputPhase: "stopped" as const,
   };
@@ -35,14 +34,9 @@ describe("shouldShowResetGuidance", () => {
         ...base,
         connected: true,
         buttonObserved: true,
-        genericRemoteName: true,
         rawInputPhase: "awaiting",
       }),
     ).toBe(false);
-  });
-
-  it("shows immediately for the generic MI RC name, even before connecting", () => {
-    expect(shouldShowResetGuidance({ ...base, genericRemoteName: true })).toBe(true);
   });
 
   it("waits the full delay after connecting before prompting a reset", () => {

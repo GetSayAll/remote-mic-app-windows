@@ -64,6 +64,8 @@ export default {
     "Select Connect on the row for the remote in your hand.",
   "正在自动恢复连接（第 {attempt} 次尝试），不需要重新配对；超过约 60 秒仍未恢复时，下方会给出排查步骤。":
     "Reconnecting automatically (attempt {attempt}). You do not need to pair again. If it is still not connected after about 60 seconds, troubleshooting steps will appear below.",
+  "正在自动恢复连接（第 {attempt} 次尝试）。":
+    "Reconnecting automatically (attempt {attempt}).",
   "遥控器还没有真正连上": "The remote is not actually connected yet",
   "Windows 里可能只有配对记录，蓝牙链路还没有建立；应用会继续自动重试。请按顺序检查：":
     "Windows may only have a pairing record for the remote; the Bluetooth link is not established yet. SayAll will keep retrying. Check these in order:",
@@ -71,10 +73,15 @@ export default {
     "Press a regular button on the remote, such as Home, and see whether “Waiting for a control button” above changes to “Remote button received.”",
   "如果这支遥控器还连着手机或电视，先关掉那些设备的蓝牙；同一支遥控器通常只能同时连接一台设备。":
     "If this remote is still connected to a phone or TV, turn off Bluetooth on those devices first. A remote can usually connect to only one device at a time.",
-  "仍无反应：在 Windows 蓝牙设置里删除这支遥控器，再按「TV」键约 3 秒重新配对；回来后点「重新扫描」。":
-    "If nothing happens, remove this remote in Windows Bluetooth settings, hold the TV button for about 3 seconds to pair it again, then come back and select Scan Again.",
+  "Windows 报告的遥控器名称是 MI RC，这通常表示它还没有完成初始化，或仍停在上一次的配对状态。":
+    "Windows reports this remote as MI RC, which usually means it has not finished initializing or is still in its previous pairing state.",
+  "仍无反应：同时长按「主页」+「菜单」重置遥控器，在 Windows 蓝牙设置里删除这支遥控器，再按「TV」键约 3 秒重新配对；回来后点「重新扫描」。":
+    "If nothing happens, press and hold Home + Menu together to reset the remote, remove it in Windows Bluetooth settings, then hold the TV button for about 3 seconds to pair it again. Come back and select Scan Again.",
   "遥控器名称是 MI RC": "The remote is named MI RC",
   "遥控器已连接，但没有收到按键": "The remote is connected, but no button was received",
+  "遥控器一直没有连上": "The remote still won't connect",
+  "应用已经自动重试超过约 60 秒，仍没有建立连接。请重置遥控器后重新配对；如果这支遥控器还连着电视或手机，先断开那边的连接。":
+    "SayAll has kept retrying for more than about 60 seconds, but the connection still is not established. Reset the remote and pair it again. If the remote is still connected to a TV or phone, disconnect it there first.",
   "这通常表示遥控器还没有完成初始化，或仍停在上一次的配对状态。请重置遥控器，再从 Windows 重新配对并连接。":
     "This usually means the remote has not finished initializing or is still in its previous pairing state. Reset the remote, then pair and connect it again in Windows.",
   "按键可能没有到达 Windows。请重置遥控器后重新配对；如果这支遥控器还连着电视或手机，先断开那边的连接。":

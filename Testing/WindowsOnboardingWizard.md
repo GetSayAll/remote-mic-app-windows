@@ -128,12 +128,16 @@
    「没有识别到遥控器的按键通道」，并引导同时长按「主页」+「菜单」重置遥控器、删除设备后
    按「TV」键重新配对、仍不行就完整重启；不得只写「按键监听正在启动，请稍等一下。」。
    恢复后 `Raw input` 应变为 `ready matched=1`，再按普通按键即放行。
-   **已连接但没有按键 / 通用名 MI RC（2026-11-21 用户要求）**：连接显示「已连接」后
+   **已连接但没有按键（2026-11-21 用户要求；同日澄清）**：连接显示「已连接」后
    20 秒仍无普通按键（或 `Raw input` 为 `awaiting`），③步显示「遥控器已连接，但没有收到按键」；
-   运行时名称或扫描列表出现 `MI RC` 时立即显示「遥控器名称是 MI RC」。卡内顺序：
-   同时长按「主页」+「菜单」重置 → 在 Windows 删除这支遥控器 → 按「TV」约 3 秒重新配对 →
-   回来「重新扫描」并点「连接」。按键一收到，该卡立即消失；与「没有识别到遥控器的按键通道」
-   修复卡同时成立时只显示后者（后者已包含重置步骤）。
+   若当前设备名称是 `MI RC`，标题改为「遥控器名称是 MI RC」，但**名称本身不触发提示**——
+   正常工作的遥控器也可能被 Windows 报成这个名字。卡内顺序：同时长按「主页」+「菜单」
+   重置 → 在 Windows 删除这支遥控器 → 按「TV」约 3 秒重新配对 → 回来「重新扫描」并点
+   「连接」。按键一收到，该卡立即消失；与「没有识别到遥控器的按键通道」修复卡同时成立时
+   只显示后者（后者已包含重置步骤）。**一直连不上**：重连满 60 秒/5 次后，`raw_input`
+   为 `awaiting` 时由「遥控器还没有真正连上」卡接管（卡内步骤包含「主页 + 菜单」重置）；
+   其余重连机型显示「遥控器一直没有连上」重置卡。两种情况下「正在自动恢复连接」只保留
+   尝试次数，不再写「不需要重新配对」；`MI RC` 只在卡内作解释，不单独触发。
 6. 两态文案（2026-10-10 新增，现场反馈）：**按键已收到但应用还没连接**时，没扫到设备写
    「按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。」，列表已列出时写
    「按键已收到。还差一步：点遥控器一行右侧的“连接”。」；两种都不得写「这一项可以继续了」。
@@ -242,7 +246,7 @@
     2026-10-10 起）、`open_bluetooth_settings`、`mapping_suspend` / `mapping_resume`
     （检测期间暂挂自定义按键）；**停在③步且没有 `scan_requested` = 自动连接未触发**
     （输入通道不在位 / 应用已连接 / 用户已手动断开）；重置提示出现时另有一条
-    `phase=remote_observed reason=reset_guidance_shown detail=generic_name|no_button`；
+    `phase=remote_observed reason=reset_guidance_shown detail=generic_name|no_button|not_connected`；
   - ④ 语音设备：`refresh_endpoints`（`detail=auto|manual_total_N_rec_M`）、`select_endpoint`
     （`detail=auto|manual|fallback`）、`open_download_page`；另有 `phase=audio_route`
     （`reason=missing|not_selected|selected|ready`，状态去重）；

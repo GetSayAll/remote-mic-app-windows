@@ -131,7 +131,7 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
     wrapper.unmount();
   });
 
-  it("Windows 报出通用名 MI RC 时立即提示重置", () => {
+  it("只有 MI RC 名称、还没有卡住时不提示重置", () => {
     vi.useFakeTimers();
     const wrapper = mount(RemoteStep, {
       props: {
@@ -143,8 +143,92 @@ describe("RemoteStep 重置遥控器指引（2026-11-21）", () => {
       },
     });
 
+    expect(wrapper.text()).not.toContain("遥控器名称是 MI RC");
+    expect(wrapper.text()).not.toContain("遥控器已连接，但没有收到按键");
+    wrapper.unmount();
+  });
+
+  it("已连接且名称为 MI RC、20 秒无按键时才提示重置", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: {
+        ...baseProps,
+        devices: [
+          { id: "dev-1", name: "MI RC", model: "unknown", isSupportedCandidate: true },
+        ],
+        runtime: runtime("ready", 0, "ready", "MI RC"),
+      },
+    });
+
+    expect(wrapper.text()).not.toContain("遥控器名称是 MI RC");
+    vi.advanceTimersByTime(20_000);
+    await nextTick();
     expect(wrapper.text()).toContain("遥控器名称是 MI RC");
-    expect(wrapper.text()).toContain("重新配对");
+    expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    wrapper.unmount();
+  });
+
+  it("列表里另有一支 MI RC 旧设备时，不把它当成当前已连接的那支", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: {
+        ...baseProps,
+        connectedDeviceId: "dev-2",
+        devices: [
+          { id: "dev-1", name: "MI RC", model: "unknown", isSupportedCandidate: true },
+          {
+            id: "dev-2",
+            name: "小米蓝牙语音遥控器 2 Pro",
+            model: "rc003",
+            isSupportedCandidate: true,
+          },
+        ],
+        runtime: runtime("ready", 0, "ready"),
+      },
+    });
+
+    vi.advanceTimersByTime(20_000);
+    await nextTick();
+    expect(wrapper.text()).toContain("遥控器已连接，但没有收到按键");
+    expect(wrapper.text()).not.toContain("遥控器名称是 MI RC");
+    wrapper.unmount();
+  });
+
+  it("一直连不上时，重连排查卡给出重置步骤且不再写“不需要重新配对”", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: {
+        ...baseProps,
+        devices: [
+          { id: "dev-1", name: "MI RC", model: "unknown", isSupportedCandidate: true },
+        ],
+        runtime: runtime("reconnecting", 1, "awaiting", "MI RC"),
+      },
+    });
+
+    expect(wrapper.text()).toContain("不需要重新配对");
+    vi.advanceTimersByTime(60_000);
+    await nextTick();
+    expect(wrapper.text()).toContain("遥控器还没有真正连上");
+    expect(wrapper.text()).toContain("Windows 报告的遥控器名称是 MI RC");
+    expect(wrapper.text()).toContain("同时长按「主页」+「菜单」重置遥控器");
+    expect(wrapper.text()).not.toContain("不需要重新配对");
+    wrapper.unmount();
+  });
+
+  it("一直连不上且 Raw Input 在位时，60 秒后显示“没有连上”重置卡", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(RemoteStep, {
+      props: { ...baseProps, runtime: runtime("reconnecting", 1, "ready") },
+    });
+
+    expect(wrapper.text()).toContain("不需要重新配对");
+    vi.advanceTimersByTime(60_000);
+    await nextTick();
+    expect(wrapper.text()).toContain("遥控器一直没有连上");
+    expect(wrapper.text()).toContain("应用已经自动重试超过约 60 秒");
+    expect(wrapper.text()).toContain("同时长按「主页」+「菜单」");
+    expect(wrapper.text()).not.toContain("不需要重新配对");
     wrapper.unmount();
   });
 

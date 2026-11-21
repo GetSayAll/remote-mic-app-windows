@@ -1,9 +1,13 @@
 /**
  * 遥控器「重置并重新配对」引导（2026-11-21 用户要求）。
  *
- * 两个现场条件都说明遥控器侧状态需要清掉，而不是继续等连接：
+ * 只在用户**真的卡住**时出现，而不是看到某个名字就打扰：
  * - 应用已经显示「已连接」，但向导一直收不到普通按键；
- * - Windows 报出的设备名是通用名 `MI RC`（没有完成初始化 / 仍停在旧的配对状态）。
+ * - Raw Input 明确处于 `awaiting`（按键通道不在位）。
+ *
+ * 通用名 `MI RC` 只用于解释原因和选择文案，**不是触发条件**——仓库本就把它
+ * 列为合法支持名，正常工作的遥控器也可能被 Windows 这样上报。无法连接的情况
+ * 由第③步的重连排查卡负责（并在卡内补上重置步骤）。
  *
  * 判据只决定**是否显示引导卡**，不改变连接与重试逻辑；动作仍是用户可见的
  * 「主页 + 菜单重置 → 删除旧配对 → TV 重新配对」。
@@ -29,8 +33,6 @@ export interface ResetGuidanceInput {
   connected: boolean;
   /** 本向导会话里是否已收到过普通按键。 */
   buttonObserved: boolean;
-  /** 当前连接的设备或扫描列表里出现了通用名 `MI RC`。 */
-  genericRemoteName: boolean;
   /** 连接就绪后已等待的毫秒数（由组件计时）。 */
   connectedWithoutButtonMs: number;
   /** Raw Input 阶段：`awaiting` 时按键通道不在位，也属于「等不到按键」。 */
@@ -38,16 +40,15 @@ export interface ResetGuidanceInput {
 }
 
 /**
- * 显示条件：
+ * 显示条件（必须同时满足「没收到按键」和「确实卡在按键链路上」）：
  * - 已收到按键 → 永不显示（链路已经通了，重置只会打断用户）；
- * - 通用名 `MI RC` → 立即显示（名字本身就说明遥控器需要重新初始化）；
- * - 已连接且 20 秒没有按键 / 按键通道缺席 → 显示；
- * - 未连接时不显示（那是连接问题，由重连排查卡负责）。
+ * - 未连接 → 不显示（那是连接问题，由重连排查卡负责，并在其中给重置步骤）；
+ * - 已连接但 20 秒没有按键 / 按键通道缺席 → 显示。
+ *
+ * `MI RC` 不参与这里的判定：名称只影响卡片文案，不影响是否打扰用户。
  */
 export function shouldShowResetGuidance(input: ResetGuidanceInput): boolean {
-  if (input.buttonObserved) return false;
-  if (input.genericRemoteName) return true;
-  if (!input.connected) return false;
+  if (input.buttonObserved || !input.connected) return false;
   if (input.rawInputPhase === "awaiting") return true;
   return input.connectedWithoutButtonMs >= RESET_GUIDANCE_DELAY_MS;
 }
