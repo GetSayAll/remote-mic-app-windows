@@ -4,8 +4,9 @@
  * 规范来源：Mac 仓 origin/main `feature/first-run-onboarding/PRODUCT_SPEC.md`
  * 与 Windows 设计稿 `artifacts/design/2026-10-04-onboarding-design.html`：
  * - 步骤顺序按 D1 确认的 Mac 可见顺序（欢迎 → 遥控器 → 语音设备 → 输入工具
- *   → 按住说话验证 → 普通按键体验 → 完成）；2026-11-05 在遥控器之后加入
- *   「全按键支持」说明页（可选增强，不阻断继续；放在语音设备之后、输入工具之前）；
+ *   → 按住说话验证 → 普通按键体验 → 完成）；2026-11-05 在语音设备之后加入
+ *   「全按键支持」说明页（可选增强，不阻断继续；2026-11-21 评估过前置到连接之前，
+ *   最终保持原位——连接页改用“请按返回 / 音量±以外的键”的提示）；
  * - 每一步「能否继续」都由实时能力状态决定（页面访问与点击不是通过条件）；
  * - 阻断一律返回稳定失败码（小写 token），供页面显示与结构化日志使用。
  */
@@ -95,6 +96,20 @@ export function nextStep(step: OnboardingStep): OnboardingStep | null {
 
 export function phaseOf(step: OnboardingStep): OnboardingPhase {
   return PHASES[step];
+}
+
+/**
+ * 阶段进度条的位置（设计稿 2026-10-05：只画位置感，不写步数与百分比）。
+ *
+ * 由导航顺序推导，禁止再维护一份手写映射：2026-11-21 调整步骤顺序时，旧的
+ * `PROGRESS_PERCENT` 没有跟着变，进度条出现过倒退；现在顺序是唯一事实来源。
+ */
+export function stepProgressPercent(step: OnboardingStep): number {
+  const index = stepIndex(step);
+  if (index < 0) return 0;
+  if (ONBOARDING_STEPS.length <= 1) return 100;
+  // 保持设计稿的 4%（第①步）→ 100%（完成）跨度，只按顺序插值。
+  return Math.round(4 + (index / (ONBOARDING_STEPS.length - 1)) * 96);
 }
 
 /** 门禁上下文：由页面从运行快照/设备探测组装，本模块不发起任何调用。 */

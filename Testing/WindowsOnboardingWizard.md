@@ -21,7 +21,7 @@
 - 布局自上而下：标题固定在内容列左上角**同一位置**（没有上一步的步骤保留同高占位），
   切换步骤/内容变化时页面不抖动；内容过长时在内容列内滚动。
 - 内容列左上角是「‹ 返回」（chevron 图标 + 文字，与正文左对齐）；**没有整幅页脚横幅**。
-- 底部动作行在内容列内部：左下「复制诊断信息」（无下划线，含复制反馈），右下主按钮
+- 底部动作行在内容列内部：左下「打开日志目录」（无下划线，含打开反馈），右下主按钮
   （`继续` / `开始使用`，门禁提示语在按钮上方、右对齐）；右侧栏通到窗口底部。
 - 字号：标题 27px、正文 14–15.5px、卡片标题 16px。第①步含「首次使用：遥控器怎么连电脑」
   卡片（1–5 条：准备 / 打开蓝牙设置与添加设备 / 长按 TV 配对 / 主页+菜单 重置 / 选中设备；
@@ -29,49 +29,23 @@
 - 第⑥步通过提示为绿色成功卡 + 对勾；最后一步右栏显示应用 logo + 对勾徽标。
 - 右栏 = 插图 + 检查卡（按步骤换标题：连接检查 / 音频检查 / 全按键支持 / 工具检查 / 实时检查 / 按键检查）；
   窗口过矮（高度 ≤ 660）或过窄（宽度 ≤ 1024）时检查卡折到内容下方。
-- 按键检测步骤（②遥控器 / ⑦普通按键）期间会**暂挂用户已配置的自定义按键**：只收集
+- 按键检测步骤（③遥控器 / ⑦普通按键）期间会**暂挂用户已配置的自定义按键**：只收集
   边沿，不触发任何映射动作；离开这两步立即恢复（日志 `mapping_suspend` / `mapping_resume`）。
 
-## 诊断信息（2026-10-05 新增）
+## 日志目录（2026-11-21 取代 2026-10-05 的「复制诊断信息」）
 
-1. 任意步骤点左下「复制诊断信息」→ 应显示「已复制，可直接粘贴发给开发者」；粘贴到记事本检查内容。
-   2026-10-13 现场：复制成功后**只留下方那条绿色提示**——按钮文字不再变成「已复制到剪贴板」。
-2. 文本为**英文**（`SayAll diagnostics` 开头），必须包含：App version、Build（40 位源码修订）、
-   Build channel、**Windows version（major.minor.build）**、Architecture、**`Boot`**
-   （`type=` 引导类型 `full` / `hiberboot` / `hibernate_resume` / `unknown`、
-   `fast_startup=yes|no|unknown`；2026-10-20 快速启动断连取证——两项必须并列，
-   开关开着但这次点的是「重启」时 `type` 仍是 `full`；读不到写 `unknown`，不写 `no`）、
-   `Wizard step: <token> (n/8)`、
-   Gate、Blocked，以及运行行：`Remote`（含 `error=` 与 **`button_observed=`**——②步是否已收到
-   普通按键）、**`Raw input`**（phase / matched / raw_events / semantic_edges / stale_events）、
-   `Audio`（含 `error=`）、`Input tool`（含 **`capture=`**——「全按键支持」的**真实捕获状态**
-   off / starting / active / inactive / unknown；与 `full_key_support=`（开关设置）并列——
-   只有 `active` 才算生效，`inactive`（过宽限无所有权）与可能长期停留的 `starting`（助手/桥
-   未就绪）都是没生效，2026-10-14；浏览器预览与未启用该机制的环境显示 `capture=off`，属正常）、
-   `Vokie`、
-   **`Voice test`**（attempt 阶段与终态码，
-   无终态写 `none`）、`Buttons observed`、`Mapping`。
-   现场形状自证（2026-10-10）：②步"按键已收到但应用未连接"应表现为
-   `Remote: phase=idle … button_observed=yes` + 门禁 `remote.not_connected`。
-   复制时会对音频端点、**输入工具与按住说话快捷键**做一次只读刷新（2026-10-13 起）——
-   已配置豆包的机器在任何步骤复制都应显示 `Input tool: doubao hotkey=…`，不是 `unset`；
-   新装机器上快捷键按生效值显示（默认 左 Ctrl + 左 Win）。
-   同口径（2026-10-14 起）：**「全按键支持」的开关状态与真实捕获状态（`capture=`）也做只读刷新**
-   ——①–④步复制不再把开着开关的机器报成 `full_key_support=off`；捕获状态读不到、或出现未知
-   token 时写 `capture=unknown`（读取失败各留一条 `read_capture_switch` / `read_capture_state`
-   失败日志）。**本条待真机复核**（复制真实块对照 `capture=active|inactive|starting`）。
-   同日起多一段 **`IME:`**（当前输入法是不是所选工具 / 系统里可用输入法数量 / 工具 token）——
-   ④诊断"语音没出字是不是因为没切输入法"时先看这一行：
-   `IME: detected=yes match=no installed_count=3 expected_tool=doubao`（`detected=no` = 读不到，
-   界面不据此报警；复制块**保持全英文**，输入法显示名不进块，需要名字时看应用日志的
-   `ime_status action=…` 行）。
-3. 隐私检查：不得出现蓝牙地址、HID 路径、音频端点 id / 名称、文件路径、用户名或任何输入文字。
-4. 日志核对：`frontend event=onboarding phase=action reason=copy_diagnostics` 成对出现
-   （begin `result=unknown` → end `result=passed detail=chars_N`）；剪贴板不可用时 end `result=failed`。
+1. 任意步骤点左下「打开日志目录」→ 资源管理器应真实打开 `sayall-diagnostic.log` 所在目录；
+   页面显示「已打开日志目录；把其中的日志文件发给开发者。」。按钮文字不改变。
+2. 打开失败（权限/资源管理器不可用）→ 页面显示「无法打开日志目录，请稍后重试。」，不得静默。
+3. 日志核对：`frontend event=onboarding phase=action reason=open_log_directory` 成对出现
+   （begin `result=unknown` → end `result=passed` 带 `elapsed_ms`；失败 end `result=failed`）。
+4. 用户报「卡在连接」时，直接取该目录下最新 `sayall-diagnostic.log`，按
+   `frontend event=onboarding` 的最后一条 action / heartbeat 判定卡点；不再要求用户复制诊断块。
 5. 启动日志核对：`app_lifecycle event=process_start ... windows_version=<major.minor.build> windows_build=<build>`
    —— 不再是 `unknown`。
 
-失败判定：复制提示缺失；文本缺 Windows 版本 / Build；出现设备身份或路径；日志缺 copy_diagnostics 对。
+失败判定：点击后目录未打开；成功/失败无提示；日志缺 `open_log_directory` 对；
+或仍出现旧的「复制诊断信息」入口。
 
 ## 用例一：进入向导与中断继续
 
@@ -95,18 +69,19 @@
 
 ## 用例二：步骤①–④（欢迎 / 遥控器 / 语音设备 / 全按键支持）
 
-1. 第①步应给出完整首次配对流程（2026-10-13 第五轮现场定稿文案）：
+1. 第①步应给出完整首次配对流程（2026-10-13 第五轮现场定稿；2026-11-21 修订第 5 条与结尾句）：
    ① 准备好：小米蓝牙语音遥控器 2 或 2 Pro（目前只支持这两种型号），并确保它有电 →
    ② 在电脑上打开蓝牙设置（可直接点击下方按钮），打开电脑的蓝牙开关后点击「添加设备」然后选择
    「蓝牙」选项（2026-10-13 现场改文案：按钮名加中文引号）
    （**第 2 条下方有一个「打开蓝牙设置」按钮行**，点击只唤起系统「蓝牙和其他设备」页，
    不写任何"已打开…"提示；按钮行与上下两条留出间距）→ ③ 长按「TV」键约 3 秒，直到指示灯
    （小米蓝牙语音遥控器 2 Pro 底部）开始闪烁 → ④ 同时长按「主页」+「菜单」直到指示灯快速闪烁
-   （重置蓝牙并重新进入配对模式）→ ⑤ 选中「小米蓝牙语音遥控器」，等待配对完成，列表里找不到
-   设备时，打开高级设置或者点开「显示所有设备」；结尾一句「配对失败，或遥控器以前配过别的设备：回到第 4 步
-   重置蓝牙后重新配对」。
+   （重置蓝牙并重新进入配对模式）→ ⑤ 选中「小米蓝牙语音遥控器」，等待配对完成，找不到时可以
+   点开「显示所有设备」。部分电脑在蓝牙列表里找不到遥控器时，可以打开高级设置：「设置 → 蓝牙和
+   其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级」；结尾一句「若配对失败，或遥控器以前配过
+   别的设备：回到第 4 步重置蓝牙后重新配对」。
    **布局硬约束**：1100×688（应用最小窗口的 WebView 实测尺寸）下第①步不得超屏——「继续」与
-   「复制诊断信息」必须直接可见，不允许为了塞内容把按钮挤出屏幕（2026-10-13 实测：五项 + 结尾句
+   「打开日志目录」必须直接可见，不允许为了塞内容把按钮挤出屏幕（2026-10-13 实测：五项 + 结尾句
    会超屏 97px、「继续」按钮出屏；合并准备项后内容 486px、按钮可见，测量脚本记录见该轮会话）。
 2. 第①步点「打开蓝牙设置」（步骤 2 下方那个）：系统「蓝牙和其他设备」页应真实弹出，页面
    **不出现**「已打开系统蓝牙设置…」一类提示。第②步的失败修复卡（蓝牙不可用 / 还没配对时
@@ -121,6 +96,11 @@
    内容留出间距；扫描进行中只给状态行标题「正在寻找小米遥控器…」，**不再写**「保持遥控器在旁边，
    已配对的设备会出现在下方」。「打开蓝牙设置」入口已移到第①步（见第 2 项）。
    扫描结果为空时，在按钮下方给出「当前没有已配对设备，请先按照上一步完成设备配对。」。
+   **Windows「高级」提示（2026-11-21 用户要求）**：只有**找不到任何已配对遥控器**、且不在扫描时，
+   扫描按钮下方才显示「找不到遥控器？部分电脑需要打开「高级」」+「如果在蓝牙列表里找不到遥控器，
+   可以打开高级设置：设置 → 蓝牙和其他设备 → 设备 → 向下滚动 → 蓝牙设备发现 → 高级」+「打开后
+   回到这里点「扫描已配对设备」；添加设备时选择「显示所有设备」」。找到已配对设备后整张提示卡
+   **收起**；卡片与下方设备行/状态行之间保留 16px 间距。
    设备行右侧的「连接」做成按钮观感（药丸形），点击后依次显示「正在连接…」→ 连接成功后变
    不可点的「已连接」状态（同一时刻只有一台显示已连接）；**连接后显示的名称用系统名称
    （能分清 2 / 2 Pro），不再依赖型号标签**（型号解析不出时那是占位文案）。
@@ -144,11 +124,27 @@
    应用只能释放自己的会话与按键归因目标。
 5. 扫描并连接遥控器；按一下普通按键：门禁从「按一下普通按键」变为可继续；按语音键不应误判为普通按键。
    此期间按已配置映射的键（如 OK → Enter）**不应触发**用户的自定义动作（检测步骤暂挂映射）。
-   **一直等不到按键（2026-11-06 现场）**：诊断块 `Raw input: phase=awaiting matched=0`
+   **连接测试用键（2026-11-21 用户要求）**：连接页只保留页脚这一条提示
+   「连接已就绪。按一下遥控器上的除返回 / 音量+ / 音量−以外的键（如主页、OK、方向键），
+   这三键要等后面开启全按键支持后才能使用，另外不要按语音键。」；按键行不要再重复一条
+   「连接测试请用返回…」段落。收到普通按键后门禁放行，页脚提示随之收起。不得让用户在这一步
+   用返回 / 音量± 判断连接是否成功。
+   **一直等不到按键（2026-11-06 现场）**：诊断日志的 `Raw input: phase=awaiting matched=0`
    表示监听器已在运行、系统没有这支遥控器的 HID 按键接口。此时②步必须显示修复卡
-   「没有识别到遥控器的按键通道」，并引导删除遥控器后按「TV」键重新配对、仍不行就完整重启；
-   不得只写「按键监听正在启动，请稍等一下。」。恢复后 `Raw input` 应变为
-   `ready matched=1`，再按普通按键即放行。
+   「没有识别到遥控器的按键通道」，并引导同时长按「主页」+「菜单」重置遥控器、删除设备后
+   按「TV」键重新配对、仍不行就完整重启；不得只写「按键监听正在启动，请稍等一下。」。
+   恢复后 `Raw input` 应变为 `ready matched=1`，再按普通按键即放行。
+   **已连接但没有按键（2026-11-21 用户要求；同日澄清）**：连接显示「已连接」后
+   20 秒仍无普通按键（或 `Raw input` 为 `awaiting`），②步显示「遥控器已连接，但没有收到按键」；
+   若当前设备名称是 `MI RC`，标题改为「遥控器连不上或者一直收不到按键」，但**名称本身不触发提示**——
+   正常工作的遥控器也可能被 Windows 报成这个名字。卡内顺序：在 Windows 蓝牙设置里删除这支
+   遥控器 → 同时长按「主页」+「菜单」直到指示灯快速闪烁，重置遥控器的蓝牙 → 配对完成后回到
+   这里点「重新扫描」，再点设备行右侧的「连接」。按键一收到，该卡立即消失；与「没有识别到
+   遥控器的按键通道」修复卡同时成立时只显示后者（后者已包含重置步骤）。**一直连不上**：
+   重连满 60 秒/5 次后，`raw_input`
+   为 `awaiting` 时由「遥控器还没有真正连上」卡接管（卡内步骤包含「主页 + 菜单」重置）；
+   其余重连机型显示「遥控器一直没有连上」重置卡。两种情况下「正在自动恢复连接」只保留
+   尝试次数，不再写「不需要重新配对」；`MI RC` 只在卡内作解释，不单独触发。
 6. 两态文案（2026-10-10 新增，现场反馈）：**按键已收到但应用还没连接**时，没扫到设备写
    「按键已收到。还差一步：点“扫描已配对设备”选中遥控器连接。」，列表已列出时写
    「按键已收到。还差一步：点遥控器一行右侧的“连接”。」；两种都不得写「这一项可以继续了」。
@@ -223,7 +219,7 @@
    3 秒」窗口才出现（冷启动首用时最容易遇到）时，**不再判死**——文字出现在输入框后，
    结果卡自动转为「成功：文字已经出现在输入框里」，「继续」可用；日志追加一条
    `phase=voice_attempt result=passed reason=late_transcript detail=after_<ms>`（毫秒 =
-   迟到延迟），诊断块显示 `terminal=late_transcript late=yes`。
+   迟到延迟），界面显示成功，日志终态码为 `late_transcript`、`late=yes`。
    阴性对照不变：失败后改用键盘打字 → 保持失败，日志 `reason=late_transcript_manual`。
    文字写进输入框但没有派发输入事件（少数输入法）也按现值判定，日志 `reason=transcript_value_readback`。
 9. **门控回归（切片 3 门控迁出后）**：遥控器已映射按键（如方向键 / OK）在映射启用时
@@ -251,12 +247,14 @@
     `connect_requested`（`detail=auto|manual`；auto = 候选唯一时的自动连接，
     2026-10-10 起）、`open_bluetooth_settings`、`mapping_suspend` / `mapping_resume`
     （检测期间暂挂自定义按键）；**停在②步且没有 `scan_requested` = 自动连接未触发**
-    （输入通道不在位 / 应用已连接 / 用户已手动断开）；
+    （输入通道不在位 / 应用已连接 / 用户已手动断开）；重置提示出现时另有一条
+    `phase=remote_observed reason=reset_guidance_shown detail=generic_name|no_button|not_connected`；
   - ③ 语音设备：`refresh_endpoints`（`detail=auto|manual_total_N_rec_M`）、`select_endpoint`
     （`detail=auto|manual|fallback`）、`open_download_page`；另有 `phase=audio_route`
     （`reason=missing|not_selected|selected|ready`，状态去重）；
   - ④ 全按键支持：`read_capture_state`（进入步骤时读取，`detail=enabled_0|1_available_0|1`）；
     开关操作另落 `phase=authorization`（`step=full_key detail=full_key`，失败原文只进日志）；
+  - 任意步骤：`open_log_directory`（页脚入口；begin=`unknown` → end=`passed|failed`）；
   - ⑤ 输入工具：`read_tool_state`、`stage_binding`（`detail=<工具>`）、`save_other_keys`、
     `vokie_detect`（`detail=installed_0|1_running_0|1`）、`open_vokie_site`、`vokie_launch`；
   - ⑥ 按住说话：`armed` / 终态 / `session_stopped` / `observation_begin_failed` /
@@ -265,11 +263,53 @@
   - ⑦ 普通按键：`button_observation`、`mapping_suspend` / `mapping_resume`；
   - ⑧ 完成：`complete_refresh`（失败时 `detail=tool|vokie|capture|audio` 指出来源）。
 - `phase=heartbeat` 每 30 秒一条（`reason=alive`）：携带当前 `step`、门禁 `code` 与
-  步骤内等待摘要（如 `obs_0_n0`、`streaming`）。**长时间停留某一步时最后一跳就是现场**；
-  这是"状态未变化不重复刷"的刻意例外。
+  步骤内等待摘要（遥控器步骤是连接/按键快照 token，如
+  `p_r_ble_1_raw_r_m_1_re_42_se_8_st_0_rc_0_n_1_obs_0_err_0`；语音步骤是 `streaming`）。
+  **长时间停留某一步时最后一跳就是现场**；这是"状态未变化不重复刷"的刻意例外。
 - 脱敏红线：所有 `step/code/detail` 均为稳定 token 或计数，不含设备 id/名称、
   音频端点 id/名称、文件路径、错误原文与任何用户输入内容（自动化用例对
   遥控器/端点身份字段做了"绝不出现"断言）。
+
+### 连接 / 按键卡点快照（2026-11-21）
+
+遥控器与普通按键步骤会在**进入步骤、连接阶段跳变、Raw Input 阶段跳变、匹配接口数/
+重连次数/错误位/型号变化**时落一条：
+
+```text
+frontend event=onboarding phase=remote_observed result=unknown reason=remote_state
+  step=remote detail=p_r_ble_1_raw_a_m_0_rc_0_n_0_obs_0_err_0_md_rc003
+```
+
+`detail` 是单个稳定 token（≤64 字符，不含设备名/地址/路径/错误原文）。
+**`detail=snap_0`** 表示前端还没拿到 runtime 快照（不是真实的 idle/stopped，不要据此判断）；
+**`detail=token_too_long`** 表示日志字段组合超限（实现问题，不是现场状态）。
+
+- `p_` 连接阶段：`i` idle / `c` connecting / `d` discovering / `ac` awaiting_capabilities /
+  `r` ready / `s` streaming / `dr` draining / `rc` reconnecting / `su` suspended /
+  `dc` disconnected / `f` failed
+- `ble_`：BLE 语音会话是否就绪（0/1）
+- `raw_`：Raw Input 阶段：`s` stopped / `st` starting / `a` awaiting / `r` ready /
+  `f` failed / `u` unsupported
+- `m_`：匹配到遥控器的 HID 接口数（上限 9）
+- `rc_`：重连次数（上限 99）；`n_`：扫描到的已配对遥控器数（上限 9）
+- `obs_`：本向导会话是否已收到普通按键；`err_`：连接层是否有错误记录
+- `ce_`：Raw Input 层是否有错误记录（仅状态跳变行）
+- `md_`：型号 token（`rc001` / `rc003` / `unknown`）
+
+`phase=heartbeat` 的 `detail` 额外带 Raw Input 计数：`re_` 原始报文数、`se_` 语义边沿数、
+`st_` 被路径过滤丢弃的报文数（均上限 999）。离开②/⑦步时另落一条
+`reason=remote_state_exit`，其 `detail` 也带这组计数，避免用户按了很多次才通过时
+最后几次计数只等心跳而丢失。判读：
+
+- `p_r_..._raw_a_m_0`：BLE 已就绪，但系统没有这支遥控器的 HID 按键接口；
+- `p_r_..._raw_r_m_1_..._obs_0`：按键通道在位但一直没收到按键，对照心跳 `re_/se_` 是否增长；
+- `p_rc_..._rc_5`：仍在重连，链路没有建立；
+- `err_1`：连接层有错误记录，按同一时间戳查 Rust 的 `ble_*` / `gatt_*` 行。
+
+扫描另落 Rust 行 `ble_scan phase=completed terminal_result=passed found_count=N` /
+`ble_scan filter total_paired_count=N supported_count=M`。**`total_paired_count>0` 且
+`supported_count=0` = Windows 里有配对设备，但名称不在支持列表**（现场常见于系统名异常/
+未初始化）；失败时 `error_domain` + `error_code` 给分类，不写 Windows 错误原文。
 
 失败判定：正常路径判定失败或看不到文字；键盘打字仍判通过（含失败后用键盘打字）；焦点类失败文案缺失；快速点按导致卡死、重复 attempt、或出现两个终态；日志缺 attempt 配对或含文字内容。
 
@@ -337,7 +377,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Testing\run-hardware-signal-
 - 已跑通记录（2026-10-05，RC003 scenario，**当时为七步流程**）：①②③④⑥⑦ 全绿，
   ⑤ `voice_attempt result=passed detail=d240_s240_q0_drain1`，收尾 `wizard_finished elapsed_ms=71920`；
   截图与日志摘录见 `artifacts/local-test/2026-10-05-onboarding-simulation/`。2026-11-05 在语音设备之后
-  插入新第④步后，原④–⑦ 依次后移为⑤–⑧；旧记录不重跑。
+  插入新第④步后，原④–⑦ 依次后移为⑤–⑧；2026-11-21 评估过把全按键支持前置，最终保持
+  第④步（连接页改为提示先用返回 / 音量±以外的键），旧记录不重跑。
 - 边界：模拟 ≠ 真机——配对、射频、权限、驱动、真实音质与安装包行为仍按本手册真机执行；两种型号仍要分别做真机用例一~四。
 
 ## 验证边界

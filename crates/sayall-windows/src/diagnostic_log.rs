@@ -63,6 +63,62 @@ pub fn probe(path: &Path) -> bool {
         .is_ok()
 }
 
+/// 解析诊断日志路径：受控覆盖仍优先，但落在产品根目录
+/// `%LOCALAPPDATA%\SayAll`（而不是它下面的 `Logs`）的覆盖会归一到
+/// `Logs\<原文件名>`。
+///
+/// 为什么需要：`SAYALL_GATT_LOG` 可能来自早期手动排查，留在用户环境变量里。
+/// 若继续原样使用，日志和「打开日志目录」都会落在 `Logs` 的上一层；用户看到的
+/// 就是“Logs 里没有本次日志”。产品目录之外的临时路径仍原样保留，供并发隔离
+/// 与受控测试使用。
+pub fn resolve_log_path(default_path: PathBuf, override_path: Option<PathBuf>) -> PathBuf {
+    let Some(override_path) = override_path else {
+        return default_path;
+    };
+    let Some(log_dir) = default_path.parent() else {
+        return override_path;
+    };
+    let Some(product_dir) = log_dir.parent() else {
+        return override_path;
+    };
+    let product_layout = log_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().eq_ignore_ascii_case("Logs"))
+        .unwrap_or(false)
+        && product_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().eq_ignore_ascii_case("SayAll"))
+            .unwrap_or(false);
+    if !product_layout
+        || path_is_within(&override_path, log_dir)
+        || !path_is_within(&override_path, product_dir)
+    {
+        return override_path;
+    }
+    override_path
+        .file_name()
+        .map(|name| log_dir.join(name))
+        .unwrap_or(override_path)
+}
+
+/// 大小写不敏感的前缀判断（Windows 盘符与用户目录大小写并不稳定）。
+fn path_is_within(path: &Path, base: &Path) -> bool {
+    let mut expected = base.components();
+    for actual in path.components() {
+        let Some(wanted) = expected.next() else {
+            return true;
+        };
+        if !actual
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&wanted.as_os_str().to_string_lossy())
+        {
+            return false;
+        }
+    }
+    expected.next().is_none()
+}
+
 /// 轮转：把当前文件改名成带时间戳与进程号的旧文件，并按份数修剪。
 fn rotate(path: &Path) -> Option<PathBuf> {
     let rotated = rotated_path(path, &crate::ble::utc_stamp_compact(), std::process::id());
@@ -141,6 +197,54 @@ mod tests {
         assert!(rotation_due(10 * 1024 * 1024 - 10, 11, 10 * 1024 * 1024));
         assert!(!rotation_due(10 * 1024 * 1024 - 10, 10, 10 * 1024 * 1024));
         assert!(!rotation_due(0, 1, 10 * 1024 * 1024));
+    }
+
+    fn product_default_path() -> PathBuf {
+        PathBuf::from(r"C:\Users\me\AppData\Local\SayAll\Logs\sayall-diagnostic.log")
+    }
+
+    #[test]
+    fn root_level_override_is_moved_into_logs() {
+        let override_path =
+            PathBuf::from(r"C:\Users\me\AppData\Local\SayAll\login-diagnostic-2.log");
+        assert_eq!(
+            resolve_log_path(product_default_path(), Some(override_path)),
+            PathBuf::from(r"C:\Users\me\AppData\Local\SayAll\Logs\login-diagnostic-2.log")
+        );
+    }
+
+    #[test]
+    fn override_inside_logs_or_outside_product_is_kept() {
+        let inside = PathBuf::from(r"C:\Users\me\AppData\Local\SayAll\Logs\custom.log");
+        assert_eq!(
+            resolve_log_path(product_default_path(), Some(inside.clone())),
+            inside
+        );
+        let outside = PathBuf::from(r"C:\Temp\sayall-diag.log");
+        assert_eq!(
+            resolve_log_path(product_default_path(), Some(outside.clone())),
+            outside
+        );
+    }
+
+    #[test]
+    fn product_layout_match_is_case_insensitive() {
+        let override_path =
+            PathBuf::from(r"c:\users\me\appdata\local\sayall\login-diagnostic-2.log");
+        assert_eq!(
+            resolve_log_path(product_default_path(), Some(override_path)),
+            PathBuf::from(r"C:\Users\me\AppData\Local\SayAll\Logs\login-diagnostic-2.log")
+        );
+    }
+
+    #[test]
+    fn override_is_not_redirected_when_default_is_not_the_product_layout() {
+        let default = PathBuf::from(r"C:\Logs\sayall-diagnostic.log");
+        let override_path = PathBuf::from(r"C:\Temp\sayall-diag.log");
+        assert_eq!(
+            resolve_log_path(default, Some(override_path.clone())),
+            override_path
+        );
     }
 
     #[test]

@@ -36,8 +36,13 @@ windows_build=<build 或 unknown>
 构建时写入 `source_revision`，运行时不得读取 Git 工作区。无法可靠取得的值写 `unknown`，不能省略字段。
 
 正式应用默认写入 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`，不再要求用户
-预先设置环境变量。受控测试仍可用 `SAYALL_GATT_LOG` 覆盖写入位置；日志正文不得
-打印实际文件路径。应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
+预先设置环境变量。受控测试仍可用 `SAYALL_GATT_LOG` 覆盖写入位置；手动覆盖也默认应放在
+`%LOCALAPPDATA%\SayAll\Logs\` 下，只有需要隔离并发进程时才使用临时目录。若覆盖路径落在
+`%LOCALAPPDATA%\SayAll` 根目录或它的非 `Logs` 子目录，启动时会归一到
+`Logs\<原文件名>`，并在日志里记一条 `diagnostic_log path_normalized
+reason=override_outside_logs`；产品目录之外的临时路径原样保留。日志正文不得打印实际文件
+路径。`%LOCALAPPDATA%\SayAll` 根目录里的旧诊断文件是历史手动覆盖产物，不是应用默认路径。
+应用启动、Tauri setup、前端入口、Vue 挂载和首次 IPC 读取必须
 在用户看到主页面前后分别留痕，确保安装后白屏可以区分为宿主、WebView、脚本、
 Vue 渲染或 IPC 阶段故障。
 
@@ -89,6 +94,22 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 8. 唯一 `terminal_result` 及总耗时。
 
 失败应带 `error_domain`、`error_code`、`reason` 和 `retryable=true|false`。状态未变化时不得重复刷相同日志；高频 HID、音频包和轮询只记录首尾、聚合计数、字节/帧数、丢弃数量和耗时。
+
+### 向导连接 / 按键卡点快照（2026-11-21）
+
+首次设置向导的连接步骤不能用"看不到设备"或"按键没反应"作为唯一证据。该步骤在进入、
+连接阶段跳变、Raw Input 阶段跳变、匹配接口数/重连次数/错误位/型号变化时落
+`frontend event=onboarding phase=remote_observed reason=remote_state step=remote detail=<token>`，
+30 秒心跳与离开步骤时的 `reason=remote_state_exit` 再带 Raw Input 报文/语义边沿/丢弃计数。token 由
+`src/onboarding/remote-state.ts` 生成，只含阶段代码与计数（≤64 字节），不含设备名、
+地址、HID 路径或错误原文；前端尚未拿到 runtime 快照时固定写 `snap_0`，不得把默认值
+当成真实 idle/stopped；字段组合超过 64 字节时显式写 `token_too_long`，不依赖 Rust 侧
+的 `invalid` 兜底。Rust 侧扫描另落 `ble_scan phase=requested|completed`（成功给 `found_count`，另落
+`ble_scan filter total_paired_count/supported_count`，用于区分"没有配对设备"与
+"有配对设备但名称不在支持列表"），失败只给 `error_domain` + `error_code`；
+连接与 Raw Input 的详细 stage 仍由既有
+`ble_connect*` / `raw_input*` 行提供。现场只取一份 `sayall-diagnostic.log`，即可区分
+「没连上」「连上但无 HID 按键通道」「通道在位但按键没有到达」。
 
 ## 隐私红线
 

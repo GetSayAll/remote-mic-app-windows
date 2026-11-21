@@ -6,6 +6,7 @@ import {
   normalizeStep,
   phaseOf,
   previousStep,
+  stepProgressPercent,
   type OnboardingContext,
   type OnboardingStep,
 } from "./flow";
@@ -48,7 +49,7 @@ function makeContext(
 }
 
 describe("onboarding step order", () => {
-  it("keeps the confirmed order plus the optional full-key step after the audio device", () => {
+  it("keeps the optional full-key step after the audio device (2026-11-21 决定)", () => {
     expect(ONBOARDING_STEPS).toEqual([
       "welcome",
       "remote",
@@ -77,12 +78,27 @@ describe("onboarding step order", () => {
     expect(nextStep("welcome")).toBe("remote");
     expect(nextStep("remote")).toBe("audio");
     expect(nextStep("audio")).toBe("full_key");
+    expect(nextStep("full_key")).toBe("voice_tool");
     expect(previousStep("full_key")).toBe("audio");
     expect(previousStep("voice_tool")).toBe("full_key");
     expect(previousStep("audio")).toBe("remote");
     expect(nextStep("controls")).toBe("complete");
     expect(nextStep("complete")).toBeNull();
     expect(previousStep("remote")).toBe("welcome");
+  });
+
+  it("derives a strictly increasing progress percent from the step order", () => {
+    const percentages = ONBOARDING_STEPS.map(stepProgressPercent);
+    // 2026-11-21 顺序变更回归：手写映射曾让进度条从 44% 倒退到 16%。
+    for (let i = 1; i < percentages.length; i += 1) {
+      expect(percentages[i]).toBeGreaterThan(percentages[i - 1]);
+    }
+    expect(percentages[0]).toBeGreaterThan(0);
+    expect(percentages.at(-1)).toBe(100);
+    expect(stepProgressPercent("welcome")).toBe(4);
+    expect(stepProgressPercent("remote")).toBe(18);
+    expect(stepProgressPercent("full_key")).toBe(45);
+    expect(stepProgressPercent("complete")).toBe(100);
   });
 
   it("normalizes unknown persisted steps to welcome (older/newer writers must not strand the flow)", () => {

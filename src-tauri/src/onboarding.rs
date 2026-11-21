@@ -36,7 +36,7 @@ pub const INSTALL_EVIDENCE_FILES: [&str; 4] = [
     "other-voice-hotkey.json",
 ];
 
-/// 向导步骤（顺序即导航顺序；2026-11-05 在语音设备之后加「全按键支持」说明页）。
+/// 向导步骤（前端决定导航顺序；2026-11-05 起「全按键支持」在语音设备之后）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnboardingStep {
@@ -104,7 +104,7 @@ pub fn parse_step(value: &str) -> Option<OnboardingStep> {
 
 /// 向导事务中的 staged 语音绑定（设计稿 §5.4 / §6）。
 ///
-/// 语义：用户在第④步选择输入工具时**立即**把「工具 + 按住说话快捷键」应用到
+/// 语义：用户在第⑤步选择输入工具时**立即**把「工具 + 按住说话快捷键」应用到
 /// 运行时与正式配置（保证第⑤步真实验证可用），同时保存进入向导前的正式值作为
 /// 回滚快照；只有真实验证通过（完成向导）才提交（清除快照、保留当前值）。
 /// 退出未完成流程（下次启动）、重跑向导时回滚到快照，保证老用户的选择不被
