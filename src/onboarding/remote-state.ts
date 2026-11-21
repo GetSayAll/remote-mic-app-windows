@@ -42,6 +42,8 @@ export function rawInputPhaseCode(phase: RawInputPhase): string {
 }
 
 export interface RemoteStateInput {
+  /** false = 前端还没拿到 runtime 快照；此时不得把默认值当成真实 idle/stopped。 */
+  snapshotAvailable: boolean;
   connectionPhase: ConnectionPhase;
   bleVoiceReady: boolean;
   rawInputPhase: RawInputPhase;
@@ -82,6 +84,9 @@ export function remoteStateToken(
   input: RemoteStateInput,
   options: RemoteStateOptions = {},
 ): string {
+  // 没有快照时只写 snap_0：`idle` / `stopped` 只是兜底默认值，不能当成现场事实。
+  if (!input.snapshotAvailable) return "snap_0";
+
   const includeCounters = options.includeCounters ?? true;
   const includeDeviceCount = options.includeDeviceCount ?? true;
   const includeButtonObserved = options.includeButtonObserved ?? true;
@@ -105,5 +110,8 @@ export function remoteStateToken(
   parts.push(`err_${input.connectionErrorPresent ? 1 : 0}`);
   if (includeRawInputError) parts.push(`ce_${input.rawInputErrorPresent ? 1 : 0}`);
   if (includeModel && input.remoteModel) parts.push(`md_${input.remoteModel}`);
-  return parts.join("_");
+  const token = parts.join("_");
+  // Rust 侧超过 64 字节会静默记成 `invalid`，反而丢掉全部现场；这里显式给出可检索的
+  // 失败 token，提醒后续调用方不要同时打开 counters + model。
+  return token.length <= 64 ? token : "token_too_long";
 }

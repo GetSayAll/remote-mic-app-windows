@@ -158,13 +158,14 @@ function heartbeatDetail(): string | undefined {
 }
 
 function reportHeartbeat(): void {
+  const detail = heartbeatDetail();
   reportOnboardingEvent({
     kind: "heartbeat",
     result: "unknown",
     reason: "alive",
     step: step.value,
     code: gate.value.code ?? "ok",
-    ...(heartbeatDetail() ? { detail: heartbeatDetail() } : {}),
+    ...(detail ? { detail } : {}),
   });
 }
 
@@ -199,6 +200,7 @@ function currentRemoteState(options: RemoteStateOptions = {}): string {
   const platform = props.runtime?.platform;
   return remoteStateToken(
     {
+      snapshotAvailable: platform != null,
       connectionPhase: platform?.connection.phase ?? "idle",
       bleVoiceReady: platform?.bleVoiceReady ?? false,
       rawInputPhase: platform?.rawInput.phase ?? "stopped",

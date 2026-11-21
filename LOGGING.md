@@ -97,7 +97,9 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 `frontend event=onboarding phase=remote_observed reason=remote_state step=remote detail=<token>`，
 30 秒心跳与离开步骤时的 `reason=remote_state_exit` 再带 Raw Input 报文/语义边沿/丢弃计数。token 由
 `src/onboarding/remote-state.ts` 生成，只含阶段代码与计数（≤64 字节），不含设备名、
-地址、HID 路径或错误原文。Rust 侧扫描另落 `ble_scan phase=requested|completed`（成功给 `found_count`，另落
+地址、HID 路径或错误原文；前端尚未拿到 runtime 快照时固定写 `snap_0`，不得把默认值
+当成真实 idle/stopped；字段组合超过 64 字节时显式写 `token_too_long`，不依赖 Rust 侧
+的 `invalid` 兜底。Rust 侧扫描另落 `ble_scan phase=requested|completed`（成功给 `found_count`，另落
 `ble_scan filter total_paired_count/supported_count`，用于区分"没有配对设备"与
 "有配对设备但名称不在支持列表"），失败只给 `error_domain` + `error_code`；
 连接与 Raw Input 的详细 stage 仍由既有

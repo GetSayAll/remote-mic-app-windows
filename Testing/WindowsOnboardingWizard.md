@@ -260,8 +260,9 @@
   - ⑦ 普通按键：`button_observation`、`mapping_suspend` / `mapping_resume`；
   - ⑧ 完成：`complete_refresh`（失败时 `detail=tool|vokie|capture|audio` 指出来源）。
 - `phase=heartbeat` 每 30 秒一条（`reason=alive`）：携带当前 `step`、门禁 `code` 与
-  步骤内等待摘要（如 `obs_0_n0`、`streaming`）。**长时间停留某一步时最后一跳就是现场**；
-  这是"状态未变化不重复刷"的刻意例外。
+  步骤内等待摘要（遥控器步骤是连接/按键快照 token，如
+  `p_r_ble_1_raw_r_m_1_re_42_se_8_st_0_rc_0_n_1_obs_0_err_0`；语音步骤是 `streaming`）。
+  **长时间停留某一步时最后一跳就是现场**；这是"状态未变化不重复刷"的刻意例外。
 - 脱敏红线：所有 `step/code/detail` 均为稳定 token 或计数，不含设备 id/名称、
   音频端点 id/名称、文件路径、错误原文与任何用户输入内容（自动化用例对
   遥控器/端点身份字段做了"绝不出现"断言）。
@@ -276,7 +277,9 @@ frontend event=onboarding phase=remote_observed result=unknown reason=remote_sta
   step=remote detail=p_r_ble_1_raw_a_m_0_rc_0_n_0_obs_0_err_0_md_rc003
 ```
 
-`detail` 是单个稳定 token（≤64 字符，不含设备名/地址/路径/错误原文）：
+`detail` 是单个稳定 token（≤64 字符，不含设备名/地址/路径/错误原文）。
+**`detail=snap_0`** 表示前端还没拿到 runtime 快照（不是真实的 idle/stopped，不要据此判断）；
+**`detail=token_too_long`** 表示日志字段组合超限（实现问题，不是现场状态）。
 
 - `p_` 连接阶段：`i` idle / `c` connecting / `d` discovering / `ac` awaiting_capabilities /
   `r` ready / `s` streaming / `dr` draining / `rc` reconnecting / `su` suspended /
