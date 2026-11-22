@@ -7,10 +7,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+/// 进程内单调毫秒；Raw Input 活动时间与语音优先共用一个时钟。
+pub(crate) fn monotonic_millis() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
 
 pub mod app_launcher;
 /// Windows 应用切换器（Alt+Tab）临时会话：状态机、I/O 接缝与结束报告。
@@ -317,11 +323,11 @@ pub enum VoicePriorityState {
     /// 不在语音流中，键鼠未被改动。
     #[default]
     Off,
-    /// 正在发现/切换键鼠连接参数。
+    /// 正在发现/切换键鼠连接参数，尚未读到实际 Balanced。
     Applying,
-    /// 语音流期间已让出：至少一只 BLE HID 键鼠处于 Balanced。
+    /// 语音流或空闲预热期间已实际读到至少一只 BLE HID 键鼠为 Balanced。
     Active,
-    /// 本次切换失败；语音主链路不受影响，下一次语音重试。
+    /// 本次切换失败或超时；语音主链路不受影响，下一次重试。
     Failed,
 }
 
@@ -340,7 +346,7 @@ impl VoicePriorityState {
 #[serde(rename_all = "camelCase")]
 pub struct VoicePrioritySnapshot {
     pub state: VoicePriorityState,
-    /// 当前已让出时隙的 BLE HID 设备数（遥控器除外）。
+    /// 当前已实际读到 Balanced 的 BLE HID 设备数（遥控器除外）。
     pub yielded_devices: u8,
 }
 
@@ -738,12 +744,15 @@ impl Default for WindowsPlatform {
                 Arc::clone(&gain_db),
                 Arc::clone(&transcript_capture),
             ));
+            let desktop_activity = Arc::new(AtomicU64::new(0));
             let voice_priority = Arc::new(voice_priority::VoicePriorityRuntime::new(
                 runtime.state_handle(),
+                Arc::clone(&desktop_activity),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
                 button_mapping.sender(),
+                desktop_activity,
             ));
             // RC003 三键传输桥接（捕获链第 ② 段）：主程序监听随机端口并写出描述文件，
             // 提权助手读取后回连。没有这一段，RC003 的三键只会被"清空"（Windows 侧

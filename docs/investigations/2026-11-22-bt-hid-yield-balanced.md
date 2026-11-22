@@ -84,18 +84,41 @@
     `12 / 0 / 200`；松开后 `restore` 成功、`state=off`，键盘/鼠标回到 `6 / 44 / 216`。
     复现命令：`cargo run -p sayall-windows --example hid_params_read_probe -- 60`
     （只输出序号与参数，不含地址/设备名）。
-  - 结论：本轮没有观察到“前 1–2 s 仍降级”。2.658 s 的短会话整段平均 14,898 /s；
-    若前 2 s 只有 ~5 k/s，整段平均不可能达到这个值。`apply` 请求在两段会话中都在
-    音频流开始前后 100 ms 内完成（会话 A 的成功回执比 `audio_stream started` 晚
-    69 ms，会话 B 早 49 ms）；真实生效点由上述只读探针的 60 ms 读回确认。
+  - **2026-11-23 更正**：该轮探针没有覆盖这两次会话的开始时刻；后续带时间戳的探针
+    证明实际切换需要 2.4–4.1 s。原先“未观察到前 1–2 s 降级”的结论证据不足，撤回。
+    只有实际读回 `48 / 0 / 400` 才能算生效，`apply=success` 不能。
   - 该包为本地测试构建，不是发布包；RC001 与其它适配器仍 `deferred`。
 - 中间实现（已废弃，保留证据）：曾做成「默认关闭、降级后一键开启」的常驻设置。1.9.3 本地测试包安装后，开启后 `candidates=2 yielded=2` / `state=active`，只读回键鼠 `48 / 0 / 400`；两次语音会话 `voice_audio_rate result=full rate_hz=15211`（2.761 s）与 `14193`（2.046 s）。该证据证明机制有效，但产品行为已按用户要求改为自动、仅会话期间。
-- 自动化：前端 45 个测试文件、719 passed / 10 skipped；`vue-tsc --noEmit` + `vite build` 通过；`cargo test --workspace` 通过（含 `voice_priority` 2 passed）；`cargo fmt --all -- --check` 通过；`cargo check -p sayall-windows-app --features runtime-simulation` 通过；`scripts/ci-preflight.ps1` 7/7 通过。
+- 自动化：前端 45 个测试文件、719 passed / 10 skipped；`vue-tsc --noEmit` + `vite build` 通过；`cargo test --workspace` 通过（含 `voice_priority` 4 passed）；`cargo fmt --all -- --check` 通过；`cargo check -p sayall-windows-app --features runtime-simulation` 通过；`scripts/ci-preflight.ps1` 7/7 通过。
+
+## 2026-11-23 更正与修复（空闲预热）
+
+- 1.9.4 短会话复测：19 次里 8 次 degraded；排除自身前台后 18 次实际语音里
+  5 次没有插入文字。所有会话都报 `active yielded=2`，但实际读回显示键鼠仍在
+  `6 / 44 / 216`。
+- 带时间戳只读探针（16:29 UTC，sessions 46–49）：`apply=success` 后
+  **2.42–4.11 s** 才读到 `48 / 0 / 400`；session 49 在整段 3.7 s 语音里都没读到
+  48，速率 10,607 /s。恢复只需约 0.25–0.5 s。根因是 Windows BLE/HID 栈的
+  参数切换延迟，不是应用没发请求。
+- 修复（1.9.5）：遥控器 Ready/Streaming/Draining 且桌面空闲 1 s 时提前预热；
+  普通键盘活动、鼠标移动/滚轮立即恢复；单纯鼠标点击不撤销预热；只有读回
+  interval≥24 才计 `active`，新增 `action=observe` 日志。
+- 1.9.5 验证：未按语音键即读到键鼠 `48 / 0 / 400`；`observe` 在 `apply` 后
+  3.4 s 出现；桌面活动触发 `restore`，空闲后重新预热。最终构建实测：
+  17:03:02 active → 17:03:15 desktop restore/off → 17:03:21 重新 applying →
+  17:03:23.8 两只读回 48/active。
+- 用户实机 6 次短语音（sessions 62–67）：5 次在语音开始前 48 已生效，速率
+  15,238 / 14,903 / 14,008 / 14,637 / 15,552 /s，全部 full 且有文字；
+  session 62 在 `apply` 后 0.58 s 就按下，前 1.75 s 仍是 6/44/216，是残余边界。
+- 语音首字彻底保护仍 `deferred`（见下）。
+- 详细证据与残余边界见
+  [Bugs/2026-11-23-voice-priority-yield-latency.md](../../Bugs/2026-11-23-voice-priority-yield-latency.md)。
 
 ## 未覆盖
 
 - 仅本机、本适配器、RC003；RC001 与其它适配器 `deferred`。
 - 端到端文字上屏未做独立 OCR 取证；满速会话的样本率已实测。
-- 只测了两次会话（2.658 s / 15.759 s），没有逐秒拆分样本率；短会话整段 full 已排除
-  “前 2 s 固定降级”的假设，但更多适配器/时序组合仍需复测。
+- 只测了有限的短会话；2026-11-23 已用带时间戳探针确认实际切换延迟 2.4–4.1 s。
+- 1.9.5 空闲预热后，语音首字/短会话 full 速率的用户侧确认尚未完成；先移动鼠标、
+  3 s 内立刻按语音键仍可能丢首字。
 - 键鼠耗电变化未测。

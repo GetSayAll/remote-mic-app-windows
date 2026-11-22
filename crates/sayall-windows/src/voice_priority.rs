@@ -15,6 +15,7 @@
 //!   实测释放后 HID 栈回到原参数（7.5 ms / 延迟 44）。
 
 use crate::{ConnectionPhase, ConnectionSnapshot, VoicePrioritySnapshot, VoicePriorityState};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -34,6 +35,25 @@ const DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// 已有设备在让出时，重新发现新 HID 设备的间隔。30 s 足够发现新接上的键鼠，
 /// 也不会在语音期间反复打开 GATT 服务缓存。
 const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// 桌面空闲多久后预热键鼠让出（2026-11-23）。Windows 实际切换约需 2.4–4 s，
+/// 只在语音按下时才请求会整段错过短会话；空闲预热把切换提前到说话之前。
+const DESKTOP_IDLE_MS: u64 = 1_000;
+/// 请求已接受但读回仍是旧的连接参数时，超过这个时间标记为失败（仍继续观察）。
+const EFFECTIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ConnectionParams {
+    interval_units: u16,
+    latency_events: u16,
+    timeout_units: u16,
+}
+
+impl ConnectionParams {
+    fn is_balanced(self) -> bool {
+        // Balanced 预设的 min interval 是 24（30 ms）；HID 栈默认是 6（7.5 ms）。
+        self.interval_units >= 24
+    }
+}
 
 enum Command {
     Shutdown { ack: Option<mpsc::Sender<()>> },
@@ -43,6 +63,7 @@ struct YieldedDevice {
     address: u64,
     device: BluetoothLEDevice,
     request: BluetoothLEPreferredConnectionParametersRequest,
+    observed: Option<ConnectionParams>,
 }
 
 pub struct VoicePriorityRuntime {
@@ -52,14 +73,17 @@ pub struct VoicePriorityRuntime {
 }
 
 impl VoicePriorityRuntime {
-    pub fn new(connection: Arc<Mutex<ConnectionSnapshot>>) -> Self {
+    pub fn new(
+        connection: Arc<Mutex<ConnectionSnapshot>>,
+        desktop_activity: Arc<AtomicU64>,
+    ) -> Self {
         let state = Arc::new(Mutex::new(VoicePrioritySnapshot::default()));
         let (sender, receiver) = mpsc::channel();
         let worker_state = Arc::clone(&state);
         let worker = thread::Builder::new()
             .name("sayall-voice-priority".to_owned())
             .spawn(move || {
-                worker_loop(receiver, worker_state, connection);
+                worker_loop(receiver, worker_state, connection, desktop_activity);
             });
         match worker {
             Ok(worker) => Self {
@@ -126,6 +150,7 @@ fn worker_loop(
     receiver: mpsc::Receiver<Command>,
     state: Arc<Mutex<VoicePrioritySnapshot>>,
     connection: Arc<Mutex<ConnectionSnapshot>>,
+    desktop_activity: Arc<AtomicU64>,
 ) {
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         set_state(
@@ -139,15 +164,19 @@ fn worker_loop(
     let mut yielded: Vec<YieldedDevice> = Vec::new();
     let mut last_discovery = Instant::now() - DISCOVERY_REFRESH_INTERVAL;
     let mut last_failure: Option<Instant> = None;
+    let mut yield_started: Option<Instant> = None;
 
     loop {
-        let streaming = voice_streaming(&lock(&connection));
-        if !streaming {
+        let phase = lock(&connection).phase;
+        let streaming = streaming_phase(phase) && crate::remote_target::get().is_some();
+        let idle = desktop_is_idle(&desktop_activity);
+        if !yield_requested(phase, streaming, idle) {
             restore_all(&mut yielded);
             set_state(&state, VoicePriorityState::Off, 0, None);
-            // 下一次语音从干净的发现窗口开始；不在空闲期保留任何 HID 参数改动。
+            // 下一次需要让出时从干净的发现窗口开始。
             last_discovery = Instant::now() - DISCOVERY_REFRESH_INTERVAL;
             last_failure = None;
+            yield_started = None;
         } else {
             yielded.retain(|entry| {
                 let connected = entry
@@ -162,6 +191,28 @@ fn worker_loop(
                 connected
             });
 
+            // 读回实际参数：请求返回 Success 只代表系统接受，真正是否切到
+            // Balanced 必须在连接里观察。只在变化时落日志，避免 250 ms 刷屏。
+            for (slot, entry) in yielded.iter_mut().enumerate() {
+                let Some(params) = read_connection_params(&entry.device) else {
+                    continue;
+                };
+                if entry.observed != Some(params) {
+                    entry.observed = Some(params);
+                    crate::ble::gatt_note(format!(
+                        "voice_priority action=observe slot={slot} interval_units={} latency_events={} timeout_units={} effective={}",
+                        params.interval_units,
+                        params.latency_events,
+                        params.timeout_units,
+                        params.is_balanced()
+                    ));
+                }
+            }
+            let mut effective_count = yielded
+                .iter()
+                .filter(|entry| entry.observed.is_some_and(ConnectionParams::is_balanced))
+                .count();
+
             let discovery_interval = if yielded.is_empty() {
                 DISCOVERY_RETRY_INTERVAL
             } else {
@@ -173,6 +224,7 @@ fn worker_loop(
                 last_failure.is_none_or(|at| at.elapsed() >= DISCOVERY_RETRY_INTERVAL);
             if should_discover && retry_allowed {
                 if yielded.is_empty() {
+                    yield_started.get_or_insert_with(Instant::now);
                     set_state(&state, VoicePriorityState::Applying, 0, None);
                 }
                 last_discovery = Instant::now();
@@ -186,17 +238,27 @@ fn worker_loop(
                                 let _ = device.Close();
                                 continue;
                             }
-                            // 语音可能已经结束：不要在结束后继续把新设备降速。
-                            if !voice_streaming(&lock(&connection)) {
+                            // 语音可能已经结束、桌面也可能重新活跃：不要在不需要时
+                            // 继续把新设备降速。
+                            let still_wanted = {
+                                let phase = lock(&connection).phase;
+                                let streaming =
+                                    streaming_phase(phase) && crate::remote_target::get().is_some();
+                                let idle = desktop_is_idle(&desktop_activity);
+                                yield_requested(phase, streaming, idle)
+                            };
+                            if !still_wanted {
                                 let _ = device.Close();
                                 break;
                             }
                             match apply_balanced(&device) {
                                 Ok(request) => {
+                                    let observed = read_connection_params(&device);
                                     yielded.push(YieldedDevice {
                                         address,
                                         device,
                                         request,
+                                        observed,
                                     });
                                 }
                                 Err(error) => {
@@ -209,7 +271,7 @@ fn worker_loop(
                             }
                         }
                         crate::ble::gatt_note(format!(
-                            "voice_priority action=discover phase=completed terminal_result=passed candidates={candidates} yielded={}",
+                            "voice_priority action=discover phase=completed terminal_result=passed candidates={candidates} accepted={}",
                             yielded.len()
                         ));
                     }
@@ -220,18 +282,32 @@ fn worker_loop(
                         ));
                     }
                 }
+                effective_count = yielded
+                    .iter()
+                    .filter(|entry| entry.observed.is_some_and(ConnectionParams::is_balanced))
+                    .count();
             }
 
-            let next_state = if yielded.is_empty()
-                && last_failure.is_some_and(|at| at.elapsed() < DISCOVERY_RETRY_INTERVAL)
-            {
-                VoicePriorityState::Failed
+            let next_state = if yielded.is_empty() {
+                if last_failure.is_some_and(|at| at.elapsed() < DISCOVERY_RETRY_INTERVAL) {
+                    VoicePriorityState::Failed
+                } else {
+                    // 遥控器在线且没有需要让出的 HID（例如只有遥控器）。
+                    yield_started = None;
+                    VoicePriorityState::Active
+                }
+            } else if effective_count == 0 {
+                let started = *yield_started.get_or_insert_with(Instant::now);
+                if started.elapsed() >= EFFECTIVE_TIMEOUT {
+                    VoicePriorityState::Failed
+                } else {
+                    VoicePriorityState::Applying
+                }
             } else {
-                // 语音流中：可能是 N 只设备已让出，也可能当前没有可让出的 HID 设备
-                // （例如只有遥控器，或键鼠是经典蓝牙）。
+                yield_started = None;
                 VoicePriorityState::Active
             };
-            set_state(&state, next_state, yielded.len() as u8, None);
+            set_state(&state, next_state, effective_count as u8, None);
         }
 
         match receiver.recv_timeout(POLL_INTERVAL) {
@@ -257,12 +333,38 @@ fn worker_loop(
     }
 }
 
-fn voice_streaming(snapshot: &ConnectionSnapshot) -> bool {
-    streaming_phase(snapshot.phase) && crate::remote_target::get().is_some()
-}
-
 fn streaming_phase(phase: ConnectionPhase) -> bool {
     phase == ConnectionPhase::Streaming
+}
+
+fn remote_connected_phase(phase: ConnectionPhase) -> bool {
+    matches!(
+        phase,
+        ConnectionPhase::Ready | ConnectionPhase::Streaming | ConnectionPhase::Draining
+    )
+}
+
+fn desktop_is_idle(activity: &AtomicU64) -> bool {
+    desktop_idle_at(activity.load(Ordering::Relaxed), crate::monotonic_millis())
+}
+
+fn desktop_idle_at(last_activity_ms: u64, now_ms: u64) -> bool {
+    last_activity_ms == 0 || now_ms.saturating_sub(last_activity_ms) >= DESKTOP_IDLE_MS
+}
+
+/// 遥控器已连接时：语音流中无条件让出；空闲 1 s 后提前让出，给 Windows
+/// 约 2.4–4 s 的实际参数切换留出时间。普通键鼠一活动就撤销预热。
+fn yield_requested(phase: ConnectionPhase, streaming: bool, desktop_idle: bool) -> bool {
+    remote_connected_phase(phase) && (streaming || desktop_idle)
+}
+
+fn read_connection_params(device: &BluetoothLEDevice) -> Option<ConnectionParams> {
+    let params = device.GetConnectionParameters().ok()?;
+    Some(ConnectionParams {
+        interval_units: params.ConnectionInterval().ok()?,
+        latency_events: params.ConnectionLatency().ok()?,
+        timeout_units: params.LinkTimeout().ok()?,
+    })
 }
 
 fn set_state(
@@ -464,22 +566,47 @@ mod tests {
     }
 
     #[test]
-    fn only_streaming_phase_allows_yield() {
-        assert!(streaming_phase(ConnectionPhase::Streaming));
+    fn idle_ready_requests_yield_but_desktop_activity_cancels_it() {
+        for phase in [
+            ConnectionPhase::Ready,
+            ConnectionPhase::Streaming,
+            ConnectionPhase::Draining,
+        ] {
+            assert!(yield_requested(phase, false, true), "{phase:?}");
+        }
+        assert!(yield_requested(ConnectionPhase::Streaming, true, false));
+        assert!(!yield_requested(ConnectionPhase::Ready, false, false));
         for phase in [
             ConnectionPhase::Idle,
             ConnectionPhase::Connecting,
             ConnectionPhase::Discovering,
             ConnectionPhase::AwaitingCapabilities,
-            ConnectionPhase::Ready,
-            ConnectionPhase::Draining,
             ConnectionPhase::Reconnecting,
             ConnectionPhase::Suspended,
             ConnectionPhase::Disconnected,
             ConnectionPhase::Failed,
         ] {
-            assert!(!streaming_phase(phase), "{phase:?}");
+            assert!(!yield_requested(phase, false, true), "{phase:?}");
         }
+    }
+
+    #[test]
+    fn desktop_idle_uses_one_second_threshold() {
+        assert!(desktop_idle_at(0, 5_000));
+        assert!(!desktop_idle_at(1_000, 1_500));
+        assert!(desktop_idle_at(1_000, 2_000));
+    }
+
+    #[test]
+    fn balanced_interval_is_the_effective_signal() {
+        let params = |interval_units| ConnectionParams {
+            interval_units,
+            latency_events: 0,
+            timeout_units: 400,
+        };
+        assert!(!params(6).is_balanced());
+        assert!(params(24).is_balanced());
+        assert!(params(48).is_balanced());
     }
 }
 
