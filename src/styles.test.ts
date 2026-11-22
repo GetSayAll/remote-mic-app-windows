@@ -67,6 +67,12 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
     expect(css).not.toMatch(/\.app-shell\s*\{[^}]*[{;]\s*height:\s*100vh/);
   });
 
+  it("所有侧边栏页面共用左 22px / 右 13.5px 内容留白", () => {
+    expect(css).toMatch(
+      /\.content\s*\{[^}]*padding:\s*10px\s+13\.5px\s+0\s+22px/,
+    );
+  });
+
   it("主内容为浮在侧栏底色上的圆角面板，底部/右侧留 8px", () => {
     expect(css).toMatch(/\.app-shell\s*\{[^}]*background:\s*var\(--sidebar\)/);
     expect(css).toMatch(
@@ -74,6 +80,16 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
     );
     expect(css).toMatch(/\.content\s*\{[^}]*border-radius:\s*10px/);
     expect(css).toMatch(/\.content\s*\{[^}]*background:\s*var\(--surface-canvas\)/);
+  });
+});
+
+// 2026-11-22 Andy：方向键在系统字体里只有细线字形，和同一行的加粗文字放一起
+// 明显偏细；这里钉住只给方向字形补描边的规则，避免以后被普通字重改动覆盖。
+describe("映射格方向箭头视觉重量", () => {
+  it("只给 direction-arrow 补极细描边", () => {
+    expect(css).toMatch(
+      /\.mapping-cell span\.direction-arrow\s*\{[^}]*-webkit-text-stroke:\s*0\.8px/,
+    );
   });
 });
 
