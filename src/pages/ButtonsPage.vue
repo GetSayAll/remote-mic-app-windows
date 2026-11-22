@@ -262,21 +262,31 @@ function arrowPolygon(placement: Placement): string {
   return `${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${baseX.toFixed(1)},${(tip.y - 4).toFixed(1)} ${baseX.toFixed(1)},${(tip.y + 4).toFixed(1)}`;
 }
 
-/** 按键图标：SVG path 组（24x24 视窗），形状对齐 Mac RemoteMappingCanvas
- * 的 SF Symbols（power/chevron/circle.circle/uturn/speaker/house/line.3/tv）。 */
+/** 按键图标：SVG path 组（24x24 视窗）。与键位方案页的 ButtonKeyIcon 保持同一套
+ * 形状与 1.8 描边；menu/tv/语音键在键位方案页没有对应项，沿用原图标。 */
 const buttonIcons: Record<RemoteButton, string[]> = {
-  power: ["M12 3v8", "M7.2 6.4a7 7 0 1 0 9.6 0"],
-  up: ["M6 14.5l6-6 6 6"],
-  down: ["M6 9.5l6 6 6-6"],
-  left: ["M14.5 6l-6 6 6 6"],
-  right: ["M9.5 6l6 6-6 6"],
-  ok: ["M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z", "M12 10a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8z"],
-  back: ["M9 13.5L4 8.5l5-5", "M4 8.5h10.2a5.5 5.5 0 0 1 0 11H11"],
-  home: ["M3.5 11.2L12 3.5l8.5 7.7", "M6 9.5V20.5h12V9.5", "M10 20.5v-5.5h4v5.5"],
+  power: ["M12 3v9", "M6.4 6.4a8 8 0 1 0 11.2 0"],
+  up: ["M12 19V5", "M6 11l6-6 6 6"],
+  down: ["M12 5v14", "M6 13l6 6 6-6"],
+  left: ["M19 12H5", "M11 6l-6 6 6 6"],
+  right: ["M5 12h14", "M13 6l6 6-6 6"],
+  ok: [
+    "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
+    "M8.2 12.3l2.4 2.4 5.2-5.4",
+  ],
+  back: ["M9 7L4 12l5 5", "M4 12h9.5a5.5 5.5 0 0 1 5.5 5.5V19"],
+  home: ["M3.4 11.4L12 4l8.6 7.4", "M5.5 10.5V20h13v-9.5", "M10 20v-5h4v5"],
   menu: ["M4 6h16", "M4 12h16", "M4 18h16"],
   tv: ["M3 7.5h18a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8.5a1 1 0 0 1 1-1z", "M17 3l-5 4-5-4"],
-  volume_up: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
-  volume_down: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15 12h5.5"],
+  volume_up: [
+    "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+    "M15 9a4.2 4.2 0 0 1 0 6",
+    "M17.6 6.4a8 8 0 0 1 0 11.2",
+  ],
+  volume_down: [
+    "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+    "M15 9a4.2 4.2 0 0 1 0 6",
+  ],
   volume_mute: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
 };
 /** 语音键图标（Mac mic.fill：实心话筒）。 */
@@ -2448,7 +2458,7 @@ onUnmounted(() => {
               :key="index"
               :d="path"
               stroke="currentColor"
-              stroke-width="1.9"
+              stroke-width="1.8"
               stroke-linecap="round"
               stroke-linejoin="round"
             />
@@ -2502,7 +2512,7 @@ onUnmounted(() => {
               :key="index"
               :d="path"
               stroke="currentColor"
-              stroke-width="1.9"
+              stroke-width="1.8"
               stroke-linecap="round"
               stroke-linejoin="round"
             />

@@ -2584,6 +2584,30 @@ describe("buttons mapping page", () => {
     expect(enterSummary.classes()).not.toContain("direction-arrow");
   });
 
+  it("音量±与 OK 图标与键位方案页一致", async () => {
+    const wrapper = await mountPage();
+    const iconPaths = (label: string) =>
+      wrapper
+        .findAll(".mapping-card")
+        .find((card) => card.find(".mapping-card-title strong").text() === label)!
+        .findAll(".mapping-icon path")
+        .map((path) => path.attributes("d"));
+
+    expect(iconPaths("音量+")).toEqual([
+      "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+      "M15 9a4.2 4.2 0 0 1 0 6",
+      "M17.6 6.4a8 8 0 0 1 0 11.2",
+    ]);
+    expect(iconPaths("音量−")).toEqual([
+      "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+      "M15 9a4.2 4.2 0 0 1 0 6",
+    ]);
+    expect(iconPaths("确定")).toEqual([
+      "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
+      "M8.2 12.3l2.4 2.4 5.2-5.4",
+    ]);
+  });
+
   it("选中 Win 组合后摘要与卡片显示 Win，而不是左 Win", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "电源", 0);
