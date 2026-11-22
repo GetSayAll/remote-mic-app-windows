@@ -5,7 +5,7 @@ use sayall_windows::send_input::{ButtonAction, KeyChord, ScrollDirection, SendIn
 use sayall_windows::transcript_capture::CapturedTranscript;
 use sayall_windows::{
     AudioEndpoint, AudioSnapshot, ConnectionSnapshot, PairedRemote, PlatformError,
-    PlatformSnapshot, UsageCounters, WindowsPlatform,
+    PlatformSnapshot, UsageCounters, VoicePrioritySnapshot, WindowsPlatform,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -95,6 +95,9 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     /// 语音增益（dB，0–24）：推给平台侧解码管道。默认实现为空——
     /// 仿真与不支持增益的平台保持 0 dB（原始音量）。
     fn set_gain_db(&self, _gain_db: f32) {}
+    fn voice_priority_snapshot(&self) -> VoicePrioritySnapshot {
+        VoicePrioritySnapshot::default()
+    }
     /// 回眸开关。关闭时平台侧取消正在进行的捕获；已有记录不删除。
     fn set_transcript_capture_enabled(&self, _enabled: bool) {}
     /// 回眸原始录音开关。关闭时取消当前录音；已有录音不删除。
@@ -346,6 +349,10 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_gain_db(&self, gain_db: f32) {
         WindowsPlatform::set_gain_db(self, gain_db)
+    }
+
+    fn voice_priority_snapshot(&self) -> VoicePrioritySnapshot {
+        WindowsPlatform::voice_priority_snapshot(self)
     }
 
     fn set_transcript_capture_enabled(&self, enabled: bool) {
@@ -844,6 +851,7 @@ mod simulation {
                 audio: state.audio.clone(),
                 raw_input: state.raw_input.clone(),
                 button_mapping: self.button_mapping_snapshot(),
+                voice_priority: self.voice_priority_snapshot(),
             }
         }
 

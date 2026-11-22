@@ -146,6 +146,8 @@ pub mod transcript_capture;
 #[cfg(windows)]
 pub mod transcript_capture_windows;
 pub mod tray_icons;
+#[cfg(windows)]
+pub mod voice_priority;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
 pub mod vokie;
 /// 系统唤醒的进程内代次：BLE 工作线程发布、应用侧常驻对账消费（issue #264）。
@@ -171,6 +173,9 @@ pub struct PlatformSnapshot {
     pub audio: AudioSnapshot,
     pub raw_input: RawInputSnapshot,
     pub button_mapping: ButtonMappingSnapshot,
+    /// 「语音优先」运行时状态（2026-11-22）。旧快照没有该字段时回落 Off。
+    #[serde(default)]
+    pub voice_priority: VoicePrioritySnapshot,
 }
 
 #[cfg(windows)]
@@ -303,6 +308,40 @@ pub enum VoiceAudioHealth {
     Full,
     /// 样本率明显低于满速：声音没有完整送到输入法。
     Degraded,
+}
+
+/// 「语音优先」运行状态（2026-11-22，仅语音流期间自动生效）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoicePriorityState {
+    /// 不在语音流中，键鼠未被改动。
+    #[default]
+    Off,
+    /// 正在发现/切换键鼠连接参数。
+    Applying,
+    /// 语音流期间已让出：至少一只 BLE HID 键鼠处于 Balanced。
+    Active,
+    /// 本次切换失败；语音主链路不受影响，下一次语音重试。
+    Failed,
+}
+
+impl VoicePriorityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Applying => "applying",
+            Self::Active => "active",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePrioritySnapshot {
+    pub state: VoicePriorityState,
+    /// 当前已让出时隙的 BLE HID 设备数（遥控器除外）。
+    pub yielded_devices: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,6 +615,9 @@ pub struct WindowsPlatform {
     key_gate: Arc<key_gate::KeyGate>,
     #[cfg(windows)]
     runtime: Arc<ble::BleRuntime>,
+    /// 「语音优先」：遥控器连接期间让 BLE HID 键鼠让出连接事件（2026-11-22）。
+    #[cfg(windows)]
+    voice_priority: Arc<voice_priority::VoicePriorityRuntime>,
     #[cfg(windows)]
     audio: Arc<audio::AudioRuntime>,
     #[cfg(windows)]
@@ -696,6 +738,9 @@ impl Default for WindowsPlatform {
                 Arc::clone(&gain_db),
                 Arc::clone(&transcript_capture),
             ));
+            let voice_priority = Arc::new(voice_priority::VoicePriorityRuntime::new(
+                runtime.state_handle(),
+            ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
                 button_mapping.sender(),
@@ -729,6 +774,7 @@ impl Default for WindowsPlatform {
                 voice_key_suppressor,
                 key_gate,
                 runtime,
+                voice_priority,
                 audio,
                 raw_input,
                 rc003_bridge,
@@ -891,6 +937,19 @@ impl WindowsPlatform {
         }
     }
 
+    /// 当前「语音优先」运行状态；非 Windows 恒为 Off。该能力只在语音流期间自动生效，
+    /// 没有用户开关。
+    pub fn voice_priority_snapshot(&self) -> VoicePrioritySnapshot {
+        #[cfg(windows)]
+        {
+            self.voice_priority.snapshot()
+        }
+        #[cfg(not(windows))]
+        {
+            VoicePrioritySnapshot::default()
+        }
+    }
+
     /// 退出前的优雅关闭（2026-09-16）：关闭 BLE 会话并**在有界时间内等待其完成**
     /// （`ble_session_cleanup` 落盘）后才返回。
     ///
@@ -899,7 +958,18 @@ impl WindowsPlatform {
     /// （见 `graceful_exit` 模块头部的证据）。
     #[cfg(windows)]
     pub fn shutdown_ble_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {
-        self.runtime.shutdown_blocking(timeout)
+        // 先恢复被「语音优先」改过的键鼠参数，再关闭 BLE 会话；两步各自有界。
+        // 恢复最多等 800 ms；即使工作线程正忙，进程退出关闭句柄也会让 HID 栈
+        // 回到默认参数（2026-11-22 实测），不占用 BLE 清理的预算。
+        let restore_timeout = std::time::Duration::from_millis(800).min(timeout);
+        let restore_started = std::time::Instant::now();
+        if let Err(error) = self.voice_priority.shutdown_blocking(restore_timeout) {
+            gatt_note(format!(
+                "voice_priority action=shutdown phase=completed terminal_result=failed reason={error}"
+            ));
+        }
+        let ble_timeout = timeout.saturating_sub(restore_started.elapsed());
+        self.runtime.shutdown_blocking(ble_timeout)
     }
 
     #[cfg(not(windows))]
@@ -1225,6 +1295,7 @@ impl WindowsPlatform {
                 audio,
                 raw_input,
                 button_mapping,
+                voice_priority: self.voice_priority_snapshot(),
             }
         }
 
@@ -1246,6 +1317,7 @@ impl WindowsPlatform {
                 },
                 raw_input: self.raw_input_snapshot(),
                 button_mapping: self.button_mapping_snapshot(),
+                voice_priority: self.voice_priority_snapshot(),
             }
         }
     }

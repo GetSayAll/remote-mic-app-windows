@@ -125,6 +125,52 @@ Windows System 日志：2026-10-24 18:59:47，`BTHUSB` 事件 8 记录一支远�
 - **deferred**：真机上重新连回 OKR250 制造降级，确认连接页与向导第⑤步提示出现；
   本轮为避免再次干扰用户设备，只做了自动化与组件测试。
 
+## 2026-11-22 复测：三链路调度与提示修订
+
+- 现场：SayAll 1.9.3（`source_revision=c01fb4b…`），Windows 25H2 build 26200，
+  MediaTek 蓝牙适配器；遥控器、蓝牙键盘、蓝牙鼠标同时 Connected。
+- 只读取回的连接参数（公开 `BluetoothLEDevice.GetConnectionParameters`，未写入任何设备）：
+  遥控器 `interval_units=12`（15 ms）、`latency_events=0`、`timeout_units=200`（2 s）；
+  键盘与鼠标均为 `interval_units=6`（7.5 ms）、`latency_events=44`、`timeout_units=216`。
+  三链路共用同一适配器；遥控器语音会话稳定在 5.2–5.6 k samples/s，正好约为满速的 1/3。
+- 结论：这是适配器在多条 BLE 链路之间轮流调度造成的时隙不足，不是应用漏收。
+  `ThroughputOptimized` 已经提交并生效（15 ms / 延迟 0），MTU 与音频队列均正常。
+- **2026-11-22 追加 A/B（passed）**：公开 `BluetoothLEDevice.RequestPreferredConnectionParameters`
+  可以临时修改键盘/鼠标的连接参数。只降键盘（180 ms）或只降鼠标（60 ms）都无效
+  （4.2–5.0 k/s）；**两只同时降到 `Balanced` 60 ms 或 `PowerOptimized` 180 ms 后，
+  遥控器语音恢复到 15.4–15.5 k/s 满速**；结束后 `ThroughputOptimized` + 释放句柄，
+  键鼠回到 7.5 ms / 延迟 44。完整数据见
+  [2026-11-22-bt-hid-yield-balanced.md](../docs/investigations/2026-11-22-bt-hid-yield-balanced.md)。
+- 产品处置（2026-11-22）：不再把“关闭或移开其他蓝牙设备”作为要求。
+  连接页标题改为「最近一次语音可能不完整」，正文说明系统会轮流使用蓝牙、
+  遥控器只分到一部分声音，并说明语音输入期间会自动让出键盘、鼠标的蓝牙时间、
+  结束后恢复；也可以把键盘、鼠标改用 USB 接收器或有线连接。提示增加
+  「忽略此提醒」，本次降级期间不再打扰。向导第⑥步复用同一句正文。
+- **软件层「语音优先」已实现（2026-11-22，自动、仅语音流期间）**：没有用户开关。
+  遥控器 `Streaming` 时，运行时把已连接的 BLE HID 键鼠切到 `Balanced`（60 ms）；
+  语音结束、断开或退出立即请求 `ThroughputOptimized` 并释放句柄。运行时探针实测：
+  模拟 `Streaming` 时 `state=active yielded=2`，切回 `Ready` 后 `state=off yielded=0`。
+- **中间实现的历史证据（已废弃）**：曾做成「默认关闭、降级后一键开启」的常驻设置。
+  1.9.3 本地测试包安装后，RC003 + 蓝牙键盘 + 鼠标，`source_revision=2813b07`；
+  开启后 `voice_priority action=set enabled=true` → `state=applying` →
+  `candidates=2 yielded=2` / `state=active`；键鼠 `48/0/400`；两次语音会话
+  `voice_audio_rate result=full rate_hz=15211`（2.761 s）与 `14193`（2.046 s）。
+  该包为本地测试构建，不是发布包；机制证据保留，产品行为已被自动实现取代。
+- 验证：前端 45 个测试文件、719 passed / 10 skipped、`vue-tsc --noEmit` +
+  `vite build` 通过；Rust `cargo test --workspace` 通过（含 `voice_priority`
+  2 passed）、`cargo fmt --all -- --check` 通过、
+  `cargo check -p sayall-windows-app --features runtime-simulation` 通过；
+  `scripts/ci-preflight.ps1` 7/7 通过。
+- **1.9.4 本地测试包自动实现实机验证（passed）**：RC003 + 蓝牙键盘 + 鼠标；
+  连接页已移除「语音优先」区块（无开关、无一键按钮、无只读说明）。
+  两次语音会话 2.658 s / 15.759 s，`voice_audio_rate result=full` 14,898 /s、
+  15,777 /s；`state=applying` 在语音开始后 76–118 ms，`apply` 成功在 146–214 ms，
+  音频流在 145–195 ms 开始；独立只读探针在会话期间读到键鼠 `48/0/400`，松开后
+  `restore` 成功、`state=off`，键鼠恢复 `6/44/216`。短会话整段 full，未观察到
+  “前 1–2 s 降级”。该包为本地测试构建，不是发布包。
+- **deferred**：RC001、其它适配器、键鼠耗电变化；本轮已安装包验证为 RC003 +
+  本机 MediaTek 适配器。
+
 ## 隐私检查
 
 未包含蓝牙地址、HID 路径、用户名、语音内容或凭据；只使用相对时间、会话号、

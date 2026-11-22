@@ -1,7 +1,7 @@
 // English strings for lib. Key = exact Chinese source passed to t().
 export default {
-  "最近一次语音的声音没有完整送到输入工具，文字可能没有出现。请关闭或移开同时连接的其他蓝牙设备（键盘、鼠标、耳机等），再试一次。":
-    "Audio from the last voice session did not reach the input tool completely, so text may not appear. Turn off or move away other connected Bluetooth devices (keyboard, mouse, headphones, and so on), then try again.",
+  "电脑同时连接了键盘、鼠标等蓝牙设备时，会轮流使用蓝牙，遥控器这次只分到一部分声音，文字可能没有出现。不用关闭其他设备：语音输入期间会自动让出键盘、鼠标的蓝牙时间，结束后恢复；如果这次仍不完整，可以再试一次，或把键盘、鼠标改用 USB 接收器或有线连接。":
+    "When your computer is also connected to a keyboard, mouse, or other Bluetooth devices, it shares Bluetooth time between them. This time the remote only got part of the audio, so text may not appear. You do not need to turn off other devices: during voice input the keyboard and mouse automatically yield Bluetooth time, then recover. If this session is still incomplete, try again, or connect the keyboard and mouse with a USB receiver or cable.",
   // 鼠标动作 / 动作摘要
   "左键单击": "Left click",
   "右键单击": "Right click",

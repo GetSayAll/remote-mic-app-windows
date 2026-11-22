@@ -918,16 +918,34 @@ const virtualCableEndpoints = computed(() =>
 const virtualCableInstalled = computed(() => virtualCableEndpoints.value.length > 0);
 
 /**
- * 蓝牙音频不完整提示（2026-10-24 现场）：只在**后端判定为 degraded** 时出现。
- * 满速、未判定、老快照都不提示（`normalizeVoiceAudioHealth` 回落 unknown）。
+ * 蓝牙共存提示（2026-10-24 现场，2026-11-22 改为可关闭）：只在**后端判定为
+ * degraded** 时出现；满速、未判定、老快照都不提示（`normalizeVoiceAudioHealth`
+ * 回落 unknown）。提示不再要求用户关闭其他蓝牙设备——适配器调度是平台边界，
+ * 应用只说明现象与可选做法。用户忽略后，本次降级期间不再打扰；回到满速后
+ * 再次降级会重新提示。
  */
-const voiceAudioDegradedNote = computed(() =>
-  shouldShowVoiceAudioDegraded(
+const voiceAudioDegradedDismissed = ref(false);
+watch(
+  () => connection.value.voiceAudioHealth,
+  (health) => {
+    if (health !== "degraded") {
+      voiceAudioDegradedDismissed.value = false;
+    }
+  },
+);
+const voiceAudioDegradedNote = computed(() => {
+  if (voiceAudioDegradedDismissed.value) {
+    return null;
+  }
+  return shouldShowVoiceAudioDegraded(
     normalizeVoiceAudioHealth(connection.value.voiceAudioHealth),
   )
     ? voiceAudioDegradedText()
-    : null,
-);
+    : null;
+});
+function dismissVoiceAudioDegradedNote(): void {
+  voiceAudioDegradedDismissed.value = true;
+}
 
 const phaseTone = computed(() => {
   if (connection.value.phase === "failed") return "error";
@@ -1400,8 +1418,15 @@ onUnmounted(() => {
         class="info-callout warning callout-small voice-audio-callout"
         role="status"
       >
-        <strong>{{ t("蓝牙音频不完整") }}</strong>
+        <strong>{{ t("最近一次语音可能不完整") }}</strong>
         <p>{{ voiceAudioDegradedNote }}</p>
+        <button
+          class="voice-audio-dismiss"
+          type="button"
+          @click="dismissVoiceAudioDegradedNote"
+        >
+          {{ t("忽略此提醒") }}
+        </button>
       </div>
 
       <div class="setup-columns">

@@ -684,6 +684,12 @@ impl BleRuntime {
         self.decorate_snapshot(lock(&self.state).clone())
     }
 
+    /// 供「语音优先」运行时只读判断遥控器是否 Ready；不暴露写入口，
+    /// 也不把地址或设备身份带出 BLE 层。
+    pub(crate) fn state_handle(&self) -> Arc<Mutex<ConnectionSnapshot>> {
+        Arc::clone(&self.state)
+    }
+
     pub fn connect(&self, device_id: String) -> Result<ConnectionSnapshot, PlatformError> {
         self.request(|reply| WorkerMessage::Connect { device_id, reply })
     }

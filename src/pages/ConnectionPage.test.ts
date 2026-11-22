@@ -1265,6 +1265,7 @@ describe("connection page rc003 capture switch", () => {
 
   // 2026-10-24 现场：遥控器 + 另一支 BLE 键盘共存时，音频只剩约 1/3，
   // 豆包语音条出现却写不出字。连接页要给一句能执行的提示，不能只留在日志里。
+  // 2026-11-22：提示不再要求关闭其他设备，并且可以忽略。
   it("最近一次语音音频降级：连接页显示蓝牙共存提示（满速时不显示）", async () => {
     mocks.getConnectionSnapshot.mockResolvedValue({
       ...emptyConnection,
@@ -1273,8 +1274,9 @@ describe("connection page rc003 capture switch", () => {
     });
     let wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.text()).toContain("蓝牙音频不完整");
-    expect(wrapper.text()).toContain("关闭或移开同时连接的其他蓝牙设备");
+    expect(wrapper.text()).toContain("最近一次语音可能不完整");
+    expect(wrapper.text()).toContain("不用关闭其他设备");
+    expect(wrapper.text()).not.toContain("关闭或移开同时连接的其他蓝牙设备");
     wrapper.unmount();
 
     mocks.getConnectionSnapshot.mockResolvedValue({
@@ -1284,7 +1286,22 @@ describe("connection page rc003 capture switch", () => {
     });
     wrapper = mount(ConnectionPage, { props: { runtime } });
     await flushPromises();
-    expect(wrapper.text()).not.toContain("蓝牙音频不完整");
+    expect(wrapper.text()).not.toContain("最近一次语音可能不完整");
+    wrapper.unmount();
+  });
+
+  it("蓝牙共存提示可以忽略（2026-11-22 用户反馈：不要反复要求关闭设备）", async () => {
+    mocks.getConnectionSnapshot.mockResolvedValue({
+      ...emptyConnection,
+      phase: "ready",
+      voiceAudioHealth: "degraded",
+    });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("最近一次语音可能不完整");
+
+    await wrapper.find(".voice-audio-dismiss").trigger("click");
+    expect(wrapper.text()).not.toContain("最近一次语音可能不完整");
     wrapper.unmount();
   });
 

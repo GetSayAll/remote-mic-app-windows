@@ -77,6 +77,10 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 last_error: None,
                 last_focus: None,
             },
+            voice_priority: sayall_windows::VoicePrioritySnapshot {
+                state: sayall_windows::VoicePriorityState::Active,
+                yielded_devices: 2,
+            },
         },
         "pairedRemotes": [
             PairedRemote {

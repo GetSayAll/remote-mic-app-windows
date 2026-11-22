@@ -566,6 +566,14 @@ export interface ConnectionSnapshot {
 /** 与 Rust `VoiceAudioHealth` 逐字对应。 */
 export type VoiceAudioHealth = "unknown" | "full" | "degraded";
 
+/** 与 Rust `VoicePriorityState` 逐字对应（2026-11-22，仅语音流期间自动生效）。 */
+export type VoicePriorityState = "off" | "applying" | "active" | "failed";
+
+export interface VoicePrioritySnapshot {
+  state: VoicePriorityState;
+  yieldedDevices: number;
+}
+
 export interface PlatformSnapshot {
   platform: string;
   windowsApiAvailable: boolean;
@@ -579,6 +587,8 @@ export interface PlatformSnapshot {
   audio: AudioSnapshot;
   rawInput: RawInputSnapshot;
   buttonMapping: ButtonMappingSnapshot;
+  /** 语音优先运行时状态；旧快照没有该字段时按关闭处理。 */
+  voicePriority?: VoicePrioritySnapshot;
 }
 
 export interface RuntimeSnapshot {
