@@ -347,6 +347,7 @@ afterEach(() => {
       // 用例里已自行卸载：忽略重复卸载。
     }
   }
+  vi.useRealTimers();
 });
 
 beforeEach(() => {
@@ -2294,6 +2295,24 @@ describe("buttons mapping page", () => {
         throw new Error("开关没有采用持久化的真值（应为关）");
       }
     });
+  });
+
+  it("底部状态提示显示 8 秒后自动关闭", async () => {
+    const wrapper = await mountPage();
+    const master = toggleRowByText(wrapper, "启用自定义按键功能").find("input");
+    vi.useFakeTimers();
+    await master.setValue(false);
+    await flushPromises();
+    expect(wrapper.find(".mapping-status").text()).toContain("总开关已更新");
+
+    vi.advanceTimersByTime(7_999);
+    await flushPromises();
+    expect(wrapper.find(".mapping-status").exists()).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    await flushPromises();
+    expect(wrapper.find(".mapping-status").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("renders the lock switch immediately but keeps it disabled until the persisted value is loaded", async () => {

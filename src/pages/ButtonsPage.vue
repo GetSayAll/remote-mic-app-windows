@@ -341,7 +341,34 @@ const lastFired = ref<FiredGesture | null>(null);
 const firedFlash = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const mappingSnapshot = ref<ButtonMappingSnapshot | null>(null);
 const busy = ref(false);
-const statusMessage = ref<string | null>(null);
+/**
+ * 页面底部状态提示：所有写入都经过 setter，覆盖旧提示时重置计时，
+ * 8 秒后自动清空（与组合动作页一致；2026-11-22 Andy 要求）。
+ * 错误也走同一条路径，避免提示永久占住页面底部。
+ */
+const statusMessageText = ref<string | null>(null);
+const STATUS_VISIBLE_MS = 8_000;
+let statusTimer: number | null = null;
+
+function clearStatusTimer(): void {
+  if (statusTimer !== null) {
+    window.clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+}
+
+const statusMessage = computed<string | null>({
+  get: () => statusMessageText.value,
+  set: (message) => {
+    clearStatusTimer();
+    statusMessageText.value = message;
+    if (!message) return;
+    statusTimer = window.setTimeout(() => {
+      statusMessageText.value = null;
+      statusTimer = null;
+    }, STATUS_VISIBLE_MS);
+  },
+});
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
 /** start 返回的 preheld 键尚未全部松开：后端吞键但不投递边沿，必须提示用户。 */
@@ -457,6 +484,7 @@ function releasePageResources(): void {
   snapshotTimer = null;
   if (flashTimer !== null) window.clearTimeout(flashTimer);
   flashTimer = null;
+  clearStatusTimer();
   resizeObserver?.disconnect();
   resizeObserver = null;
 }
