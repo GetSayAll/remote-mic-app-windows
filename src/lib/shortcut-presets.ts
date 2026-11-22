@@ -101,6 +101,8 @@ export const SHORTCUT_PRESET_GROUPS: ShortcutPresetGroup[] = [
     // OK 确认、返回取消；不是一次性 Alt+Tab 组合。
     preset("切换应用", ["alt", "tab"], "Alt + Tab", "app_switcher"),
     preset("显示桌面", ["left_windows", "d"], "Win + D"),
+    // 2026-11-22 Andy：Win+D 右侧增加 Alt+F4，用于关闭当前窗口。
+    preset("关闭当前窗口", ["alt", "f4"], "Alt + F4"),
     preset("关闭窗口", ["control", "w"]),
     preset("锁定", ["left_windows", "l"], "Win + L"),
     preset("搜索", ["left_windows", "s"], "Win + S"),

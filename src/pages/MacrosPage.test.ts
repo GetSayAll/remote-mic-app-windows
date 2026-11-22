@@ -636,6 +636,7 @@ describe("组合动作页 · 编辑向导", () => {
     const texts = chips.map((chip) => chip.text());
     expect(texts).toContain("Alt + Tab");
     expect(texts).toContain("Win + D");
+    expect(texts).toContain("Alt + F4");
     expect(texts).toContain("Ctrl + W");
     expect(texts).not.toContain("切换应用");
     expect(texts).not.toContain("显示桌面");
@@ -646,6 +647,7 @@ describe("组合动作页 · 编辑向导", () => {
       "切换应用：用左、右键选择，按“确定”确认，返回取消",
     );
     expect(chip("Win + D").attributes("title")).toBe("显示桌面");
+    expect(chip("Alt + F4").attributes("title")).toBe("关闭当前窗口");
 
     await chip("Alt + Tab").trigger("click");
     await flushPromises();
@@ -654,6 +656,10 @@ describe("组合动作页 · 编辑向导", () => {
     await chip("Win + D").trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Win + D");
+
+    await chip("Alt + F4").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="chord-display"]').text()).toContain("Alt + F4");
   });
 
   it("离开组合动作页时停止仍在进行的录入", async () => {

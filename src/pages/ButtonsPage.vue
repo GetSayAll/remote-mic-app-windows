@@ -262,21 +262,31 @@ function arrowPolygon(placement: Placement): string {
   return `${tip.x.toFixed(1)},${tip.y.toFixed(1)} ${baseX.toFixed(1)},${(tip.y - 4).toFixed(1)} ${baseX.toFixed(1)},${(tip.y + 4).toFixed(1)}`;
 }
 
-/** 按键图标：SVG path 组（24x24 视窗），形状对齐 Mac RemoteMappingCanvas
- * 的 SF Symbols（power/chevron/circle.circle/uturn/speaker/house/line.3/tv）。 */
+/** 按键图标：SVG path 组（24x24 视窗）。与键位方案页的 ButtonKeyIcon 保持同一套
+ * 形状与 1.8 描边；menu/tv/语音键在键位方案页没有对应项，沿用原图标。 */
 const buttonIcons: Record<RemoteButton, string[]> = {
-  power: ["M12 3v8", "M7.2 6.4a7 7 0 1 0 9.6 0"],
-  up: ["M6 14.5l6-6 6 6"],
-  down: ["M6 9.5l6 6 6-6"],
-  left: ["M14.5 6l-6 6 6 6"],
-  right: ["M9.5 6l6 6-6 6"],
-  ok: ["M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z", "M12 10a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8z"],
-  back: ["M9 13.5L4 8.5l5-5", "M4 8.5h10.2a5.5 5.5 0 0 1 0 11H11"],
-  home: ["M3.5 11.2L12 3.5l8.5 7.7", "M6 9.5V20.5h12V9.5", "M10 20.5v-5.5h4v5.5"],
+  power: ["M12 3v9", "M6.4 6.4a8 8 0 1 0 11.2 0"],
+  up: ["M12 19V5", "M6 11l6-6 6 6"],
+  down: ["M12 5v14", "M6 13l6 6 6-6"],
+  left: ["M19 12H5", "M11 6l-6 6 6 6"],
+  right: ["M5 12h14", "M13 6l6 6-6 6"],
+  ok: [
+    "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
+    "M8.2 12.3l2.4 2.4 5.2-5.4",
+  ],
+  back: ["M9 7L4 12l5 5", "M4 12h9.5a5.5 5.5 0 0 1 5.5 5.5V19"],
+  home: ["M3.4 11.4L12 4l8.6 7.4", "M5.5 10.5V20h13v-9.5", "M10 20v-5h4v5"],
   menu: ["M4 6h16", "M4 12h16", "M4 18h16"],
   tv: ["M3 7.5h18a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8.5a1 1 0 0 1 1-1z", "M17 3l-5 4-5-4"],
-  volume_up: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
-  volume_down: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15 12h5.5"],
+  volume_up: [
+    "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+    "M15 9a4.2 4.2 0 0 1 0 6",
+    "M17.6 6.4a8 8 0 0 1 0 11.2",
+  ],
+  volume_down: [
+    "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+    "M15 9a4.2 4.2 0 0 1 0 6",
+  ],
   volume_mute: ["M11 5.5L6.5 9H3v6h3.5L11 18.5z", "M15.5 9.5l5 5", "M20.5 9.5l-5 5"],
 };
 /** 语音键图标（Mac mic.fill：实心话筒）。 */
@@ -341,7 +351,34 @@ const lastFired = ref<FiredGesture | null>(null);
 const firedFlash = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const mappingSnapshot = ref<ButtonMappingSnapshot | null>(null);
 const busy = ref(false);
-const statusMessage = ref<string | null>(null);
+/**
+ * 页面底部状态提示：所有写入都经过 setter，覆盖旧提示时重置计时，
+ * 8 秒后自动清空（与组合动作页一致；2026-11-22 Andy 要求）。
+ * 错误也走同一条路径，避免提示永久占住页面底部。
+ */
+const statusMessageText = ref<string | null>(null);
+const STATUS_VISIBLE_MS = 8_000;
+let statusTimer: number | null = null;
+
+function clearStatusTimer(): void {
+  if (statusTimer !== null) {
+    window.clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+}
+
+const statusMessage = computed<string | null>({
+  get: () => statusMessageText.value,
+  set: (message) => {
+    clearStatusTimer();
+    statusMessageText.value = message;
+    if (!message) return;
+    statusTimer = window.setTimeout(() => {
+      statusMessageText.value = null;
+      statusTimer = null;
+    }, STATUS_VISIBLE_MS);
+  },
+});
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
 /** start 返回的 preheld 键尚未全部松开：后端吞键但不投递边沿，必须提示用户。 */
@@ -457,6 +494,7 @@ function releasePageResources(): void {
   snapshotTimer = null;
   if (flashTimer !== null) window.clearTimeout(flashTimer);
   flashTimer = null;
+  clearStatusTimer();
   resizeObserver?.disconnect();
   resizeObserver = null;
 }
@@ -503,6 +541,16 @@ function actionCellTitle(button: RemoteButton, trigger: ButtonTrigger): string {
     trigger: buttonTriggerLabel(trigger),
     summary: actionSummary(actionOf(button, trigger)),
   });
+}
+
+/**
+ * 方向键在系统字体里只有细线字形，和同一行的加粗文字放一起明显偏细。
+ * 格子内容命中这几个字形时加一层极细描边（见 styles.css）。
+ */
+const DIRECTION_SUMMARIES = new Set(["↑", "↓", "←", "→"]);
+
+function isDirectionSummary(summary: string): boolean {
+  return DIRECTION_SUMMARIES.has(summary);
 }
 
 /** 当前编辑格的打开应用目标（非 open_app 动作返回 null，模板类型收窄用）。 */
@@ -2227,7 +2275,7 @@ onUnmounted(() => {
     </header>
     <component :is="commonPhraseEditor" />
   </section>
-  <section v-else class="buttons-page">
+  <section v-else class="buttons-page buttons-page-main">
     <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
          （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
@@ -2410,7 +2458,7 @@ onUnmounted(() => {
               :key="index"
               :d="path"
               stroke="currentColor"
-              stroke-width="1.9"
+              stroke-width="1.8"
               stroke-linecap="round"
               stroke-linejoin="round"
             />
@@ -2438,7 +2486,15 @@ onUnmounted(() => {
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
-            <span>{{ actionSummary(actionOf(placement.button, trigger)) }}</span>
+            <span
+              :class="{
+                'direction-arrow': isDirectionSummary(
+                  actionSummary(actionOf(placement.button, trigger)),
+                ),
+              }"
+            >
+              {{ actionSummary(actionOf(placement.button, trigger)) }}
+            </span>
           </button>
         </div>
       </article>
@@ -2456,7 +2512,7 @@ onUnmounted(() => {
               :key="index"
               :d="path"
               stroke="currentColor"
-              stroke-width="1.9"
+              stroke-width="1.8"
               stroke-linecap="round"
               stroke-linejoin="round"
             />
@@ -2869,56 +2925,70 @@ onUnmounted(() => {
       </p>
     </article>
 
-    <footer class="card mapping-footer">
-      <div class="mapping-footer-status">
-        <span class="status-dot" :class="rawInput?.phase === 'ready' ? 'success' : 'pending'"></span>
-        <span>{{ phaseLabel(rawInput?.phase) }}</span>
-        <button
-          v-if="rawInput?.phase === 'ready' || rawInput?.phase === 'stopped' || rawInput?.phase === 'failed'"
-          class="secondary-button footer-listener-toggle"
-          type="button"
-          :disabled="busy"
-          @click="toggleListener"
-        >
-          {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
-        </button>
-        <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
-      </div>
-      <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
-        <span>{{ t("锁定当前按键") }}</span>
-        <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
-        <input
-          v-model="lockSelection"
-          type="checkbox"
-          class="toggle-input"
-          :disabled="!lockSelectionReady"
-        />
-      </label>
-      <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
-      <div class="button-row">
-        <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
-          {{ t("保存配置") }}
-        </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
-          {{ t("导入配置…") }}
-        </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
-          {{ t("导出配置…") }}
-        </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
-          {{ t("恢复默认") }}
-        </button>
-      </div>
-    </footer>
+    <div class="mapping-bottom">
+      <footer class="card mapping-footer">
+        <div class="mapping-footer-status">
+          <span class="status-dot" :class="rawInput?.phase === 'ready' ? 'success' : 'pending'"></span>
+          <span>{{ phaseLabel(rawInput?.phase) }}</span>
+          <button
+            v-if="rawInput?.phase === 'ready' || rawInput?.phase === 'stopped' || rawInput?.phase === 'failed'"
+            class="secondary-button footer-listener-toggle"
+            type="button"
+            :disabled="busy"
+            @click="toggleListener"
+          >
+            {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
+          </button>
+          <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
+        </div>
+        <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
+          <span>{{ t("锁定当前按键") }}</span>
+          <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
+          <input
+            v-model="lockSelection"
+            type="checkbox"
+            class="toggle-input"
+            :disabled="!lockSelectionReady"
+          />
+        </label>
+        <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
+        <div class="button-row">
+          <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
+            {{ t("保存配置") }}
+          </button>
+          <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
+            {{ t("导入配置…") }}
+          </button>
+          <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
+            {{ t("导出配置…") }}
+          </button>
+          <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
+            {{ t("恢复默认") }}
+          </button>
+        </div>
+      </footer>
 
-    <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
-    <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
+      <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
+      <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
+    </div>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false; unsupportedReplaceArmed = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
 </template>
 
 <style scoped>
+/* 2026-11-22 Andy：内容不足一屏时把底部操作栏贴到面板底部，避免状态提示
+   自动关闭后底部留下大块空白。 */
+.buttons-page-main {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+}
+.mapping-bottom {
+  margin-top: auto;
+  flex: 0 0 auto;
+}
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }

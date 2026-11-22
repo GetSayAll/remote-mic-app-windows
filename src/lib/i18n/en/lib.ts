@@ -115,6 +115,7 @@ export default {
     "Switch Apps: use Left/Right to choose, OK to confirm, Back to cancel",
   "显示桌面": "Show Desktop",
   "关闭窗口": "Close Window",
+  "关闭当前窗口": "Close Current Window",
   "锁定": "Lock",
   "搜索": "Search",
   "截图": "Screenshot",

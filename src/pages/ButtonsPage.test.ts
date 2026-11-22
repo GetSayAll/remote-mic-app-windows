@@ -347,6 +347,7 @@ afterEach(() => {
       // 用例里已自行卸载：忽略重复卸载。
     }
   }
+  vi.useRealTimers();
 });
 
 beforeEach(() => {
@@ -2296,6 +2297,27 @@ describe("buttons mapping page", () => {
     });
   });
 
+  it("底部状态提示显示 8 秒后自动关闭", async () => {
+    const wrapper = await mountPage();
+    const bottom = wrapper.find(".mapping-bottom");
+    expect(bottom.find(".mapping-footer").exists()).toBe(true);
+    const master = toggleRowByText(wrapper, "启用自定义按键功能").find("input");
+    vi.useFakeTimers();
+    await master.setValue(false);
+    await flushPromises();
+    expect(bottom.find(".mapping-status").text()).toContain("总开关已更新");
+
+    vi.advanceTimersByTime(7_999);
+    await flushPromises();
+    expect(bottom.find(".mapping-status").exists()).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    await flushPromises();
+    expect(bottom.find(".mapping-status").exists()).toBe(false);
+    expect(bottom.find(".mapping-footer").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("renders the lock switch immediately but keeps it disabled until the persisted value is loaded", async () => {
     let releaseLock: (value: boolean) => void = () => {};
     vi.mocked(getLockMappingSelection).mockImplementationOnce(
@@ -2519,6 +2541,7 @@ describe("buttons mapping page", () => {
 
     expect(texts).toContain("Ctrl + C");
     expect(texts).toContain("Alt + Tab");
+    expect(texts).toContain("Alt + F4");
     expect(texts).toContain("Backspace");
     expect(texts).toContain("Win + Shift + S");
     expect(texts).not.toContain("复制");
@@ -2528,6 +2551,61 @@ describe("buttons mapping page", () => {
     expect(chips.find((chip) => chip.text() === "Alt + Tab")!.attributes("title")).toBe(
       "切换应用：用左、右键选择，按“确定”确认，返回取消",
     );
+    expect(chips.find((chip) => chip.text() === "Alt + F4")!.attributes("title")).toBe(
+      "关闭当前窗口",
+    );
+  });
+
+  it("方向键箭头用加粗描边，普通文字不受影响", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["up"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+        ok: {
+          single: { type: "shortcut", chord: { keys: ["enter"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const card = (label: string) =>
+      wrapper.findAll(".mapping-card").find((item) => item.text().includes(label))!;
+    const upSummary = card("上").findAll(".mapping-cell")[0]!.find("span");
+    expect(upSummary.text()).toBe("↑");
+    expect(upSummary.classes()).toContain("direction-arrow");
+
+    const enterSummary = card("确定").findAll(".mapping-cell")[0]!.find("span");
+    expect(enterSummary.text()).toBe("Enter");
+    expect(enterSummary.classes()).not.toContain("direction-arrow");
+  });
+
+  it("音量±与 OK 图标与键位方案页一致", async () => {
+    const wrapper = await mountPage();
+    const iconPaths = (label: string) =>
+      wrapper
+        .findAll(".mapping-card")
+        .find((card) => card.find(".mapping-card-title strong").text() === label)!
+        .findAll(".mapping-icon path")
+        .map((path) => path.attributes("d"));
+
+    expect(iconPaths("音量+")).toEqual([
+      "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+      "M15 9a4.2 4.2 0 0 1 0 6",
+      "M17.6 6.4a8 8 0 0 1 0 11.2",
+    ]);
+    expect(iconPaths("音量−")).toEqual([
+      "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
+      "M15 9a4.2 4.2 0 0 1 0 6",
+    ]);
+    expect(iconPaths("确定")).toEqual([
+      "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
+      "M8.2 12.3l2.4 2.4 5.2-5.4",
+    ]);
   });
 
   it("选中 Win 组合后摘要与卡片显示 Win，而不是左 Win", async () => {
