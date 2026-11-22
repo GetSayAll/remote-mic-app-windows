@@ -2255,7 +2255,7 @@ onUnmounted(() => {
     </header>
     <component :is="commonPhraseEditor" />
   </section>
-  <section v-else class="buttons-page">
+  <section v-else class="buttons-page buttons-page-main">
     <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
          （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
     <header class="page-header mapping-header">
@@ -2897,56 +2897,70 @@ onUnmounted(() => {
       </p>
     </article>
 
-    <footer class="card mapping-footer">
-      <div class="mapping-footer-status">
-        <span class="status-dot" :class="rawInput?.phase === 'ready' ? 'success' : 'pending'"></span>
-        <span>{{ phaseLabel(rawInput?.phase) }}</span>
-        <button
-          v-if="rawInput?.phase === 'ready' || rawInput?.phase === 'stopped' || rawInput?.phase === 'failed'"
-          class="secondary-button footer-listener-toggle"
-          type="button"
-          :disabled="busy"
-          @click="toggleListener"
-        >
-          {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
-        </button>
-        <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
-      </div>
-      <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
-        <span>{{ t("锁定当前按键") }}</span>
-        <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
-        <input
-          v-model="lockSelection"
-          type="checkbox"
-          class="toggle-input"
-          :disabled="!lockSelectionReady"
-        />
-      </label>
-      <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
-      <div class="button-row">
-        <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
-          {{ t("保存配置") }}
-        </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
-          {{ t("导入配置…") }}
-        </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
-          {{ t("导出配置…") }}
-        </button>
-        <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
-          {{ t("恢复默认") }}
-        </button>
-      </div>
-    </footer>
+    <div class="mapping-bottom">
+      <footer class="card mapping-footer">
+        <div class="mapping-footer-status">
+          <span class="status-dot" :class="rawInput?.phase === 'ready' ? 'success' : 'pending'"></span>
+          <span>{{ phaseLabel(rawInput?.phase) }}</span>
+          <button
+            v-if="rawInput?.phase === 'ready' || rawInput?.phase === 'stopped' || rawInput?.phase === 'failed'"
+            class="secondary-button footer-listener-toggle"
+            type="button"
+            :disabled="busy"
+            @click="toggleListener"
+          >
+            {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
+          </button>
+          <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
+        </div>
+        <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
+          <span>{{ t("锁定当前按键") }}</span>
+          <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
+          <input
+            v-model="lockSelection"
+            type="checkbox"
+            class="toggle-input"
+            :disabled="!lockSelectionReady"
+          />
+        </label>
+        <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
+        <div class="button-row">
+          <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
+            {{ t("保存配置") }}
+          </button>
+          <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
+            {{ t("导入配置…") }}
+          </button>
+          <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
+            {{ t("导出配置…") }}
+          </button>
+          <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
+            {{ t("恢复默认") }}
+          </button>
+        </div>
+      </footer>
 
-    <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
-    <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
+      <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
+      <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
+    </div>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false; unsupportedReplaceArmed = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
 </template>
 
 <style scoped>
+/* 2026-11-22 Andy：内容不足一屏时把底部操作栏贴到面板底部，避免状态提示
+   自动关闭后底部留下大块空白。 */
+.buttons-page-main {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+}
+.mapping-bottom {
+  margin-top: auto;
+  flex: 0 0 auto;
+}
 /* 全按键支持开关的终值就绪前占位符：与 toggle-input 同尺寸（34x20），
    避免就绪后开关创建时标题行宽度跳动（同「启动行为」页做法）。 */
 .toggle-placeholder { width: 34px; height: 20px; flex: none; }

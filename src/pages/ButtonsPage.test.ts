@@ -2299,19 +2299,22 @@ describe("buttons mapping page", () => {
 
   it("底部状态提示显示 8 秒后自动关闭", async () => {
     const wrapper = await mountPage();
+    const bottom = wrapper.find(".mapping-bottom");
+    expect(bottom.find(".mapping-footer").exists()).toBe(true);
     const master = toggleRowByText(wrapper, "启用自定义按键功能").find("input");
     vi.useFakeTimers();
     await master.setValue(false);
     await flushPromises();
-    expect(wrapper.find(".mapping-status").text()).toContain("总开关已更新");
+    expect(bottom.find(".mapping-status").text()).toContain("总开关已更新");
 
     vi.advanceTimersByTime(7_999);
     await flushPromises();
-    expect(wrapper.find(".mapping-status").exists()).toBe(true);
+    expect(bottom.find(".mapping-status").exists()).toBe(true);
 
     vi.advanceTimersByTime(1);
     await flushPromises();
-    expect(wrapper.find(".mapping-status").exists()).toBe(false);
+    expect(bottom.find(".mapping-status").exists()).toBe(false);
+    expect(bottom.find(".mapping-footer").exists()).toBe(true);
     wrapper.unmount();
   });
 
