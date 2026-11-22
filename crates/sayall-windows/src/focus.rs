@@ -803,6 +803,35 @@ pub fn best_recorded_index(
     Some(best_index)
 }
 
+/// 「只有矩形锚点」的记录在应用改版或切页后不再命中时的兜底。
+///
+/// 适用条件必须同时满足：
+/// - 记录没有 automationId / className / name / windowTitle / context token，
+///   只有 controlType + normalizedRect；
+/// - 当前扫描**恰好只有一个**候选，且 controlType 相同并通过学习门槛。
+///
+/// 只放开「唯一候选」这一种情况：WorkBuddy 5.11 的 composer 在聊天页贴底、
+/// 在新任务页居中，同一输入框的归一化矩形会从 `(0.051,0.811,0.885×0.077)`
+/// 变成 `(0.333,0.330,0.601×0.120)`（2026-11-22 现场）。带语义锚点的记录、
+/// 多个候选可能对应不同输入框的情况仍然交给 [`best_recorded_index`] 拒绝，
+/// 避免把语音结果送进用户没有指定的输入框。
+pub fn single_recorded_candidate_fallback(
+    candidates: &[FocusCandidate],
+    target: &RecordedFocusTarget,
+) -> Option<usize> {
+    let geometric_only = target.automation_id.is_empty()
+        && target.class_name.is_empty()
+        && target.name.is_empty()
+        && target.window_title.is_empty()
+        && target.context_tokens.is_empty()
+        && target.normalized_rect.is_some();
+    if !geometric_only || candidates.len() != 1 {
+        return None;
+    }
+    let candidate = &candidates[0];
+    (candidate.control_type == target.control_type && candidate.passes_learning_gate()).then_some(0)
+}
+
 /// 请求代次门控：新请求作废旧请求，迟到回调不得污染新状态。
 #[derive(Debug, Default)]
 pub struct FocusRequestGate {
@@ -1349,6 +1378,82 @@ mod tests {
             ..candidate.clone()
         };
         assert!(recorded_candidate_score(&far, &target).is_none());
+    }
+
+    #[test]
+    fn geometric_record_falls_back_to_single_candidate_after_layout_change() {
+        // WorkBuddy 2026-11-22 现场：11 日学习时 composer 在底部（归一化
+        // x=0.051,y=0.811,w=0.885,h=0.077），应用升级/切页后同一输入框出现在
+        // 页面中部（x=0.333,y=0.330,w=0.601,h=0.120）。记录只有矩形锚点，
+        // 精确匹配必然失败；唯一候选仍是同一类可编辑控件，允许退回它。
+        let target = RecordedFocusTarget {
+            control_type: "Edit".to_owned(),
+            normalized_rect: Some(NormalizedRect {
+                x: 0.051,
+                y: 0.811,
+                width: 0.885,
+                height: 0.077,
+            }),
+            ..Default::default()
+        }
+        .normalized()
+        .expect("匿名 Edit 有矩形锚点即可记录");
+        let moved = FocusCandidate {
+            normalized_rect: Some(NormalizedRect {
+                x: 0.333,
+                y: 0.330,
+                width: 0.601,
+                height: 0.120,
+            }),
+            focused: true,
+            has_text_pattern: true,
+            ..candidate("Edit", "")
+        };
+        assert_eq!(
+            best_recorded_index(std::slice::from_ref(&moved), &target),
+            None,
+            "先确认精确匹配仍会拒绝明显移动的矩形"
+        );
+        assert_eq!(
+            single_recorded_candidate_fallback(std::slice::from_ref(&moved), &target),
+            Some(0),
+            "唯一同类候选允许作为布局变化后的兜底"
+        );
+
+        // 多个候选时不得猜：仍交给精确匹配/分差规则，避免把焦点送错输入框。
+        assert_eq!(
+            single_recorded_candidate_fallback(&[moved.clone(), moved.clone()], &target),
+            None
+        );
+
+        // 类型不同、只读/密码、或记录本身带语义锚点时都不走这个兜底。
+        let document = FocusCandidate {
+            control_type: "Document".to_owned(),
+            ..moved.clone()
+        };
+        assert_eq!(
+            single_recorded_candidate_fallback(std::slice::from_ref(&document), &target),
+            None
+        );
+        let read_only = FocusCandidate {
+            read_only: Some(true),
+            ..moved.clone()
+        };
+        assert_eq!(
+            single_recorded_candidate_fallback(std::slice::from_ref(&read_only), &target),
+            None
+        );
+        let semantic = RecordedFocusTarget {
+            class_name: "tiptap ProseMirror".to_owned(),
+            ..target.clone()
+        }
+        .normalized()
+        .expect("有类名的记录仍有效");
+        assert_eq!(
+            single_recorded_candidate_fallback(std::slice::from_ref(&moved), &semantic),
+            None,
+            "带语义锚点的记录不得退回到任意唯一候选"
+        );
     }
 
     #[test]
