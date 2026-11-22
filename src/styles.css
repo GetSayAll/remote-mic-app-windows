@@ -364,6 +364,16 @@ button:disabled { cursor: default; opacity: 0.55; }
 .vb-cable-callout p { margin: 3px 0 0; }
 .voice-audio-callout strong { color: var(--warning-strong); }
 .voice-audio-callout p { margin: 3px 0 0; }
+.voice-audio-callout .voice-audio-dismiss {
+  margin-top: 5px;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.voice-audio-callout .voice-audio-dismiss:hover { text-decoration: underline; }
 .vb-cable-callout .button-row { flex: 0 0 auto; justify-content: flex-start; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 18px; }
 .metric-card span { display: block; color: var(--muted); font-size: 13px; }

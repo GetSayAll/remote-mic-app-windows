@@ -10,6 +10,7 @@ import type {
   RemoteButton,
   RemoteModel,
   VoiceAudioHealth,
+  VoicePriorityState,
   VoiceSessionState,
 } from "./bridge";
 
@@ -32,6 +33,12 @@ const voiceAudioHealths = [
   "full",
   "degraded",
 ] as const satisfies readonly VoiceAudioHealth[];
+const voicePriorityStates = [
+  "off",
+  "applying",
+  "active",
+  "failed",
+] as const satisfies readonly VoicePriorityState[];
 const remoteModels = ["rc001", "rc003", "unknown"] as const satisfies readonly RemoteModel[];
 const audioPhases = [
   "unconfigured",
@@ -110,6 +117,10 @@ describe("Rust and TypeScript IPC contract", () => {
                 ),
               },
       },
+      voicePriority: {
+        ...fixture.voicePriority,
+        state: memberOf(fixture.voicePriority.state, voicePriorityStates),
+      },
     };
 
     expect(platformSnapshot).toEqual(fixture);
@@ -126,6 +137,7 @@ describe("Rust and TypeScript IPC contract", () => {
       "audio",
       "rawInput",
       "buttonMapping",
+      "voicePriority",
     ]);
     expectExactKeys(platformSnapshot.connection, [
       "phase",
@@ -180,6 +192,10 @@ describe("Rust and TypeScript IPC contract", () => {
       "firedGestures",
       "lastFired",
       "lastError",
+    ]);
+    expectExactKeys(platformSnapshot.voicePriority!, [
+      "state",
+      "yieldedDevices",
     ]);
     expectNoSnakeCaseKeys(platformSnapshot);
     expect(platformSnapshot).not.toHaveProperty("connection.remote_model");

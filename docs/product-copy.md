@@ -876,3 +876,16 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   「遥控器连不上或者一直收不到按键」；触发条件、正文与三步操作不变。落点：
   `src/onboarding/steps/RemoteStep.vue`、`src/lib/i18n/en/onboarding.ts`、
   `Testing/WindowsOnboardingWizard.md`。
+- 2026-11-22（蓝牙共存提示，用户反馈“必须让我关闭其他设备吗”）：连接页标题由
+  「蓝牙音频不完整」改为「最近一次语音可能不完整」；正文不再要求关闭或移开其他蓝牙
+  设备，改为说明系统会轮流使用蓝牙、遥控器这次只分到一部分声音，并说明语音输入期间
+  会自动让出键盘、鼠标的蓝牙时间、结束后恢复；也可以把键盘、鼠标改用 USB 接收器或
+  有线连接。提示底部增加「忽略此提醒」，本次降级期间不再打扰；回到满速后再次降级会
+  重新出现。向导第⑥步复用同一句正文。
+- 2026-11-22（「语音优先」自动行为，无用户开关、无界面说明）：连接页不显示
+  「语音优先」区块、开关或只读说明；自动行为只在遥控器进入 `Streaming` 时把已连接
+  的 BLE HID 键鼠切到 `Balanced` 60 ms，语音结束、断开或退出时恢复；平时不改变键鼠
+  参数。降级提示正文仍说明语音输入期间会自动让出、结束后恢复。落点：
+  `src/pages/ConnectionPage.vue`、`src/lib/bridge.ts`、`src/lib/i18n/en/*.ts`、
+  `src/lib/voice-audio-health.ts` 及对应测试；机制与 A/B 证据见
+  `docs/investigations/2026-11-22-bt-hid-yield-balanced.md`。

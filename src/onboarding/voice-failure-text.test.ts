@@ -39,12 +39,12 @@ describe("voiceFailureText（失败解释按捕获状态分流）", () => {
   });
 
   // 2026-10-24 现场：语音条出现、音频只剩约 1/3（蓝牙与另一支 BLE 键盘共存）。
-  // 这时说「语音链路正常」是误导，应给蓝牙共存提示。
+  // 这时说「语音链路正常」是误导，应给蓝牙共存提示；2026-11-22 起不再要求关闭设备。
   it("no_transcript + 音频降级：给蓝牙共存提示，不再说语音链路正常", () => {
     for (const captureHealth of ["active", "unknown"] as const) {
       const text = voiceFailureText("voice.no_transcript", captureHealth, "degraded");
       expect(text).toBe(voiceAudioDegradedText());
-      expect(text).toContain("关闭或移开");
+      expect(text).toContain("不用关闭其他设备");
       expect(text).not.toContain("语音链路正常");
     }
   });
@@ -52,7 +52,7 @@ describe("voiceFailureText（失败解释按捕获状态分流）", () => {
   it("捕获状态未生效优先于音频降级（先修更直接的根因）", () => {
     const text = voiceFailureText("voice.no_transcript", "inactive", "degraded");
     expect(text).toContain("还没有生效");
-    expect(text).not.toContain("关闭或移开");
+    expect(text).not.toContain("不用关闭其他设备");
   });
 
   it("音频满速/未判定保持原有排查文案", () => {

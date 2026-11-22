@@ -1680,8 +1680,8 @@ describe("Onboarding voice test step", () => {
     await vi.advanceTimersByTimeAsync(3_200);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("声音没有完整送到输入工具");
-    expect(wrapper.text()).toContain("关闭或移开同时连接的其他蓝牙设备");
+    expect(wrapper.text()).toContain("遥控器这次只分到一部分声音");
+    expect(wrapper.text()).toContain("不用关闭其他设备");
     expect(wrapper.text()).not.toContain("语音链路正常");
     wrapper.unmount();
   });

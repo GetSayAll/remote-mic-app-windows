@@ -292,6 +292,7 @@ mod tests {
                 last_error: Some("内部注入细节".to_owned()),
                 last_focus: None,
             },
+            voice_priority: Default::default(),
         };
         let send_input = SendInputSnapshot {
             available: true,

@@ -63,6 +63,10 @@
         "trigger": "single"
       },
       "lastError": null
+    },
+    "voicePriority": {
+      "state": "active",
+      "yieldedDevices": 2
     }
   },
   "pairedRemotes": [

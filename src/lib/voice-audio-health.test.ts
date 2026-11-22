@@ -25,10 +25,13 @@ describe("voice audio health（2026-10-24 蓝牙共存降级提示）", () => {
 
   it("提示说清原因与下一步，不出现内部术语", () => {
     const text = voiceAudioDegradedText();
-    expect(text).toContain("声音没有完整送到输入工具");
+    expect(text).toContain("会轮流使用蓝牙");
+    expect(text).toContain("遥控器这次只分到一部分声音");
     expect(text).toContain("文字可能没有出现");
-    expect(text).toContain("关闭或移开同时连接的其他蓝牙设备");
-    expect(text).toContain("键盘、鼠标、耳机");
+    expect(text).toContain("不用关闭其他设备");
+    expect(text).toContain("语音输入期间会自动让出键盘、鼠标的蓝牙时间");
+    expect(text).toContain("结束后恢复");
+    expect(text).toContain("USB 接收器或有线连接");
     expect(text).not.toMatch(/样本率|MTU|BLE|ATVV|16\s*kHz/);
   });
 });
