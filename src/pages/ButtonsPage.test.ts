@@ -2519,6 +2519,7 @@ describe("buttons mapping page", () => {
 
     expect(texts).toContain("Ctrl + C");
     expect(texts).toContain("Alt + Tab");
+    expect(texts).toContain("Alt + F4");
     expect(texts).toContain("Backspace");
     expect(texts).toContain("Win + Shift + S");
     expect(texts).not.toContain("复制");
@@ -2527,6 +2528,9 @@ describe("buttons mapping page", () => {
     expect(chips.find((chip) => chip.text() === "Ctrl + C")!.attributes("title")).toBe("复制");
     expect(chips.find((chip) => chip.text() === "Alt + Tab")!.attributes("title")).toBe(
       "切换应用：用左、右键选择，按“确定”确认，返回取消",
+    );
+    expect(chips.find((chip) => chip.text() === "Alt + F4")!.attributes("title")).toBe(
+      "关闭当前窗口",
     );
   });
 

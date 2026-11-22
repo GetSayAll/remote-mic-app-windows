@@ -67,6 +67,12 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
     expect(css).not.toMatch(/\.app-shell\s*\{[^}]*[{;]\s*height:\s*100vh/);
   });
 
+  it("所有侧边栏页面共用左 22px / 右 13.5px 内容留白", () => {
+    expect(css).toMatch(
+      /\.content\s*\{[^}]*padding:\s*10px\s+13\.5px\s+0\s+22px/,
+    );
+  });
+
   it("主内容为浮在侧栏底色上的圆角面板，底部/右侧留 8px", () => {
     expect(css).toMatch(/\.app-shell\s*\{[^}]*background:\s*var\(--sidebar\)/);
     expect(css).toMatch(
