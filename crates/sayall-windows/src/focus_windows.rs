@@ -11,7 +11,8 @@
 
 #[cfg(windows)]
 use crate::focus::{
-    best_composer_index, best_recorded_index, FocusCandidate, FocusChoice, RecordedFocusTarget,
+    best_composer_index, best_recorded_index, single_recorded_candidate_fallback, FocusCandidate,
+    FocusChoice, RecordedFocusTarget,
 };
 #[cfg(windows)]
 use crate::focus_service::{AttemptResult, FocusFailure};
@@ -809,18 +810,43 @@ mod imp {
                 Err(reason) => return FocusAttempt::Failed(reason),
             };
             let candidate_count = scan.candidates.len();
-            let chosen = match &choice {
-                FocusChoice::Recorded(target) => best_recorded_index(&scan.candidates, target),
-                FocusChoice::BestComposer => best_composer_index(&scan.candidates),
-                FocusChoice::Index(index) => {
-                    (scan.candidates.get(*index).is_some()).then_some(*index)
+            let (chosen, recorded_fallback) = match &choice {
+                FocusChoice::Recorded(target) => {
+                    match best_recorded_index(&scan.candidates, target) {
+                        Some(index) => (Some(index), false),
+                        None => (
+                            single_recorded_candidate_fallback(&scan.candidates, target),
+                            true,
+                        ),
+                    }
                 }
+                FocusChoice::BestComposer => (best_composer_index(&scan.candidates), false),
+                FocusChoice::Index(index) => (
+                    (scan.candidates.get(*index).is_some()).then_some(*index),
+                    false,
+                ),
             };
             let Some(index) = chosen else {
+                if matches!(&choice, FocusChoice::Recorded(_)) {
+                    // 原有日志只有 counts，无法区分「没有候选」和「候选不匹配」。
+                    // 记录原因即可从一次用户报障定位，不输出任何用户内容。
+                    crate::ble::gatt_note(format!(
+                        "focus_recorded_match phase=completed terminal_result=failed \
+                         reason=no_matching_candidate candidates={candidate_count}"
+                    ));
+                }
                 return FocusAttempt::NoCandidate {
                     candidates: candidate_count,
                 };
             };
+            if recorded_fallback {
+                // 这里只表示“选中了兜底候选”；真正是否拿到焦点由随后的
+                // `element_has_focus` 读回决定，不能让日志误报 passed。
+                crate::ble::gatt_note(format!(
+                    "focus_recorded_fallback phase=selected reason=target_moved \
+                     candidates={candidate_count}"
+                ));
+            }
             // 直接用扫描阶段拿到的元素引用聚焦：不再二次 `FindAll` + 逐元素重取属性
             // （2026-10-22 实测，那次重复扫描让一次尝试的成本翻倍）。
             let Some(element) = scan.elements.get(index).cloned() else {

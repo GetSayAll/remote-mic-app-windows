@@ -15,6 +15,10 @@
 - 目标应用以管理员身份运行时读不到界面（UIPI）：按 `not_accessible` 失败并提示，不要求用户提权；
 - 无 UIA 树的应用可用「记录点击位置」兜底（记录相对坐标；窗口尺寸变化超过 25% 时
   拒绝点击）。
+- 匿名输入框（没有 AutomationId / ClassName / Name）的学习记录只有归一化矩形锚点。
+  应用改版或切页导致矩形明显移动时，如果当前**恰好只有一个**同类型且通过门槛的
+  候选，允许退回该候选（日志 `focus_recorded_fallback phase=selected
+  reason=target_moved`）；多个候选仍拒绝，避免把焦点送进用户没有指定的输入框。
 
 ## 自动化检查
 
@@ -82,6 +86,14 @@ cargo run -p sayall-windows --example focus_probe -- --learn               # 生
   window=888x671`，点击阶段 `absolute=(2389,694)`、`click_submitted=ok`、
   `focused_after=Document/RichEditD2DPT`。
 - 候选门槛：Chromium 只读网页根（`Document` + `IsReadOnly=true`）被拒绝。
+- 匿名记录布局变化兜底（2026-11-22/23，WorkBuddy 5.11.3 真机）：学习记录只有
+  `Edit` + 贴底矩形 `(0.051,0.811,0.885×0.077)`，当前候选居中
+  `(0.333,0.330,0.601×0.120)`。修复前 `attempt=NoCandidate { candidates: 1 }`；
+  修复后生产探针 `focused=true attempts=2 elapsed_ms=400`。本地测试安装包
+  （`origin/main` `da30e290` + 修复，测试签名）复验：遥控器实体按键在 WorkBuddy
+  `minimized=true` 时 `focus_result ... passed attempts=2 elapsed_ms=492`；
+  「测试打开与聚焦」按钮 `passed attempts=2 elapsed_ms=444`。第一次 SetFocus 后
+  读回未就绪、第二次成功属于既有重试路径。多个候选或带语义锚点的记录仍不做兜底。
 - 失败路径：UIA 不可达/无树应用立即失败（不做长重试）。
 - 聚焦方式面板 UI（2026-10-23）：浏览器预览 1200px 目视与组件测试均通过——五个策略
   chip（含“自动选择输入框”）同一换行网格、预设默认选中、快捷键只读 chip、输入框
@@ -112,7 +124,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Testing\probe-msaa-provider.
 ## deferred（需要环境或人工参与）
 
 - RC001 / RC003 实体按键链路的完整回归（含冷态首用、连按、断连、睡眠恢复）：需出本地测试包后现场验收；
-- 「打开应用 + 应用快捷键聚焦」「打开应用 + 聚焦已记录的输入框」的真机闭环：需真实目标应用；
+- 「打开应用 + 聚焦已记录的输入框」的 WorkBuddy 真机闭环已在本机测试包 passed（遥控器
+  与 UI 测试入口）；RC001/RC003 分型号、冷态首用/连续按/断连/睡眠恢复仍需分别验收；
+  「打开应用 + 应用快捷键聚焦」的真机闭环仍需其他真实目标应用；
 - 微信 4.x 的「记录点击位置」实际聚焦效果：应用不暴露 UIA，读不到客观焦点，
   只能人工目视确认（按键页记录位置 → 按绑定键打开应用 → 看光标是否落在输入框）；
 - 管理员权限目标应用的 `not_accessible` 现场确认；
