@@ -9,6 +9,7 @@
 
 use sayall_windows::voice_priority::VoicePriorityRuntime;
 use sayall_windows::{remote_target, ConnectionPhase, ConnectionSnapshot};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -24,7 +25,7 @@ fn main() {
         phase: ConnectionPhase::Streaming,
         ..ConnectionSnapshot::default()
     }));
-    let runtime = VoicePriorityRuntime::new(Arc::clone(&state));
+    let runtime = VoicePriorityRuntime::new(Arc::clone(&state), Arc::new(AtomicU64::new(0)));
     for tick in 0..8 {
         thread::sleep(Duration::from_secs(1));
         let snapshot = runtime.snapshot();
