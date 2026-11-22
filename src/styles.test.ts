@@ -83,6 +83,16 @@ describe("根元素不参与滚动（触摸板拖出空白）", () => {
   });
 });
 
+// 2026-11-22 Andy：方向键在系统字体里只有细线字形，和同一行的加粗文字放一起
+// 明显偏细；这里钉住只给方向字形补描边的规则，避免以后被普通字重改动覆盖。
+describe("映射格方向箭头视觉重量", () => {
+  it("只给 direction-arrow 补极细描边", () => {
+    expect(css).toMatch(
+      /\.mapping-cell span\.direction-arrow\s*\{[^}]*-webkit-text-stroke:\s*0\.8px/,
+    );
+  });
+});
+
 // 2026-11-06 Andy：侧栏左上角 SayAll 与设置页左上角「无线麦 SayAll」要和 Mac
 // 用同一套品牌字（Oxanium SemiBold 16 / 18）。字体文件缺失或选择器回退时这里会红。
 describe("品牌字体（Oxanium SemiBold）", () => {

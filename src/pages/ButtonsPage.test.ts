@@ -2556,6 +2556,34 @@ describe("buttons mapping page", () => {
     );
   });
 
+  it("方向键箭头用加粗描边，普通文字不受影响", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        up: {
+          single: { type: "shortcut", chord: { keys: ["up"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+        ok: {
+          single: { type: "shortcut", chord: { keys: ["enter"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const card = (label: string) =>
+      wrapper.findAll(".mapping-card").find((item) => item.text().includes(label))!;
+    const upSummary = card("上").findAll(".mapping-cell")[0]!.find("span");
+    expect(upSummary.text()).toBe("↑");
+    expect(upSummary.classes()).toContain("direction-arrow");
+
+    const enterSummary = card("确定").findAll(".mapping-cell")[0]!.find("span");
+    expect(enterSummary.text()).toBe("Enter");
+    expect(enterSummary.classes()).not.toContain("direction-arrow");
+  });
+
   it("选中 Win 组合后摘要与卡片显示 Win，而不是左 Win", async () => {
     const wrapper = await mountPage();
     await openCell(wrapper, "电源", 0);

@@ -567,6 +567,9 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
    Bold（实测笔画 2.34→2.80px），中文保持 Bold 3.55px，两者差距从 1.2px 缩到
    0.75px。若日后要更贴合，可选方案与实测数据见本次会话记录。 */
 .mapping-cell span { font-weight: 700; }
+/* 2026-11-22 Andy：方向键在系统字体里只有细线字形，和同一行的加粗文字放在
+   一起明显偏细；只给这四个字形补极细描边，不改变其他文字的字重。 */
+.mapping-cell span.direction-arrow { -webkit-text-stroke: 0.8px currentColor; }
 .mapping-cell.set span { color: var(--accent-text); }
 .mapping-cell.editing { background: var(--accent-surface-strong); }
 .mapping-cell.flashed { background: var(--pressed-surface); }

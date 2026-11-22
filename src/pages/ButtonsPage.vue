@@ -533,6 +533,16 @@ function actionCellTitle(button: RemoteButton, trigger: ButtonTrigger): string {
   });
 }
 
+/**
+ * 方向键在系统字体里只有细线字形，和同一行的加粗文字放一起明显偏细。
+ * 格子内容命中这几个字形时加一层极细描边（见 styles.css）。
+ */
+const DIRECTION_SUMMARIES = new Set(["↑", "↓", "←", "→"]);
+
+function isDirectionSummary(summary: string): boolean {
+  return DIRECTION_SUMMARIES.has(summary);
+}
+
 /** 当前编辑格的打开应用目标（非 open_app 动作返回 null，模板类型收窄用）。 */
 function openAppTargetOf(button: RemoteButton, trigger: ButtonTrigger): string | null {
   const action = actionOf(button, trigger);
@@ -2466,7 +2476,15 @@ onUnmounted(() => {
             @click.stop="openEditor(placement.button, trigger)"
           >
             <small>{{ buttonTriggerLabel(trigger) }}</small>
-            <span>{{ actionSummary(actionOf(placement.button, trigger)) }}</span>
+            <span
+              :class="{
+                'direction-arrow': isDirectionSummary(
+                  actionSummary(actionOf(placement.button, trigger)),
+                ),
+              }"
+            >
+              {{ actionSummary(actionOf(placement.button, trigger)) }}
+            </span>
           </button>
         </div>
       </article>
