@@ -90,7 +90,7 @@
     69 ms，会话 B 早 49 ms）；真实生效点由上述只读探针的 60 ms 读回确认。
   - 该包为本地测试构建，不是发布包；RC001 与其它适配器仍 `deferred`。
 - 中间实现（已废弃，保留证据）：曾做成「默认关闭、降级后一键开启」的常驻设置。1.9.3 本地测试包安装后，开启后 `candidates=2 yielded=2` / `state=active`，只读回键鼠 `48 / 0 / 400`；两次语音会话 `voice_audio_rate result=full rate_hz=15211`（2.761 s）与 `14193`（2.046 s）。该证据证明机制有效，但产品行为已按用户要求改为自动、仅会话期间。
-- 自动化：前端 44 个测试文件、712 passed / 10 skipped；`vue-tsc --noEmit` + `vite build` 通过；`cargo test --workspace --tests` 通过（含 `voice_priority` 2 passed）；`cargo check -p sayall-windows-app --features runtime-simulation` 通过。`cargo test --workspace`（含 examples）被仓库既有的 `key_inject_probe.rs` 在 rustc 1.98.1 上的 ICE 阻断，与本次改动无关。
+- 自动化：前端 45 个测试文件、719 passed / 10 skipped；`vue-tsc --noEmit` + `vite build` 通过；`cargo test --workspace` 通过（含 `voice_priority` 2 passed）；`cargo fmt --all -- --check` 通过；`cargo check -p sayall-windows-app --features runtime-simulation` 通过；`scripts/ci-preflight.ps1` 7/7 通过。
 
 ## 未覆盖
 

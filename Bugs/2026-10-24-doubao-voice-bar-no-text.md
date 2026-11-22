@@ -156,11 +156,11 @@ Windows System 日志：2026-10-24 18:59:47，`BTHUSB` 事件 8 记录一支远�
   `candidates=2 yielded=2` / `state=active`；键鼠 `48/0/400`；两次语音会话
   `voice_audio_rate result=full rate_hz=15211`（2.761 s）与 `14193`（2.046 s）。
   该包为本地测试构建，不是发布包；机制证据保留，产品行为已被自动实现取代。
-- 验证：前端 44 个测试文件、712 passed / 10 skipped、`vue-tsc --noEmit` +
-  `vite build` 通过；Rust `cargo test --workspace --tests` 通过（含 `voice_priority`
-  2 passed）、`cargo check -p sayall-windows-app --features runtime-simulation` 通过。
-  `cargo test --workspace`（含 examples）被既有 `key_inject_probe.rs` 在 rustc
-  1.98.1 上的 ICE 阻断，与本次改动无关。
+- 验证：前端 45 个测试文件、719 passed / 10 skipped、`vue-tsc --noEmit` +
+  `vite build` 通过；Rust `cargo test --workspace` 通过（含 `voice_priority`
+  2 passed）、`cargo fmt --all -- --check` 通过、
+  `cargo check -p sayall-windows-app --features runtime-simulation` 通过；
+  `scripts/ci-preflight.ps1` 7/7 通过。
 - **1.9.4 本地测试包自动实现实机验证（passed）**：RC003 + 蓝牙键盘 + 鼠标；
   连接页已移除「语音优先」区块（无开关、无一键按钮、无只读说明）。
   两次语音会话 2.658 s / 15.759 s，`voice_audio_rate result=full` 14,898 /s、
