@@ -93,8 +93,8 @@ fn main() {
     println!("candidate_count={}", candidates.len());
     for (index, candidate) in candidates.iter().enumerate().take(20) {
         println!(
-            "[{index}] type={} hash={} id_chars={} name_chars={} focused={} text_pattern={} \
-             readonly={:?} rect={} wide={} focusable={} enabled={}",
+            "[{index}] type={} hash={} id_chars={} class_chars={} name_chars={} focused={} \
+             text_pattern={} readonly={:?} rect={} wide={} focusable={} enabled={}",
             candidate.control_type,
             identity_hash(
                 &candidate.control_type,
@@ -103,6 +103,7 @@ fn main() {
                 &candidate.name
             ),
             candidate.automation_id.chars().count(),
+            candidate.class_name.chars().count(),
             candidate.name.chars().count(),
             candidate.focused,
             candidate.has_text_pattern,
@@ -245,6 +246,27 @@ fn main() {
             class_name,
             ..Default::default()
         })
+    } else if let Some(rect) = arg_value("--recorded-rect") {
+        // 复现「匿名 Edit 只有矩形锚点」的生产档案（WorkBuddy 现场）：
+        // 传入 `--recorded-rect x,y,width,height`，可选 `--recorded-type`。
+        let values: Vec<f64> = rect
+            .split(',')
+            .filter_map(|value| value.trim().parse().ok())
+            .collect();
+        if values.len() != 4 {
+            println!("bad_recorded_rect={rect}");
+            return;
+        }
+        FocusChoice::Recorded(RecordedFocusTarget {
+            control_type: arg_value("--recorded-type").unwrap_or_else(|| "Edit".to_owned()),
+            normalized_rect: Some(NormalizedRect {
+                x: values[0],
+                y: values[1],
+                width: values[2],
+                height: values[3],
+            }),
+            ..Default::default()
+        })
     } else if let Some(index) = arg_value("--index").and_then(|value| value.parse().ok()) {
         FocusChoice::Index(index)
     } else if std::env::args().any(|arg| arg == "--focus") {
@@ -252,6 +274,25 @@ fn main() {
     } else {
         return;
     };
+    if std::env::args().any(|arg| arg == "--service") {
+        // 生产重试组合：FocusRunner（串行队列 + 200ms 重试 + 读回确认）。
+        // 用于验证「第一次 SetFocus 没拿到焦点、后续尝试成功」的现场。
+        use sayall_windows::focus_service::{FocusRetryPolicy, FocusRunner, FocusTask};
+        use sayall_windows::focus_windows::WindowsFocusBackend;
+        let runner = FocusRunner::spawn(
+            std::sync::Arc::new(WindowsFocusBackend::new()),
+            FocusRetryPolicy::default(),
+        );
+        let request_id = runner.submit(FocusTask::LaunchThenFocus(choice));
+        println!("submitted={request_id:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while runner.last_report().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        println!("report={:?}", runner.last_report());
+        return;
+    }
+
     let attempt: FocusAttempt = fw::focus_target(pid, choice);
     println!("attempt={attempt:?}");
     // 独立读回（不依赖聚焦函数的返回值）：重新抓一次系统焦点元素。
