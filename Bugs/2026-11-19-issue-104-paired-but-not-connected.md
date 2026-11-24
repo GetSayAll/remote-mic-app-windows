@@ -2,7 +2,9 @@
 
 - 发现日期：2026-11-19（issue #104 最新 1.9.3 报告；同一 issue 自 2026-09-20 起有多次报告）
 - 状态：诊断与向导指引已实现；1.9.6 五路径日志已落地；2026-11-24 增加
-  transmit 特征验证，修正 cached 服务假阳性；受影响用户 1.9.7 现场复测 `deferred`
+  transmit 特征验证，修正 cached 服务假阳性。用户安装本地测试包 `abbc02f1`
+  后连接成功；语音链路仍待复测。专用记录：
+  [2026-11-24-ble-cached-service-false-positive.md](2026-11-24-ble-cached-service-false-positive.md)
 - 影响范围：1.9.3（`a4b5512`）、1.9.5（`4ead96e`）、1.9.6（`7860681`）、
   Windows 10.0.26200/19045 x64、MediaTek 与 USB 蓝牙适配器、RC003；
   issue 内另有 1.8.0 / 1.8.3 / 0.8.6 / 0.3.0 报告
@@ -222,9 +224,9 @@
 验证：
 
 - `cargo fmt --all -- --check`：`passed`
-- `cargo test -p sayall-windows --lib`：`passed`（595 passed / 20 ignored；
-  新增 3 个 transmit 探测决策单测 + 1 个手工 transmit 真机测试）
-- `cargo test --workspace`：`passed`（sayall-windows 595 / 20 ignored；
+- `cargo test -p sayall-windows --lib`：`passed`（596 passed / 20 ignored；
+  新增 3 个 transmit 探测决策单测 + 1 个接线契约测试 + 1 个手工 transmit 真机测试）
+- `cargo test --workspace`：`passed`（sayall-windows 596 / 20 ignored；
   sayall-windows-app 226 / 2 ignored；其余 crate 与文档测试 0 failed）
 - `cargo check --workspace`：`passed`
 - `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
@@ -237,8 +239,11 @@
   `sayall-windows-app` 进程占用同一 GATT 服务，测试进程收到
   `gatt_access_denied`；不是连接路径的结论）。关闭其他 SayAll 进程后的
   单进程复测仍为 `deferred`。
-- 受影响用户 1.9.7 现场：`deferred`；需要看新的
-  `ble_service_path phase=characteristic_probe ... path_results=`。
+- 受影响用户 1.9.6 本地测试包 `abbc02f1` 现场：连接成功。日志为 7/7
+  主路径服务发现 + 7/7 `characteristic_probe=passed`，4 次 `ble_connect`
+  passed；3 次 `subscribe_audio` 瞬时 `windows_api_failed` 后重试成功。
+  语音链路（`voice_sessions=0`）仍为 `deferred`。详见
+  [2026-11-24-ble-cached-service-false-positive.md](2026-11-24-ble-cached-service-false-positive.md)。
 
 ## 验证
 
