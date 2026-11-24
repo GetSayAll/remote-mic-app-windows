@@ -18,15 +18,15 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
-    HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER,
-    RAWKEYBOARD, RAWMOUSE, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME,
-    RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
+    HRAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RAWKEYBOARD, RIDEV_DEVNOTIFY,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RIDI_DEVICENAME, RID_INPUT, RIM_TYPEHID, RIM_TYPEKEYBOARD,
+    RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, UnregisterClassW,
-    HWND_MESSAGE, MSG, RI_MOUSE_HWHEEL, RI_MOUSE_WHEEL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
+    HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_INPUT,
+    WM_INPUT_DEVICE_CHANGE, WM_TIMER, WNDCLASSW,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -74,24 +74,16 @@ pub struct RawInputRuntime {
     snapshot: Arc<Mutex<RawInputSnapshot>>,
     engine: Mutex<Option<Sender<EngineMessage>>>,
     control: Mutex<Option<ListenerControl>>,
-    /// 最近一次**非遥控器**键盘/鼠标 Raw Input 的单调毫秒。
-    /// 语音优先用它判断桌面是否空闲；遥控器自身报告不计入。
-    desktop_activity: Arc<AtomicU64>,
 }
 
 impl RawInputRuntime {
-    pub fn new(
-        snapshot: Arc<Mutex<RawInputSnapshot>>,
-        engine: Sender<EngineMessage>,
-        desktop_activity: Arc<AtomicU64>,
-    ) -> Self {
+    pub fn new(snapshot: Arc<Mutex<RawInputSnapshot>>, engine: Sender<EngineMessage>) -> Self {
         // 监听器把语义事件交给映射引擎，被 key_gate 吞掉的键盘边沿由钩子线程
         // 直接投递（见 docs/investigations/2026-09-05-ll-swallow-vs-raw-input.md）。
         Self {
             snapshot,
             engine: Mutex::new(Some(engine)),
             control: Mutex::new(None),
-            desktop_activity,
         }
     }
 
@@ -127,7 +119,6 @@ impl RawInputRuntime {
         let snapshot = Arc::clone(&self.snapshot);
         let thread_stop = Arc::clone(&stop_requested);
         let thread_hwnd = Arc::clone(&hwnd);
-        let thread_activity = Arc::clone(&self.desktop_activity);
         let engine = self
             .engine
             .lock()
@@ -137,14 +128,7 @@ impl RawInputRuntime {
         let join = thread::Builder::new()
             .name("sayall-raw-input".to_owned())
             .spawn(move || {
-                listener_thread(
-                    snapshot,
-                    engine,
-                    thread_stop,
-                    thread_hwnd,
-                    thread_activity,
-                    ready_sender,
-                )
+                listener_thread(snapshot, engine, thread_stop, thread_hwnd, ready_sender)
             })
             .map_err(|error| PlatformError::RawInput(error.to_string()))?;
         let mut control = ListenerControl {
@@ -230,7 +214,6 @@ impl Default for RawInputRuntime {
         Self::new(
             Arc::new(Mutex::new(RawInputSnapshot::default())),
             mpsc::channel().0,
-            Arc::new(AtomicU64::new(0)),
         )
     }
 }
@@ -291,8 +274,6 @@ struct ListenerContext {
     /// 只用于报告流诊断：设备节点在位不代表报告还在到。`None` = 监听器启动后
     /// 还没收到过报告；间隔 ≥ `REPORT_FLOW_LOG_GAP` 时落一行。
     last_report_at: Option<Instant>,
-    /// 非遥控器键盘/鼠标 Raw Input 的活动时刻（2026-11-23）。
-    desktop_activity: Arc<AtomicU64>,
 }
 
 fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
@@ -304,7 +285,6 @@ fn listener_thread(
     engine: Sender<EngineMessage>,
     stop_requested: Arc<AtomicBool>,
     hwnd_slot: Arc<AtomicIsize>,
-    desktop_activity: Arc<AtomicU64>,
     ready: mpsc::SyncSender<Result<(), String>>,
 ) {
     let result = run_listener(
@@ -312,7 +292,6 @@ fn listener_thread(
         engine.clone(),
         Arc::clone(&stop_requested),
         Arc::clone(&hwnd_slot),
-        desktop_activity,
         &ready,
     );
     if let Err(error) = &result {
@@ -349,7 +328,6 @@ fn run_listener(
     engine: Sender<EngineMessage>,
     stop_requested: Arc<AtomicBool>,
     hwnd_slot: Arc<AtomicIsize>,
-    desktop_activity: Arc<AtomicU64>,
     ready: &mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), String> {
     // 先枚举当前在位设备，但**不**以“找不到”作为失败退出：设备缺失时仍要建窗 +
@@ -427,20 +405,6 @@ fn run_listener(
         let _ = unsafe { UnregisterClassW(class_name_ptr, Some(instance)) };
         return Err(format!("RegisterRawInputDevices failed: {error}"));
     }
-    // 鼠标只服务空闲预热；注册失败不得影响遥控器键盘/消费者按键主路径。
-    let mouse_device = [RAWINPUTDEVICE {
-        usUsagePage: 0x01,
-        usUsage: 0x02,
-        dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
-        hwndTarget: window,
-    }];
-    if let Err(error) =
-        unsafe { RegisterRawInputDevices(&mouse_device, size_of::<RAWINPUTDEVICE>() as u32) }
-    {
-        crate::ble::gatt_note(format!(
-            "raw_input mouse_activity action=register phase=completed terminal_result=failed reason={error}"
-        ));
-    }
 
     // 设备选择：缺失（系统 HOGP 接口缺失/遥控器未连接）不视为失败，进入 Awaiting；
     // 多候选（两支同型号遥控器同时在线，或同一支换过实例、旧实例还在枚举里）**不再判失败**
@@ -470,7 +434,6 @@ fn run_listener(
             // 启动时就绑定成功 = 设备此刻在位；空路径是 Awaiting，等接口出现。
             binding_present: !selected_path.is_empty(),
             last_report_at: None,
-            desktop_activity: Arc::clone(&desktop_activity),
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -884,28 +847,8 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
     if header.hDevice.is_invalid() || header.hDevice.0.is_null() {
         return Ok(());
     }
-    // 鼠标只作为“桌面是否空闲”的信号；不取设备名、不进入遥控器过滤或映射引擎。
+    // 鼠标事件不属于遥控器，直接忽略。
     if header.dwType == RIM_TYPEMOUSE.0 {
-        let body = &bytes[header_size as usize..];
-        if body.len() >= size_of::<RAWMOUSE>() {
-            let mouse = unsafe { body.as_ptr().cast::<RAWMOUSE>().read_unaligned() };
-            let button_flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags as u32 };
-            let wheel = button_flags & (RI_MOUSE_WHEEL | RI_MOUSE_HWHEEL) != 0;
-            // 只把移动/滚轮当作“桌面活跃”；单纯点击（例如点输入框）不撤销预热，
-            // 否则“点输入框 → 马上按语音键”会再次丢掉首字。
-            let movement = mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0
-                || mouse.lLastX != 0
-                || mouse.lLastY != 0;
-            if movement || wheel {
-                THREAD_CONTEXT.with(|slot| {
-                    if let Some(context) = slot.borrow().as_ref() {
-                        context
-                            .desktop_activity
-                            .store(crate::monotonic_millis(), Ordering::Relaxed);
-                    }
-                });
-            }
-        }
         return Ok(());
     }
     let device_path = get_device_name(header.hDevice)?;
@@ -917,13 +860,6 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             .as_mut()
             .ok_or_else(|| "Raw Input listener context is unavailable".to_owned())?;
         let normalized = normalize_device_path(&device_path);
-        // 桌面空闲信号（2026-11-23）：只记录普通键盘，不把遥控器自己的
-        // HID 报告当成桌面活动，否则按下语音键的一刻就会撤销预热。
-        if !crate::raw_input::device_path_matches_xiaomi_remote(&normalized) {
-            context
-                .desktop_activity
-                .store(crate::monotonic_millis(), Ordering::Relaxed);
-        }
         // 接受判据（2026-10-13 现场，纯逻辑在 `raw_input::report_path_accepted`）：
         // 有目标地址时**只认那一支**（绑定路径或同地址的其他实例）；绑定若停在另一支上，
         // 那一支的报文一律按"另一支"处理；还没有目标时沿用旧行为（只认绑定路径）。

@@ -1,21 +1,27 @@
-//! 语音优先（2026-11-22 实测）：只在遥控器语音流期间把已连接的 BLE HID 键鼠降到
-//! `Balanced` 连接参数，让出连接事件给 ATVV 音频；语音结束、遥控器断开或应用退出时恢复。
+//! 语音优先（2026-11-24 定案）：遥控器在线时，把 BLE HID 键鼠常驻在
+//! `ThroughputOptimized`（15 ms），避免语音开始/结束时反复切换 6→48→6 ms。
 //!
 //! 背景：遥控器 + 键盘 + 鼠标三链路共存时，适配器按连接事件轮流调度，遥控器
-//! 语音只剩约 1/3。2026-11-22 本机 A/B：只降键盘或只降鼠标都无效；两只同时
-//! 降到 Balanced（60 ms）后恢复到 15.4–15.5 k samples/s 满速。完整证据见
+//! 语音只剩约 1/3。2026-11-22 A/B：两只键鼠降到 Balanced（60 ms）可到 15.4–15.5 k
+//! samples/s，但只在语音期间切换仍会丢首字；1.9.5 空闲预热又让鼠标频繁卡顿。
+//! 2026-11-24 实机：常驻 15 ms 时 6/6 次语音 full（12.1–12.9 k samples/s），
+//! 鼠标空闲体感可接受，语音期间仅因音频共用适配器略慢。完整证据见
 //! `docs/investigations/2026-11-22-bt-hid-yield-balanced.md`。
 //!
 //! 边界：
 //! - 只用公开 WinRT API，不需要管理员权限或驱动。
-//! - 只在 `ConnectionPhase::Streaming` 期间生效；空闲时不改键鼠参数。
+//! - 遥控器在线且存在非遥控器 BLE HID 时，先不改参数，记录该配置的语音实测：
+//!   Full 记住 observe（以后也不碰），Degraded 记住 hold 并常驻 15 ms。
+//!   决策按 HID 数量持久化到本地；0 个 HID 或遥控器断开时不操作。
 //! - 只处理已连接的 BLE HID 设备，排除遥控器自身；不读取/修改第三方 App 数据。
 //! - 失败只记日志并继续正常语音，不阻塞、不回滚主链路。
-//! - 语音结束、遥控器断开、应用退出时恢复 `ThroughputOptimized` 并释放句柄；
-//!   实测释放后 HID 栈回到原参数（7.5 ms / 延迟 44）。
 
 use crate::{ConnectionPhase, ConnectionSnapshot, VoicePrioritySnapshot, VoicePriorityState};
-use std::sync::atomic::{AtomicU64, Ordering};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -35,9 +41,8 @@ const DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// 已有设备在让出时，重新发现新 HID 设备的间隔。30 s 足够发现新接上的键鼠，
 /// 也不会在语音期间反复打开 GATT 服务缓存。
 const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-/// 桌面空闲多久后预热键鼠让出（2026-11-23）。Windows 实际切换约需 2.4–4 s，
-/// 只在语音按下时才请求会整段错过短会话；空闲预热把切换提前到说话之前。
-const DESKTOP_IDLE_MS: u64 = 1_000;
+/// 先测后调；这里只要求至少一个非遥控器 BLE HID 才可能进入调整。
+const MIN_HID_DEVICES_TO_ADJUST: usize = 1;
 /// 请求已接受但读回仍是旧的连接参数时，超过这个时间标记为失败（仍继续观察）。
 const EFFECTIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -49,9 +54,186 @@ struct ConnectionParams {
 }
 
 impl ConnectionParams {
-    fn is_balanced(self) -> bool {
-        // Balanced 预设的 min interval 是 24（30 ms）；HID 栈默认是 6（7.5 ms）。
-        self.interval_units >= 24
+    fn is_throughput(self) -> bool {
+        // ThroughputOptimized 预设是 15 ms（12 个 1.25 ms 单位）；HID 默认 6。
+        (10..=16).contains(&self.interval_units)
+    }
+}
+
+const POLICY_FILE_FORMAT_VERSION: u32 = 1;
+const POLICY_FILE_NAME: &str = "voice-priority-policy.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HidPolicy {
+    Observe,
+    Hold,
+}
+
+impl HidPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Hold => "hold",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "observe" => Some(Self::Observe),
+            "hold" => Some(Self::Hold),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedPolicy {
+    #[serde(default)]
+    format_version: u32,
+    #[serde(default)]
+    decisions: BTreeMap<String, String>,
+}
+
+/// 按“非遥控器 BLE HID 数量”记住该配置的实测结果。
+///
+/// 不保存设备名、地址或路径，只保存数量与 observe/hold 决策。
+struct PolicyStore {
+    path: Option<PathBuf>,
+    decisions: BTreeMap<u32, HidPolicy>,
+}
+
+impl PolicyStore {
+    fn load_default() -> Self {
+        let path = std::env::var_os("LOCALAPPDATA")
+            .map(|base| PathBuf::from(base).join("SayAll").join(POLICY_FILE_NAME));
+        Self::load(path)
+    }
+
+    fn load(path: Option<PathBuf>) -> Self {
+        let mut store = Self {
+            path,
+            decisions: BTreeMap::new(),
+        };
+        let Some(path) = store.path.as_ref() else {
+            return store;
+        };
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return store,
+            Err(error) => {
+                crate::ble::gatt_note(format!(
+                    "voice_priority action=policy_file phase=load terminal_result=failed reason=read_failed error_kind={:?}",
+                    error.kind()
+                ));
+                return store;
+            }
+        };
+        let persisted: PersistedPolicy = match serde_json::from_str(&contents) {
+            Ok(persisted) => persisted,
+            Err(_) => {
+                crate::ble::gatt_note(
+                    "voice_priority action=policy_file phase=load terminal_result=failed reason=invalid_json"
+                        .to_owned(),
+                );
+                return store;
+            }
+        };
+        if persisted.format_version != POLICY_FILE_FORMAT_VERSION {
+            crate::ble::gatt_note(format!(
+                "voice_priority action=policy_file phase=load terminal_result=failed reason=unsupported_format version={}",
+                persisted.format_version
+            ));
+            return store;
+        }
+        for (key, value) in persisted.decisions {
+            let (Ok(count), Some(policy)) = (key.parse::<u32>(), HidPolicy::parse(&value)) else {
+                continue;
+            };
+            store.decisions.insert(count, policy);
+        }
+        crate::ble::gatt_note(format!(
+            "voice_priority action=policy_file phase=load terminal_result=passed decisions={}",
+            store.decisions.len()
+        ));
+        store
+    }
+
+    fn policy(&self, count: u32) -> Option<HidPolicy> {
+        self.decisions.get(&count).copied()
+    }
+
+    /// 更多 HID 只会增加争用，不会减少：较低数量已 hold 时，更高数量直接继承。
+    fn effective_policy(&self, count: u32) -> Option<HidPolicy> {
+        if self
+            .decisions
+            .iter()
+            .any(|(known, policy)| *known < count && *policy == HidPolicy::Hold)
+        {
+            return Some(HidPolicy::Hold);
+        }
+        self.policy(count)
+    }
+
+    /// 先测再用：Full 记录 observe，Degraded 记录 hold；已 hold 不降级。
+    fn observe_health(&mut self, count: u32, health: crate::VoiceAudioHealth) -> bool {
+        let next = match health {
+            crate::VoiceAudioHealth::Full => HidPolicy::Observe,
+            crate::VoiceAudioHealth::Degraded => HidPolicy::Hold,
+            crate::VoiceAudioHealth::Unknown => return false,
+        };
+        let current = self.effective_policy(count);
+        if matches!(
+            (current, next),
+            (Some(HidPolicy::Hold), HidPolicy::Observe)
+                | (Some(HidPolicy::Observe), HidPolicy::Observe)
+                | (Some(HidPolicy::Hold), HidPolicy::Hold)
+        ) {
+            return false;
+        }
+        self.decisions.insert(count, next);
+        if let Err(error) = self.save() {
+            crate::ble::gatt_note(format!(
+                "voice_priority action=policy_file phase=save terminal_result=failed reason={error}"
+            ));
+        }
+        true
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.kind().to_string())?;
+        }
+        let decisions = self
+            .decisions
+            .iter()
+            .map(|(count, policy)| (count.to_string(), policy.as_str().to_owned()))
+            .collect();
+        let persisted = PersistedPolicy {
+            format_version: POLICY_FILE_FORMAT_VERSION,
+            decisions,
+        };
+        let bytes = serde_json::to_vec_pretty(&persisted)
+            .map_err(|error| format!("serialize_failed={error}"))?;
+        let temporary = path.with_file_name(format!("{POLICY_FILE_NAME}.tmp"));
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = fs::File::create(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("write_failed={}", error.kind()));
+        }
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("rename_failed={}", error.kind()));
+        }
+        Ok(())
     }
 }
 
@@ -73,17 +255,14 @@ pub struct VoicePriorityRuntime {
 }
 
 impl VoicePriorityRuntime {
-    pub fn new(
-        connection: Arc<Mutex<ConnectionSnapshot>>,
-        desktop_activity: Arc<AtomicU64>,
-    ) -> Self {
+    pub fn new(connection: Arc<Mutex<ConnectionSnapshot>>) -> Self {
         let state = Arc::new(Mutex::new(VoicePrioritySnapshot::default()));
         let (sender, receiver) = mpsc::channel();
         let worker_state = Arc::clone(&state);
         let worker = thread::Builder::new()
             .name("sayall-voice-priority".to_owned())
             .spawn(move || {
-                worker_loop(receiver, worker_state, connection, desktop_activity);
+                worker_loop(receiver, worker_state, connection);
             });
         match worker {
             Ok(worker) => Self {
@@ -150,7 +329,6 @@ fn worker_loop(
     receiver: mpsc::Receiver<Command>,
     state: Arc<Mutex<VoicePrioritySnapshot>>,
     connection: Arc<Mutex<ConnectionSnapshot>>,
-    desktop_activity: Arc<AtomicU64>,
 ) {
     if let Err(error) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
         set_state(
@@ -165,12 +343,42 @@ fn worker_loop(
     let mut last_discovery = Instant::now() - DISCOVERY_REFRESH_INTERVAL;
     let mut last_failure: Option<Instant> = None;
     let mut yield_started: Option<Instant> = None;
+    let mut last_policy: Option<String> = None;
+    let mut policy_store = PolicyStore::load_default();
+    let mut observed_hid_count: Option<u32> = None;
+    let (mut last_phase, mut last_health) = {
+        let snapshot = lock(&connection);
+        (snapshot.phase, snapshot.voice_audio_health)
+    };
 
     loop {
-        let phase = lock(&connection).phase;
-        let streaming = streaming_phase(phase) && crate::remote_target::get().is_some();
-        let idle = desktop_is_idle(&desktop_activity);
-        if !yield_requested(phase, streaming, idle) {
+        let (phase, health) = {
+            let snapshot = lock(&connection);
+            (snapshot.phase, snapshot.voice_audio_health)
+        };
+        let session_ended = matches!(phase, ConnectionPhase::Ready)
+            && matches!(
+                last_phase,
+                ConnectionPhase::Streaming | ConnectionPhase::Draining
+            );
+        let health_changed = health != last_health;
+        if matches!(phase, ConnectionPhase::Ready) && (session_ended || health_changed) {
+            if let Some(count) = observed_hid_count {
+                if policy_store.observe_health(count, health) {
+                    let decision = policy_store.effective_policy(count);
+                    crate::ble::gatt_note(format!(
+                        "voice_priority action=policy phase=completed decision={} hid_count={count} reason=session_health",
+                        decision.map(HidPolicy::as_str).unwrap_or("unknown")
+                    ));
+                    if matches!(decision, Some(HidPolicy::Hold)) {
+                        last_discovery = Instant::now() - DISCOVERY_REFRESH_INTERVAL;
+                    }
+                }
+            }
+        }
+        last_phase = phase;
+        last_health = health;
+        if !yield_requested(phase) {
             restore_all(&mut yielded);
             set_state(&state, VoicePriorityState::Off, 0, None);
             // 下一次需要让出时从干净的发现窗口开始。
@@ -178,6 +386,7 @@ fn worker_loop(
             last_failure = None;
             yield_started = None;
         } else {
+            let before_retain = yielded.len();
             yielded.retain(|entry| {
                 let connected = entry
                     .device
@@ -190,9 +399,13 @@ fn worker_loop(
                 }
                 connected
             });
+            if yielded.len() != before_retain {
+                // 有一个键鼠断开，HID 数量可能降到 1；立即重新判断是否还需要调整。
+                last_discovery = Instant::now() - DISCOVERY_REFRESH_INTERVAL;
+            }
 
             // 读回实际参数：请求返回 Success 只代表系统接受，真正是否切到
-            // Balanced 必须在连接里观察。只在变化时落日志，避免 250 ms 刷屏。
+            // ThroughputOptimized 必须在连接里观察。只在变化时落日志，避免 250 ms 刷屏。
             for (slot, entry) in yielded.iter_mut().enumerate() {
                 let Some(params) = read_connection_params(&entry.device) else {
                     continue;
@@ -204,13 +417,13 @@ fn worker_loop(
                         params.interval_units,
                         params.latency_events,
                         params.timeout_units,
-                        params.is_balanced()
+                        params.is_throughput()
                     ));
                 }
             }
             let mut effective_count = yielded
                 .iter()
-                .filter(|entry| entry.observed.is_some_and(ConnectionParams::is_balanced))
+                .filter(|entry| entry.observed.is_some_and(ConnectionParams::is_throughput))
                 .count();
 
             let discovery_interval = if yielded.is_empty() {
@@ -218,55 +431,74 @@ fn worker_loop(
             } else {
                 DISCOVERY_REFRESH_INTERVAL
             };
-            let should_discover =
-                yielded.is_empty() || last_discovery.elapsed() >= discovery_interval;
+            let should_discover = last_discovery.elapsed() >= discovery_interval;
             let retry_allowed =
                 last_failure.is_none_or(|at| at.elapsed() >= DISCOVERY_RETRY_INTERVAL);
+            let mut policy_skip = false;
             if should_discover && retry_allowed {
-                if yielded.is_empty() {
-                    yield_started.get_or_insert_with(Instant::now);
-                    set_state(&state, VoicePriorityState::Applying, 0, None);
-                }
                 last_discovery = Instant::now();
                 match connected_hid_devices(crate::remote_target::get()) {
                     Ok(devices) => {
                         last_failure = None;
                         let candidates = devices.len();
-                        for (address, device) in devices {
-                            if address == 0 || yielded.iter().any(|entry| entry.address == address)
-                            {
+                        observed_hid_count = Some(candidates as u32);
+                        let decision = policy_store.effective_policy(candidates as u32);
+                        let should_adjust = should_adjust_hids(candidates, decision);
+                        let policy_label = match decision {
+                            Some(HidPolicy::Hold) => "hold",
+                            Some(HidPolicy::Observe) => "observe",
+                            None => "unmeasured",
+                        };
+                        let policy = format!("{policy_label}:{candidates}");
+                        if last_policy.as_deref() != Some(policy.as_str()) {
+                            crate::ble::gatt_note(format!(
+                                "voice_priority action=policy phase=completed decision={policy_label} hid_count={candidates}"
+                            ));
+                            last_policy = Some(policy);
+                        }
+                        if !should_adjust {
+                            for (_, device) in devices {
                                 let _ = device.Close();
-                                continue;
                             }
-                            // 语音可能已经结束、桌面也可能重新活跃：不要在不需要时
-                            // 继续把新设备降速。
-                            let still_wanted = {
-                                let phase = lock(&connection).phase;
-                                let streaming =
-                                    streaming_phase(phase) && crate::remote_target::get().is_some();
-                                let idle = desktop_is_idle(&desktop_activity);
-                                yield_requested(phase, streaming, idle)
-                            };
-                            if !still_wanted {
-                                let _ = device.Close();
-                                break;
+                            restore_all(&mut yielded);
+                            set_state(&state, VoicePriorityState::Off, 0, None);
+                            yield_started = None;
+                            policy_skip = true;
+                        } else {
+                            if yielded.is_empty() {
+                                yield_started.get_or_insert_with(Instant::now);
+                                set_state(&state, VoicePriorityState::Applying, 0, None);
                             }
-                            match apply_balanced(&device) {
-                                Ok(request) => {
-                                    let observed = read_connection_params(&device);
-                                    yielded.push(YieldedDevice {
-                                        address,
-                                        device,
-                                        request,
-                                        observed,
-                                    });
-                                }
-                                Err(error) => {
-                                    last_failure = Some(Instant::now());
-                                    crate::ble::gatt_note(format!(
-                                        "voice_priority action=apply phase=completed terminal_result=failed reason=request_failed detail={error}"
-                                    ));
+                            for (address, device) in devices {
+                                if address == 0
+                                    || yielded.iter().any(|entry| entry.address == address)
+                                {
                                     let _ = device.Close();
+                                    continue;
+                                }
+                                // 遥控器断开/退出时不要继续占用键鼠链路。
+                                let still_wanted = yield_requested(lock(&connection).phase);
+                                if !still_wanted {
+                                    let _ = device.Close();
+                                    break;
+                                }
+                                match apply_throughput(&device) {
+                                    Ok(request) => {
+                                        let observed = read_connection_params(&device);
+                                        yielded.push(YieldedDevice {
+                                            address,
+                                            device,
+                                            request,
+                                            observed,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        last_failure = Some(Instant::now());
+                                        crate::ble::gatt_note(format!(
+                                            "voice_priority action=apply phase=completed terminal_result=failed reason=request_failed detail={error}"
+                                        ));
+                                        let _ = device.Close();
+                                    }
                                 }
                             }
                         }
@@ -284,30 +516,40 @@ fn worker_loop(
                 }
                 effective_count = yielded
                     .iter()
-                    .filter(|entry| entry.observed.is_some_and(ConnectionParams::is_balanced))
+                    .filter(|entry| entry.observed.is_some_and(ConnectionParams::is_throughput))
                     .count();
             }
 
-            let next_state = if yielded.is_empty() {
-                if last_failure.is_some_and(|at| at.elapsed() < DISCOVERY_RETRY_INTERVAL) {
-                    VoicePriorityState::Failed
+            if policy_skip {
+                set_state(&state, VoicePriorityState::Off, 0, None);
+            } else {
+                let no_hold_policy = last_policy.as_deref().is_some_and(|policy| {
+                    policy.starts_with("observe") || policy.starts_with("unmeasured")
+                });
+                let next_state = if yielded.is_empty() {
+                    if last_failure.is_some_and(|at| at.elapsed() < DISCOVERY_RETRY_INTERVAL) {
+                        VoicePriorityState::Failed
+                    } else if no_hold_policy {
+                        yield_started = None;
+                        VoicePriorityState::Off
+                    } else {
+                        // 遥控器在线且没有需要调整的 HID（例如只有遥控器）。
+                        yield_started = None;
+                        VoicePriorityState::Active
+                    }
+                } else if effective_count == 0 {
+                    let started = *yield_started.get_or_insert_with(Instant::now);
+                    if started.elapsed() >= EFFECTIVE_TIMEOUT {
+                        VoicePriorityState::Failed
+                    } else {
+                        VoicePriorityState::Applying
+                    }
                 } else {
-                    // 遥控器在线且没有需要让出的 HID（例如只有遥控器）。
                     yield_started = None;
                     VoicePriorityState::Active
-                }
-            } else if effective_count == 0 {
-                let started = *yield_started.get_or_insert_with(Instant::now);
-                if started.elapsed() >= EFFECTIVE_TIMEOUT {
-                    VoicePriorityState::Failed
-                } else {
-                    VoicePriorityState::Applying
-                }
-            } else {
-                yield_started = None;
-                VoicePriorityState::Active
-            };
-            set_state(&state, next_state, effective_count as u8, None);
+                };
+                set_state(&state, next_state, effective_count as u8, None);
+            }
         }
 
         match receiver.recv_timeout(POLL_INTERVAL) {
@@ -333,10 +575,6 @@ fn worker_loop(
     }
 }
 
-fn streaming_phase(phase: ConnectionPhase) -> bool {
-    phase == ConnectionPhase::Streaming
-}
-
 fn remote_connected_phase(phase: ConnectionPhase) -> bool {
     matches!(
         phase,
@@ -344,18 +582,13 @@ fn remote_connected_phase(phase: ConnectionPhase) -> bool {
     )
 }
 
-fn desktop_is_idle(activity: &AtomicU64) -> bool {
-    desktop_idle_at(activity.load(Ordering::Relaxed), crate::monotonic_millis())
+/// 遥控器在线时保持 15 ms；遥控器断开或应用退出时恢复默认。
+fn yield_requested(phase: ConnectionPhase) -> bool {
+    remote_connected_phase(phase)
 }
 
-fn desktop_idle_at(last_activity_ms: u64, now_ms: u64) -> bool {
-    last_activity_ms == 0 || now_ms.saturating_sub(last_activity_ms) >= DESKTOP_IDLE_MS
-}
-
-/// 遥控器已连接时：语音流中无条件让出；空闲 1 s 后提前让出，给 Windows
-/// 约 2.4–4 s 的实际参数切换留出时间。普通键鼠一活动就撤销预热。
-fn yield_requested(phase: ConnectionPhase, streaming: bool, desktop_idle: bool) -> bool {
-    remote_connected_phase(phase) && (streaming || desktop_idle)
+fn should_adjust_hids(count: usize, decision: Option<HidPolicy>) -> bool {
+    count >= MIN_HID_DEVICES_TO_ADJUST && matches!(decision, Some(HidPolicy::Hold))
 }
 
 fn read_connection_params(device: &BluetoothLEDevice) -> Option<ConnectionParams> {
@@ -484,10 +717,10 @@ where
     futures::executor::block_on(operation.into_future())
 }
 
-fn apply_balanced(
+fn apply_throughput(
     device: &BluetoothLEDevice,
 ) -> Result<BluetoothLEPreferredConnectionParametersRequest, String> {
-    let parameters = BluetoothLEPreferredConnectionParameters::Balanced()
+    let parameters = BluetoothLEPreferredConnectionParameters::ThroughputOptimized()
         .map_err(|error| format!("preset_failed=0x{:08X}", error.code().0))?;
     let request = device
         .RequestPreferredConnectionParameters(&parameters)
@@ -497,7 +730,7 @@ fn apply_balanced(
             // 请求返回 Success 只代表系统接受；实际参数在随后的连接事件里协商，
             // 不在这一行伪造“已生效”。有效参数由独立只读探针/A-B 读回。
             crate::ble::gatt_note(
-                "voice_priority action=apply phase=completed terminal_result=passed status=success"
+                "voice_priority action=apply phase=completed terminal_result=passed status=success preset=throughput"
                     .to_owned(),
             );
             Ok(request)
@@ -566,16 +799,14 @@ mod tests {
     }
 
     #[test]
-    fn idle_ready_requests_yield_but_desktop_activity_cancels_it() {
+    fn throughput_hold_only_while_remote_connected() {
         for phase in [
             ConnectionPhase::Ready,
             ConnectionPhase::Streaming,
             ConnectionPhase::Draining,
         ] {
-            assert!(yield_requested(phase, false, true), "{phase:?}");
+            assert!(yield_requested(phase), "{phase:?}");
         }
-        assert!(yield_requested(ConnectionPhase::Streaming, true, false));
-        assert!(!yield_requested(ConnectionPhase::Ready, false, false));
         for phase in [
             ConnectionPhase::Idle,
             ConnectionPhase::Connecting,
@@ -586,27 +817,60 @@ mod tests {
             ConnectionPhase::Disconnected,
             ConnectionPhase::Failed,
         ] {
-            assert!(!yield_requested(phase, false, true), "{phase:?}");
+            assert!(!yield_requested(phase), "{phase:?}");
         }
     }
 
     #[test]
-    fn desktop_idle_uses_one_second_threshold() {
-        assert!(desktop_idle_at(0, 5_000));
-        assert!(!desktop_idle_at(1_000, 1_500));
-        assert!(desktop_idle_at(1_000, 2_000));
-    }
-
-    #[test]
-    fn balanced_interval_is_the_effective_signal() {
+    fn throughput_interval_is_the_effective_signal() {
         let params = |interval_units| ConnectionParams {
             interval_units,
             latency_events: 0,
             timeout_units: 400,
         };
-        assert!(!params(6).is_balanced());
-        assert!(params(24).is_balanced());
-        assert!(params(48).is_balanced());
+        assert!(params(12).is_throughput());
+        assert!(!params(6).is_throughput());
+        assert!(!params(48).is_throughput());
+    }
+
+    #[test]
+    fn adjust_only_after_measured_hold() {
+        assert!(!should_adjust_hids(0, Some(HidPolicy::Hold)));
+        assert!(!should_adjust_hids(1, None));
+        assert!(!should_adjust_hids(1, Some(HidPolicy::Observe)));
+        assert!(should_adjust_hids(1, Some(HidPolicy::Hold)));
+        assert!(should_adjust_hids(2, Some(HidPolicy::Hold)));
+    }
+
+    #[test]
+    fn policy_persists_hold_and_never_downgrades() {
+        let path = std::env::temp_dir().join(format!(
+            "sayall-voice-priority-policy-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut store = PolicyStore::load(Some(path.clone()));
+        assert_eq!(store.policy(1), None);
+        assert!(store.observe_health(2, crate::VoiceAudioHealth::Full));
+        assert_eq!(store.policy(2), Some(HidPolicy::Observe));
+        assert!(!store.observe_health(1, crate::VoiceAudioHealth::Unknown));
+        assert!(store.observe_health(1, crate::VoiceAudioHealth::Degraded));
+        assert_eq!(store.policy(1), Some(HidPolicy::Hold));
+        assert_eq!(store.effective_policy(2), Some(HidPolicy::Hold));
+        assert!(!store.observe_health(1, crate::VoiceAudioHealth::Full));
+        assert_eq!(store.policy(1), Some(HidPolicy::Hold));
+
+        let mut reloaded = PolicyStore::load(Some(path.clone()));
+        assert_eq!(reloaded.policy(1), Some(HidPolicy::Hold));
+        assert_eq!(reloaded.policy(2), Some(HidPolicy::Observe));
+        assert_eq!(reloaded.effective_policy(2), Some(HidPolicy::Hold));
+        assert!(!reloaded.observe_health(2, crate::VoiceAudioHealth::Full));
+        assert_eq!(reloaded.policy(2), Some(HidPolicy::Observe));
+        let _ = std::fs::remove_file(path);
     }
 }
 

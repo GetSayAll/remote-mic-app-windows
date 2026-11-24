@@ -566,7 +566,7 @@ export interface ConnectionSnapshot {
 /** 与 Rust `VoiceAudioHealth` 逐字对应。 */
 export type VoiceAudioHealth = "unknown" | "full" | "degraded";
 
-/** 与 Rust `VoicePriorityState` 逐字对应（2026-11-22，仅语音流期间自动生效）。 */
+/** 与 Rust `VoicePriorityState` 逐字对应（2026-11-24，遥控器在线期间自动生效）。 */
 export type VoicePriorityState = "off" | "applying" | "active" | "failed";
 
 export interface VoicePrioritySnapshot {

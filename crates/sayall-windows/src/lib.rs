@@ -7,16 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-
-/// 进程内单调毫秒；Raw Input 活动时间与语音优先共用一个时钟。
-pub(crate) fn monotonic_millis() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
 
 pub mod app_launcher;
 /// Windows 应用切换器（Alt+Tab）临时会话：状态机、I/O 接缝与结束报告。
@@ -316,7 +310,7 @@ pub enum VoiceAudioHealth {
     Degraded,
 }
 
-/// 「语音优先」运行状态（2026-11-22，仅语音流期间自动生效）。
+/// 「语音优先」运行状态（2026-11-24：遥控器在线期间 BLE HID 键鼠常驻 15 ms）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoicePriorityState {
@@ -325,7 +319,7 @@ pub enum VoicePriorityState {
     Off,
     /// 正在发现/切换键鼠连接参数，尚未读到实际 Balanced。
     Applying,
-    /// 语音流或空闲预热期间已实际读到至少一只 BLE HID 键鼠为 Balanced。
+    /// 遥控器在线且键鼠已实际读到 ThroughputOptimized（15 ms）。
     Active,
     /// 本次切换失败或超时；语音主链路不受影响，下一次重试。
     Failed,
@@ -621,7 +615,7 @@ pub struct WindowsPlatform {
     key_gate: Arc<key_gate::KeyGate>,
     #[cfg(windows)]
     runtime: Arc<ble::BleRuntime>,
-    /// 「语音优先」：遥控器连接期间让 BLE HID 键鼠让出连接事件（2026-11-22）。
+    /// 「语音优先」：遥控器在线期间把 BLE HID 键鼠常驻在 15 ms（2026-11-24）。
     #[cfg(windows)]
     voice_priority: Arc<voice_priority::VoicePriorityRuntime>,
     #[cfg(windows)]
@@ -744,15 +738,12 @@ impl Default for WindowsPlatform {
                 Arc::clone(&gain_db),
                 Arc::clone(&transcript_capture),
             ));
-            let desktop_activity = Arc::new(AtomicU64::new(0));
             let voice_priority = Arc::new(voice_priority::VoicePriorityRuntime::new(
                 runtime.state_handle(),
-                Arc::clone(&desktop_activity),
             ));
             let raw_input = Arc::new(raw_input_windows::RawInputRuntime::new(
                 Arc::clone(&raw_input_snapshot),
                 button_mapping.sender(),
-                desktop_activity,
             ));
             // RC003 三键传输桥接（捕获链第 ② 段）：主程序监听随机端口并写出描述文件，
             // 提权助手读取后回连。没有这一段，RC003 的三键只会被"清空"（Windows 侧
@@ -946,7 +937,7 @@ impl WindowsPlatform {
         }
     }
 
-    /// 当前「语音优先」运行状态；非 Windows 恒为 Off。该能力只在语音流期间自动生效，
+    /// 当前「语音优先」运行状态；非 Windows 恒为 Off。该能力在遥控器在线期间自动生效，
     /// 没有用户开关。
     pub fn voice_priority_snapshot(&self) -> VoicePrioritySnapshot {
         #[cfg(windows)]
