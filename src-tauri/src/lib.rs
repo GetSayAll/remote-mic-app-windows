@@ -78,6 +78,20 @@ fn min_window_inner_size(scale_factor: f64) -> (i32, i32) {
     )
 }
 
+/// 工作区装不下设计窗口时，显示窗口前先最大化，别把窗口底边（向导动作行）
+/// 放到屏幕外。工作区足够时保持原来的居中默认窗口。
+#[cfg(not(feature = "runtime-simulation"))]
+fn should_maximize_for_work_area(work_width: f64, work_height: f64) -> bool {
+    if !work_width.is_finite()
+        || !work_height.is_finite()
+        || work_width <= 0.0
+        || work_height <= 0.0
+    {
+        return false;
+    }
+    work_width < MAIN_WINDOW_MIN_WIDTH || work_height < MAIN_WINDOW_MIN_HEIGHT
+}
+
 #[cfg(test)]
 mod main_window_size_tests {
     use super::*;
@@ -93,6 +107,23 @@ mod main_window_size_tests {
     fn invalid_scale_falls_back_to_one_x() {
         assert_eq!(min_window_inner_size(0.0), (1067, 800));
         assert_eq!(min_window_inner_size(f64::NAN), (1067, 800));
+    }
+
+    #[cfg(not(feature = "runtime-simulation"))]
+    #[test]
+    fn maximizes_only_when_work_area_cannot_hold_the_design_window() {
+        assert!(!should_maximize_for_work_area(1536.0, 816.0));
+        assert!(!should_maximize_for_work_area(
+            MAIN_WINDOW_MIN_WIDTH,
+            MAIN_WINDOW_MIN_HEIGHT
+        ));
+        assert!(should_maximize_for_work_area(1280.0, 680.0));
+        assert!(should_maximize_for_work_area(1093.0, 574.0));
+        assert!(should_maximize_for_work_area(1000.0, 800.0));
+        // 读不到工作区时宁可不动作，避免把窗口意外最大化。
+        assert!(!should_maximize_for_work_area(0.0, 800.0));
+        assert!(!should_maximize_for_work_area(f64::NAN, 800.0));
+        assert!(!should_maximize_for_work_area(1066.67, f64::INFINITY));
     }
 }
 
@@ -212,6 +243,40 @@ impl WebviewUiHintState {
     fn take_for_restore(&mut self) -> Option<String> {
         self.scheduled = false;
         self.showing.take()
+    }
+}
+
+/// 桌面布局不应被浏览器缩放改变：WebView2 的 Ctrl+滚轮 / Ctrl+加号会把
+/// CSS 视口缩小，触发向导的窄窗折叠（2026-11-23 现场：重装后恢复，实为
+/// WebView2 用户数据里的缩放被重置）。每次页面加载后把缩放复位到 100%，
+/// 并关闭 WebView2 的缩放热键；系统级显示缩放仍由 Windows DPI 负责。
+#[cfg(windows)]
+fn configure_main_webview_zoom(webview: &tauri::Webview) {
+    let result = webview.with_webview(|webview| unsafe {
+        let controller = webview.controller();
+        let reset = controller.SetZoomFactor(1.0).is_ok();
+        let disabled = controller
+            .CoreWebView2()
+            .ok()
+            .and_then(|core| core.Settings().ok())
+            .map(|settings| settings.SetIsZoomControlEnabled(false).is_ok())
+            .unwrap_or(false);
+        sayall_windows::gatt_note(format!(
+            "webview feature=zoom_control action=reset terminal_result={} reset={} hotkeys={}",
+            if reset && disabled {
+                "passed"
+            } else {
+                "failed"
+            },
+            if reset { "passed" } else { "failed" },
+            if disabled { "disabled" } else { "unknown" }
+        ));
+    });
+    if result.is_err() {
+        sayall_windows::gatt_note(
+            "webview feature=zoom_control action=reset terminal_result=failed reason=with_webview_failed"
+                .to_owned(),
+        );
     }
 }
 
@@ -431,6 +496,12 @@ unsafe extern "system" fn window_key_subclass(
 #[cfg(windows)]
 const WINDOW_MIN_SIZE_SUBCLASS_ID: usize = 0x5A13;
 
+/// 允许一次“小于设计窗口”的最大化：小屏工作区不足 800 逻辑像素时，
+/// `WM_WINDOWPOSCHANGING` 的最小尺寸兜底会把最大化尺寸夹回 800，
+/// 结果窗口底边仍然落到屏幕外。只在应用主动最大化期间置位。
+#[cfg(windows)]
+static ALLOW_WORK_AREA_MAXIMIZE: AtomicBool = AtomicBool::new(false);
+
 /// 在原生窗口消息层限制主窗口最小尺寸。
 ///
 /// 仅在 Tauri `Resized` 回调里调用 `set_size` 会在拖动过程中反复改尺寸，
@@ -548,11 +619,15 @@ unsafe extern "system" fn window_min_size_subclass(
         info.ptMinTrackSize.x = minimum_width;
         info.ptMinTrackSize.y = minimum_height;
     } else if message == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
-        let (minimum_width, minimum_height) = min_window_outer_size(hwnd);
-        let position = &mut *(lparam.0 as *mut WINDOWPOS);
-        if position.flags.0 & SWP_NOSIZE.0 == 0 && position.cx > 0 && position.cy > 0 {
-            position.cx = position.cx.max(minimum_width);
-            position.cy = position.cy.max(minimum_height);
+        // 应用主动最大化到工作区时放行：工作区可能小于 1066.67×800 的设计最小值，
+        // 这里再夹一次会把最大化尺寸顶回去，窗口底边仍落到屏幕外。
+        if !ALLOW_WORK_AREA_MAXIMIZE.load(Ordering::Acquire) {
+            let (minimum_width, minimum_height) = min_window_outer_size(hwnd);
+            let position = &mut *(lparam.0 as *mut WINDOWPOS);
+            if position.flags.0 & SWP_NOSIZE.0 == 0 && position.cx > 0 && position.cy > 0 {
+                position.cx = position.cx.max(minimum_width);
+                position.cy = position.cy.max(minimum_height);
+            }
         }
     }
 
@@ -1665,6 +1740,10 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
             }
         }
     }
+    // 小屏工作区装不下设计窗口时，最大化后再显示；否则底部的向导动作行会
+    // 落到屏幕外。仿真构建不做这个动作，保持 CI 的固定窗口尺寸。
+    #[cfg(not(feature = "runtime-simulation"))]
+    let _ = maximize_main_window_if_work_area_is_small(app, &window, trigger);
     let _ = window.show();
     let _ = window.set_focus();
 
@@ -1714,6 +1793,51 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
         flag(visible_after),
         flag(foreground_after),
     ));
+}
+
+/// 工作区小于设计窗口（1066.67×800 逻辑像素）时最大化。只在“即将显示窗口”
+/// 的路径调用：`maximize()` 可能让隐藏窗口变为可见，不能放在 `setup` 无条件执行。
+#[cfg(all(windows, not(feature = "runtime-simulation")))]
+fn maximize_main_window_if_work_area_is_small(
+    app: &tauri::AppHandle,
+    window: &tauri::Window,
+    trigger: &str,
+) -> bool {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        sayall_windows::gatt_note(format!(
+            "startup feature=main_window_fit trigger={trigger} action=skip terminal_result=unknown reason=work_area_unavailable retryable=false"
+        ));
+        return false;
+    };
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let work_width = work.size.width as f64 / scale;
+    let work_height = work.size.height as f64 / scale;
+    if !should_maximize_for_work_area(work_width, work_height) {
+        return false;
+    }
+    // 放行这一轮“小于设计最小尺寸”的尺寸变更；否则 min-size 子类会把
+    // 最大化目标夹回 1066.67×800，窗口底边仍然在屏幕外。
+    ALLOW_WORK_AREA_MAXIMIZE.store(true, Ordering::Release);
+    let result = window.maximize();
+    ALLOW_WORK_AREA_MAXIMIZE.store(false, Ordering::Release);
+    // `maximize()` 的返回值不等于窗口真的最大化：min-size 子类或异步派发都可能
+    // 让实际状态不同。读回 `is_maximized` 再判定，failed 时保留默认显示路径。
+    let maximized = window.is_maximized().unwrap_or(false);
+    sayall_windows::gatt_note(format!(
+        "startup feature=main_window_fit trigger={trigger} action=maximize terminal_result={} maximized={maximized} work_w={work_width:.0} work_h={work_height:.0} retryable=true",
+        if result.is_ok() && maximized {
+            "passed"
+        } else {
+            "failed"
+        }
+    ));
+    result.is_ok() && maximized
 }
 
 /// 开关打开：**每次都重新授权**（弹一次 UAC 重新注册任务），然后触发助手。
@@ -5816,6 +5940,15 @@ pub fn run() {
                 "webview event=document_load phase={phase} result=passed main_window={}",
                 webview.label() == "main"
             ));
+            // 页面加载完成后把主 WebView 的缩放复位并锁定为 100%：桌面布局
+            // 依赖 CSS 视口尺寸，浏览器缩放不应改变它（仿真构建也走同一路径，
+            // 不影响前端仿真断言）。
+            #[cfg(windows)]
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                configure_main_webview_zoom(webview);
+            }
         })
         .setup(|app| {
             sayall_windows::gatt_note(
@@ -5834,6 +5967,12 @@ pub fn run() {
                     MAIN_WINDOW_DEFAULT_HEIGHT,
                 ));
                 let _ = window.center();
+            }
+            // 尽量在页面加载前锁定 100% 缩放；WebView 尚未就绪时由
+            // `on_page_load(Finished)` 再补一次（见 configure_main_webview_zoom）。
+            #[cfg(windows)]
+            if let Some(webview) = main_webview(app.handle()) {
+                configure_main_webview_zoom(&webview);
             }
             // 常用语浮层窗口（可选私有组件）：窗口先建好并隐藏；组件未注入时能力不可用。
             let common_phrases_available = common_phrase_panel::install(app.handle());
@@ -5986,7 +6125,14 @@ pub fn run() {
                 let visible_before = window.is_visible().unwrap_or(true);
                 if show_main_window_on_startup {
                     // 窗口在 `tauri.conf.json` 里以 `visible: false` 创建，避免设置读取
-                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。
+                    // 之前先闪一帧；这里按判定结果显式显示（幂等）。小屏工作区装不下
+                    // 1066.67×800 时先最大化，保证向导动作行不会落到屏幕外。
+                    #[cfg(all(windows, not(feature = "runtime-simulation")))]
+                    let _ = maximize_main_window_if_work_area_is_small(
+                        app.handle(),
+                        &window,
+                        "startup",
+                    );
                     let show_result = window.show();
                     let _ = window.set_focus();
                     let visible_after = window.is_visible().unwrap_or(true);

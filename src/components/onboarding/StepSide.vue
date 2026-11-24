@@ -4,10 +4,14 @@
  * 检查卡每一行 = 当前步骤的一条「继续」条件（由 `onboarding/panel.ts` 推导）。
  * 窄栏/矮窗时由页面样式把本组件收进内容列（见 OnboardingPage.vue 的媒体查询）。
  */
+import { computed } from "vue";
 import type { SidePanel, StatusRowState } from "../../onboarding/panel";
 import { t } from "../../lib/i18n";
 
 const props = defineProps<{ panel: SidePanel }>();
+
+/** 没有检查卡的步骤（准备/完成）在单栏折叠时不渲染空侧栏；见页面媒体查询。 */
+const hasCheckCard = computed(() => Boolean(props.panel.cardTitle && props.panel.rows?.length));
 
 const GLYPH: Record<StatusRowState, string> = {
   pending: "○",
@@ -21,7 +25,7 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
 </script>
 
 <template>
-  <aside class="onboarding-side">
+  <aside class="onboarding-side" :class="{ 'is-empty': !hasCheckCard }">
     <div class="side-visual">
       <img
         v-if="props.panel.visual === 'remote'"
@@ -44,7 +48,7 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
     </div>
 
     <section
-      v-if="props.panel.cardTitle && props.panel.rows?.length"
+      v-if="hasCheckCard"
       class="onboarding-check-card"
       :aria-label="props.panel.cardTitle"
     >

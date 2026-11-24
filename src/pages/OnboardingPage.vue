@@ -72,6 +72,7 @@ import {
   remoteStateToken,
   type RemoteStateOptions,
 } from "../onboarding/remote-state";
+import { layoutLogDetail, measureOnboardingLayout } from "../onboarding/layout-snapshot";
 import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
@@ -125,6 +126,23 @@ function reportStepAction(
 
 function actionElapsed(started: number): number {
   return Math.max(0, Math.round(performance.now() - started));
+}
+
+// 主按钮是否真的在视口里、是否可点：每步进入、resize 去抖、点击主按钮时各留一条。
+function reportLayout(trigger: "step" | "resize" | "click"): void {
+  reportStepAction(step.value, "layout_snapshot", "passed", {
+    detail: layoutLogDetail(measureOnboardingLayout(), trigger),
+  });
+}
+
+let layoutReportTimer: number | null = null;
+
+function scheduleLayoutReport(): void {
+  if (layoutReportTimer !== null) window.clearTimeout(layoutReportTimer);
+  layoutReportTimer = window.setTimeout(() => {
+    layoutReportTimer = null;
+    reportLayout("resize");
+  }, 250);
 }
 
 /** 原始错误只进控制台/日志；界面一律显示固定的本地化句子。 */
@@ -569,6 +587,8 @@ watch(
 onMounted(async () => {
   // 心跳是刻意保留的重复日志（卡住定位）；其余事件遵守"状态未变化不重复刷"。
   heartbeatTimer = window.setInterval(reportHeartbeat, 30_000);
+  window.addEventListener("resize", scheduleLayoutReport);
+  window.visualViewport?.addEventListener("resize", scheduleLayoutReport);
   await restoreStep();
 });
 
@@ -576,6 +596,12 @@ onUnmounted(() => {
   if (heartbeatTimer !== null) {
     window.clearInterval(heartbeatTimer);
     heartbeatTimer = null;
+  }
+  window.removeEventListener("resize", scheduleLayoutReport);
+  window.visualViewport?.removeEventListener("resize", scheduleLayoutReport);
+  if (layoutReportTimer !== null) {
+    window.clearTimeout(layoutReportTimer);
+    layoutReportTimer = null;
   }
   if (logDirectoryResetTimer !== null) {
     window.clearTimeout(logDirectoryResetTimer);
@@ -636,6 +662,8 @@ async function setStep(
 ): Promise<void> {
   step.value = target;
   reportOnboardingEvent({ kind: "step_entered", result: "passed", reason, step: target });
+  await nextTick();
+  reportLayout("step");
   try {
     await saveOnboardingStep(target);
     saveMessage.value = "";
@@ -653,6 +681,7 @@ async function setStep(
 
 async function onContinue(): Promise<void> {
   if (!continueEnabled.value) return;
+  reportLayout("click");
   reportOnboardingEvent({
     kind: "step_passed",
     result: "passed",
@@ -1540,6 +1569,7 @@ async function onFixStep(): Promise<void> {
 
 async function onStartUsing(): Promise<void> {
   if (completing.value || step.value !== "complete" || !gate.value.ok) return;
+  reportLayout("click");
   completing.value = true;
   try {
     // 提交 staged 语音绑定（Rust 事务）并标记完成；随后交回主界面。
@@ -1601,8 +1631,7 @@ async function openLogDirectoryFromOnboarding(): Promise<void> {
     await openLogDirectory();
     logDirectoryState.value = "opened";
     logDirectoryMessage.value = t("已打开日志目录；把其中的日志文件发给开发者。");
-    reportStepAction(target, "open_log_directory", "passed", {
-      elapsedMs: actionElapsed(started),
+    reportStepAction(target, "open_log_directory", "passed", {      elapsedMs: actionElapsed(started),
     });
     if (logDirectoryResetTimer !== null) window.clearTimeout(logDirectoryResetTimer);
     logDirectoryResetTimer = window.setTimeout(() => {
@@ -3296,13 +3325,35 @@ async function retryVoiceTest(): Promise<void> {
 @media (max-width: 1024px), (max-height: 660px) {
   .onboarding-body {
     grid-template-columns: minmax(0, 1fr);
+    /* 行高按内容撑开，别让两行平分固定视口高度：否则正文会被压成内部滚动，
+       动作行停在半空、检查卡叠在正文上。整页由 .onboarding-body 单层滚动。 */
+    grid-auto-rows: max-content;
+    align-content: start;
     overflow-y: auto;
   }
   .onboarding-main {
     overflow: visible;
   }
   .onboarding-content {
+    /* 单栏时正文按自然高度展开，不再作为 flex 收缩项；否则 overflow: visible
+       只是把内容画到盒子外，页面本身不会变高。 */
+    flex: 0 0 auto;
     overflow: visible;
+  }
+  /* 单栏时滚动容器上移到 .onboarding-body，动作行不再是内容列外的固定页脚；
+     必须吸底，否则「继续」会被长内容推到首屏之外（2026-11-23 现场：用户
+     以为没有下一步）。sticky 只在正文栏范围内生效，滚到检查卡时自然让位；
+     背景和上边框避免正文从按钮后面透出来。左右负边距与 .onboarding-main
+     的 44px 内边距对齐，让底栏铺满窗口。 */
+  .onboarding-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    margin: 0 -44px;
+    padding: 10px 44px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-canvas);
+    box-shadow: 0 -10px 18px -16px var(--shadow-card);
   }
   .onboarding-side {
     flex-direction: row;
@@ -3314,6 +3365,10 @@ async function retryVoiceTest(): Promise<void> {
     overflow: visible;
   }
   .side-visual {
+    display: none;
+  }
+  /* 准备页/完成页没有检查卡：折叠时右栏只剩内边距和上边框，整栏隐藏。 */
+  .onboarding-side.is-empty {
     display: none;
   }
   .onboarding-check-card {
