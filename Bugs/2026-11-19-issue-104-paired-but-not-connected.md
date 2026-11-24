@@ -130,6 +130,52 @@
 下一次用户复现时确认 HID 是否重新到场、按遥控器键是否能让链路恢复；不能把
 “休眠/没电”直接写成结论。
 
+### 2026-11-24 第三份用户日志（USB 蓝牙适配器，链路未建立）
+
+同一 issue 的另一位用户（Windows 10.0.26300 x64，主板无蓝牙，使用 USB 蓝牙
+适配器；1.9.5 `4ead96e`）追加了一份 862 行、只覆盖最近一次启动的日志：
+
+- `ble_scan` 在删除设备后为 `total_paired_count=0`，重新配对后变为 `1`；
+  配对记录恢复，但连接结果不变。
+- 该段 `ble_connect_link` 共 26 条，**全部 `link_status=disconnected`**；
+  77 条 `gatt_unreachable`、3 条 `operation_timed_out`，0 次成功。
+- `device_from_address` / `device_properties` 均通过；失败固定在
+  `service_discovery`，没有一次走到特征/订阅阶段。
+- 全程无 `device_arrived`，`raw_input matched_device_count=0`，`keys_seen=0`；
+  用户明确说明重连时按过普通按键，遥控器没有响应，也没有同时连接手机/电视。
+- Windows 蓝牙设置里的状态在“已连接/已配对”之间跳；日志在失败瞬间读到的
+  仍是 `disconnected`。资源探测正常，`ble_partial_cleanup result=ok`。
+
+这份日志把范围进一步压到 **GATT 之前的链路建立**：不是“链路在、ATVV 服务
+不可达”，而是 Windows 没有维持可用链路，HID 接口也不在场。因此五路径 fallback
+不会被触发；不能把 selector/Cached 路径当作此现场的修复。应用侧暂不改连接
+决策，下一步先补只读诊断（见下）并由用户做适配器/遥控器 A/B。
+
+本次诊断补充（只读，不改变重连/GATT 决策）：
+
+- `ble_adapter phase=observed ...`：进程启动后由独立短生命周期线程记录
+  `BluetoothAdapter` 的 LE/中央/外围/Classic 能力和 Radio 状态。
+- `ble_device phase=access ...`：每次尝试在服务发现前记录
+  `access_status`、`is_paired`、`is_enabled`。
+- `ble_link phase=observer ...` + `ble_link phase=observed ...`：在设备对象创建后
+  立即注册只写 `gatt_note` 的 `ConnectionStatusChanged` 观察器，成功/失败路径
+  都成对释放；用于确认 Windows 是否在失败尝试中短暂连上。
+- 不记录适配器名称/地址、设备名称/ID、HID 路径或原始错误文本。
+
+验证（2026-11-24）：
+
+- `cargo fmt --all -- --check`：`passed`
+- `cargo test -p sayall-windows --lib`：`passed`（591 passed / 19 ignored；
+  新增 `adapter_capability_note_is_stable_and_identity_free`、
+  `device_access_note_distinguishes_access_and_pairing`、
+  `early_link_observer_records_transitions_without_identity`）
+- `cargo test --workspace`：`passed`
+- `cargo check --workspace`：`passed`
+- `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
+- `scripts/ci-preflight.ps1`：7/7 `passed`（首次运行出现一次已有的
+  `button_mapping` 并行测试偶发失败，单测复跑与完整自检复跑均通过）
+- 安装包/真实 RC001/RC003 上观察新增日志：待本次诊断构建的本地包验证
+
 ## 验证
 
 - `cargo fmt --all -- --check`：`passed`

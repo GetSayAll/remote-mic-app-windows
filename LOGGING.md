@@ -120,6 +120,27 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
   `ovf1` = 文档比可视宽度更宽。应用无法知道用户是否“看见”，只记录按钮在视口内且可点。
 - 复制诊断的 `Layout:` 行给同样事实的可读版本；不做逐帧或滚动记录。
 
+### BLE 适配器与链路建立诊断（2026-11-24）
+
+issue #104 的 1.9.5 日志能证明“配对记录存在、服务发现失败”，但不能回答
+“Windows 在尝试期间是否曾经连上过”。连接路径补充三类只读日志，不改变重连
+或 GATT 决策：
+
+- `ble_adapter phase=observed low_energy=... central_role=... peripheral_role=... classic=... radio_state=...`：
+  进程启动后由独立短生命周期线程查询 `BluetoothAdapter`，只记录能力布尔和 Radio
+  状态；查询失败写 `terminal_result=unavailable`，不记录适配器名称、地址或设备 ID。
+- `ble_device phase=access ... access_status=... is_paired=... is_enabled=...`：
+  每次连接尝试在创建设备对象后、服务发现前记录访问/配对快照；只写稳定 token。
+- `ble_link phase=observer terminal_result=registered|released|release_failed ...` 与
+  `ble_link phase=observed status=... connection_generation=... attempt=... elapsed_ms=...`：
+  在设备对象创建后立即注册只调用 `gatt_note` 的早期 `ConnectionStatusChanged`
+  观察器，成功或失败路径都成对释放；它不发送 worker 消息，不触发清理/重连。
+  这样失败尝试里也能看到 Windows 是否短暂 `connected`，而不是只在失败瞬间
+  读到一次 `link_status`。
+
+这些行只用于区分“适配器不支持 BLE 主机角色 / 配对记录存在但设备不在场 /
+权限被拒 / 链路短暂建立后 GATT 失败”，不能替代 `ble_service_path` 的路径结果。
+
 ## 隐私红线
 
 不得记录语音或转写正文、用户输入、剪贴板、用户名/邮箱/手机号、完整路径、窗口标题、蓝牙 MAC/UUID/序列号、HID 路径、IP、Token/API Key/密码/私钥/证书、第三方 App 私有状态或原始音频字节。不要用敏感值的稳定哈希替代脱敏。允许记录稳定产品分类、布尔结果、错误 domain/code、采样率、帧数、耗时和脱敏计数。
