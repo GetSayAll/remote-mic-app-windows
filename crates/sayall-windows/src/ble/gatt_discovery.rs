@@ -984,6 +984,43 @@ mod tests {
     }
 
     #[test]
+    fn production_selection_requires_transmit_probe_before_marking_path_passed() {
+        // 这是接线契约测试，不是 WinRT 行为测试：防止以后把“服务对象返回”直接当成
+        // 成功路径，或在调用方绕过 transmit validator。行为由上面的 probe_outcome /
+        // should_stop 单测和真机测试覆盖。
+        let discovery = include_str!("gatt_discovery.rs");
+        let probe = discovery
+            .find("let probe_result = probe_service_path(")
+            .expect("service path must call probe_service_path");
+        let passed = discovery
+            .find("outcomes[order] = (path, ServicePathOutcome::Passed);")
+            .expect("service path must mark passed only after probe");
+        let selected = discovery
+            .find("return Ok((service, validated));")
+            .expect("service path must return the validated service");
+        assert!(
+            probe < passed,
+            "probe must run before marking a service path passed"
+        );
+        assert!(
+            probe < selected,
+            "probe must run before selecting a service path"
+        );
+
+        let caller = include_str!("../ble.rs");
+        let call = caller
+            .find("discover_atvv_service(")
+            .expect("ble.rs must call discover_atvv_service");
+        let transmit = caller
+            .find("find_characteristic(service, TRANSMIT_UUID, \"transmit\")")
+            .expect("ble.rs must pass the transmit characteristic validator");
+        assert!(
+            call < transmit,
+            "the caller must validate transmit before accepting service discovery"
+        );
+    }
+
+    #[test]
     #[ignore = "真机：需要已配对的 RC001/RC003；会实际发起 GATT 服务发现"]
     fn real_remote_service_discovery_paths() {
         // 手工验收用：把本机已配对的受支持遥控器当作目标，真实走一遍五条路径。
