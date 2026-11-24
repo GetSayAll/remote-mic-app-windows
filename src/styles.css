@@ -172,6 +172,13 @@ html[data-theme="dark"] {
 }
 *::-webkit-scrollbar { width: 0; height: 0; display: none; }
 html, body, #app { width: 100%; min-width: 940px; min-height: 100%; margin: 0; }
+/* 2026-11-23：有效视口窄于 940 时不能再把文档锁在 940。否则右对齐的「继续」
+   会跑到窗口右侧之外，左对齐的「复制诊断信息/打开日志目录」还在窗口里——
+   看起来像「继续」不存在；页面能横向滚，但全局滚动条已隐藏。正常主窗口
+   最小 1066.67 逻辑像素时这条不生效，只兜住 WebView 缩放/系统压窗的现场。 */
+@media (max-width: 939px) {
+  html, body, #app { min-width: 0; }
+}
 /* 2026-11-05 Andy：触摸板双指上下拖动会把整个页面拖出视口，顶部/底部露出
    空白。根因是 html 作为唯一滚动层——手势一旦越过内容的上下沿，overscroll
    就把画布背景拖进可视区，看起来像页面被"拉走"一截。

@@ -110,6 +110,15 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 连接与 Raw Input 的详细 stage 仍由既有
 `ble_connect*` / `raw_input*` 行提供。现场只取一份 `sayall-diagnostic.log`，即可区分
 「没连上」「连上但无 HID 按键通道」「通道在位但按键没有到达」。
+### 向导主按钮可见性（2026-11-24）
+
+- 步骤进入（DOM 更新后）、resize 去抖 250ms、点击主按钮时各落一条
+  `frontend event=onboarding phase=action result=passed reason=layout_snapshot`；
+  `detail=<step|resize|click>_vp<W>x<H>_dpr<d>_mode_<single|two>_ovf<0|1>_btn<0|1>_hit<0|1>_en<0|1>`，
+  全部为稳定 token（≤64 字符）。
+- `btn1` = 主按钮完整落在视口内；`hit1` = 按钮中心 `elementFromPoint` 命中按钮；
+  `ovf1` = 文档比可视宽度更宽。应用无法知道用户是否“看见”，只记录按钮在视口内且可点。
+- 复制诊断的 `Layout:` 行给同样事实的可读版本；不做逐帧或滚动记录。
 
 ## 隐私红线
 

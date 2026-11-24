@@ -406,6 +406,23 @@ describe("Onboarding wizard shell", () => {
     expect(passed.some((p) => p.step === "welcome" && p.reason === "user_continue")).toBe(true);
   });
 
+  it("writes a layout snapshot on step entry and on the primary click", async () => {
+    const wrapper = await mountWizard(runtimeWith());
+    const snapshots = () =>
+      onboardingEvents("action").filter((p) => p.reason === "layout_snapshot");
+
+    expect(
+      snapshots().some((p) => typeof p.detail === "string" && p.detail.startsWith("step_")),
+    ).toBe(true);
+
+    await wrapper.find(".onboarding-actions .primary-button").trigger("click");
+    await flushPromises();
+
+    expect(
+      snapshots().some((p) => typeof p.detail === "string" && p.detail.startsWith("click_")),
+    ).toBe(true);
+  });
+
   it("全按键支持说明页：默认可继续，并说明会同时打开支持更多输入工具", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("full_key"));
     const wrapper = await mountWizard(connectedRuntime());
