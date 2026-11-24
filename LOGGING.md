@@ -129,8 +129,9 @@ issue #104 的 1.9.5 日志能证明“配对记录存在、服务发现失败�
 - `ble_adapter phase=observed low_energy=... central_role=... peripheral_role=... classic=... radio_state=...`：
   进程启动后由独立短生命周期线程查询 `BluetoothAdapter`，只记录能力布尔和 Radio
   状态；查询失败写 `terminal_result=unavailable`，不记录适配器名称、地址或设备 ID。
-- `ble_device phase=access ... access_status=... is_paired=... is_enabled=...`：
-  每次连接尝试在创建设备对象后、服务发现前记录访问/配对快照；只写稳定 token。
+- `ble_device phase=access ... access_status=... is_paired=... is_present=... is_connected=... is_enabled=...`：
+  每次连接尝试在创建设备对象后、服务发现前记录访问/配对/在场快照；只写稳定 token。
+  `is_present`/`is_connected` 来自 AEP 属性，读不到时写 `unknown`。
 - `ble_link phase=observer terminal_result=registered|released|release_failed ...` 与
   `ble_link phase=observed status=... connection_generation=... attempt=... elapsed_ms=...`：
   在设备对象创建后立即注册只调用 `gatt_note` 的早期 `ConnectionStatusChanged`

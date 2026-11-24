@@ -156,7 +156,8 @@
 - `ble_adapter phase=observed ...`：进程启动后由独立短生命周期线程记录
   `BluetoothAdapter` 的 LE/中央/外围/Classic 能力和 Radio 状态。
 - `ble_device phase=access ...`：每次尝试在服务发现前记录
-  `access_status`、`is_paired`、`is_enabled`。
+  `access_status`、`is_paired`、`is_present`、`is_connected`、`is_enabled`；
+  在场/已连接来自 AEP 属性，读不到写 `unknown`。
 - `ble_link phase=observer ...` + `ble_link phase=observed ...`：在设备对象创建后
   立即注册只写 `gatt_note` 的 `ConnectionStatusChanged` 观察器，成功/失败路径
   都成对释放；用于确认 Windows 是否在失败尝试中短暂连上。

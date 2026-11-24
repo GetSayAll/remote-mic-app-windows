@@ -22,7 +22,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use windows::core::GUID;
+use windows::core::{Interface, GUID, HSTRING};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristic, GattCharacteristicProperties,
     GattClientCharacteristicConfigurationDescriptorValue, GattCommunicationStatus,
@@ -32,9 +32,9 @@ use windows::Devices::Bluetooth::{
     BluetoothAdapter, BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice,
     BluetoothLEPreferredConnectionParameters, BluetoothLEPreferredConnectionParametersRequest,
 };
-use windows::Devices::Enumeration::DeviceAccessStatus;
+use windows::Devices::Enumeration::{DeviceAccessStatus, DeviceInformation};
 use windows::Devices::Radios::RadioState;
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{IPropertyValue, TypedEventHandler};
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows_future::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
@@ -1997,19 +1997,33 @@ fn access_status_token(status: Option<DeviceAccessStatus>) -> &'static str {
     }
 }
 
-/// 每次连接尝试的访问/配对快照。用于区分"只有配对记录"、"权限被拒"与
-/// "链路已建立"；只记录布尔/枚举 token，不记录设备名、地址或设备 ID。
+/// 从 `DeviceInformation.Properties` 读取 AEP 布尔属性。AEP 在部分 Windows
+/// 版本/适配器上不返回该键，调用方按 `unknown` 记录，不猜测在场状态。
+fn aep_boolean(information: &DeviceInformation, key: &str) -> Option<bool> {
+    let properties = information.Properties().ok()?;
+    let value = properties.Lookup(&HSTRING::from(key)).ok()?;
+    let value: IPropertyValue = value.cast().ok()?;
+    value.GetBoolean().ok()
+}
+
+/// 每次连接尝试的访问/配对/在场快照。用于区分"只有配对记录"、"权限被拒"、
+/// "设备不在场"与"链路已建立"；只记录布尔/枚举 token，不记录设备名、地址
+/// 或设备 ID。
 fn device_access_note(
     connection_generation: u64,
     attempt: u32,
     access_status: Option<DeviceAccessStatus>,
     is_paired: Option<bool>,
+    is_present: Option<bool>,
+    is_connected: Option<bool>,
     is_enabled: Option<bool>,
 ) -> String {
     format!(
-        "ble_device phase=access connection_generation={connection_generation} attempt={attempt} access_status={} is_paired={} is_enabled={}",
+        "ble_device phase=access connection_generation={connection_generation} attempt={attempt} access_status={} is_paired={} is_present={} is_connected={} is_enabled={}",
         access_status_token(access_status),
         capability_token(is_paired),
+        capability_token(is_present),
+        capability_token(is_connected),
         capability_token(is_enabled)
     )
 }
@@ -2109,6 +2123,12 @@ fn log_device_access(device: &BluetoothLEDevice, connection_generation: u64, att
         .as_ref()
         .and_then(|information| information.Pairing().ok())
         .and_then(|pairing| pairing.IsPaired().ok());
+    let is_present = information
+        .as_ref()
+        .and_then(|information| aep_boolean(information, "System.Devices.Aep.IsPresent"));
+    let is_connected = information
+        .as_ref()
+        .and_then(|information| aep_boolean(information, "System.Devices.Aep.IsConnected"));
     let is_enabled = information
         .as_ref()
         .and_then(|information| information.IsEnabled().ok());
@@ -2117,6 +2137,8 @@ fn log_device_access(device: &BluetoothLEDevice, connection_generation: u64, att
         attempt,
         access_status,
         is_paired,
+        is_present,
+        is_connected,
         is_enabled,
     ));
 }
@@ -5353,10 +5375,12 @@ mod tests {
             Some(DeviceAccessStatus::Allowed),
             Some(true),
             Some(true),
+            Some(false),
+            Some(true),
         );
         assert_eq!(
             allowed,
-            "ble_device phase=access connection_generation=12 attempt=3 access_status=allowed is_paired=yes is_enabled=yes"
+            "ble_device phase=access connection_generation=12 attempt=3 access_status=allowed is_paired=yes is_present=yes is_connected=no is_enabled=yes"
         );
         let denied = device_access_note(
             13,
@@ -5364,9 +5388,13 @@ mod tests {
             Some(DeviceAccessStatus::DeniedByUser),
             Some(false),
             None,
+            Some(false),
+            None,
         );
         assert!(denied.contains("access_status=denied_by_user"), "{denied}");
         assert!(denied.contains("is_paired=no"), "{denied}");
+        assert!(denied.contains("is_present=unknown"), "{denied}");
+        assert!(denied.contains("is_connected=no"), "{denied}");
         assert!(denied.contains("is_enabled=unknown"), "{denied}");
     }
 
