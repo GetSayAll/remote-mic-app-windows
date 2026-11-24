@@ -114,6 +114,44 @@
 - 详细证据与残余边界见
   [Bugs/2026-11-23-voice-priority-yield-latency.md](../../Bugs/2026-11-23-voice-priority-yield-latency.md)。
 
+## 2026-11-24 方案调整（1.9.6，鼠标优先）
+
+- 1.9.5 的 1 s 空闲预热被用户否决：日志显示 apply/restore 每隔几秒反复，
+  鼠标回桌面先吃 60 ms 间隔，体感是频繁卡顿。
+- 1.9.6 不再空闲预热：只在 `Streaming` 让出；若本次会话
+  `voice_audio_health=degraded`，结束后保留 5 s 重试窗口；普通键盘活动或
+  鼠标移动/滚轮立即取消。鼠标平时保持 7.5 ms。
+- 冷启动首字仍可能在 2.4–4.1 s 的切换窗口内丢失；彻底保护需手动低延迟模式、
+  缓冲/提示或硬件隔离。
+- 15 ms `ThroughputOptimized` 与 `GattSession.MaintainConnection` 加速切换
+  仍未验证（当前 BLE 键鼠不在线），保留为 `deferred`。
+- 本轮选择依据：用户明确不能接受平时鼠标卡顿；在不改驱动/公开 API 的边界内，
+  “按会话 + 降级重试”是唯一不把代价放到平时的方案。
+- 1.9.6 本地测试包已安装并启动；空闲日志没有 `voice_priority apply`，只有遥控器
+  自身 `12/0/200`，确认空闲不再预热。真机鼠标/语音延迟验证因 BLE 键鼠不在线
+  为 `deferred`。
+
+## 2026-11-24 定案（1.9.8：15 ms 常驻）
+
+- 1.9.6 复测 16 次：8 full / 8 degraded；降级重试窗口 3 次成功、4 次被键鼠活动
+  提前取消，说明“按会话切换 + 重试”仍会把首字交给 2.1–3.4 s 的切换延迟。
+- 1.9.7 实验（键鼠已上线）：两只 HID 常驻 `12/0/200`（15 ms），语音期间不切换。
+  sessions 64–69 **6/6 full**，12.1–12.9 k samples/s；鼠标空闲可接受，语音期间
+  因音频共用适配器略慢，文字总体正常。
+- 1.9.8 正式采用：遥控器在线期间保持 15 ms；断开/退出恢复默认。删除 Balanced
+  切换、5 s 降级重试窗口、桌面活动判定与鼠标 Raw Input 监听。
+- 1.9.9 测试了“只有鼠标 + 遥控器”的配置门控：未调整时 session 83 仅
+  4,789 samples/s（degraded），证明单 HID 也会争用音频；自动回退对该鼠标开
+  15 ms 后 sessions 84–90 恢复 full。
+- 1.9.10 定案：只要存在 ≥1 个非遥控器 BLE HID 就常驻 15 ms；0 个不操作。
+- 1.9.11：改为按 HID 数量“先测后调 + 持久化”：首次配置不改参数并记录
+  full/degraded；full 永久 observe，degraded 永久 hold（15 ms）；较低数量
+  已 hold 时更高数量继承 hold。决策文件
+  `%LOCALAPPDATA%\SayAll\voice-priority-policy.json` 只含数量和决策。
+  资源够的用户零操作；资源不够的用户首次语音仍可能丢首字。
+- 本机按 session 83 预置单 HID hold，避免再次首测丢字。
+- 残余：长语音/弱信号/其它适配器/RC001/耗电仍为 `deferred`。
+
 ## 未覆盖
 
 - 仅本机、本适配器、RC003；RC001 与其它适配器 `deferred`。

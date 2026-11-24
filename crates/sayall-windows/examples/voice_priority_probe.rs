@@ -1,15 +1,14 @@
-//! 只读/可逆的「语音优先」运行时探针（2026-11-22）。
+//! 只读/可逆的「语音优先」运行时探针（2026-11-24）。
 //!
 //! 用法（Visual Studio Developer PowerShell）：
 //!   cargo run -p sayall-windows --example voice_priority_probe
 //!
 //! 它模拟一次 8 秒语音流：`ConnectionPhase::Streaming`，让已连接的 BLE HID 键鼠
-//! 临时进入 Balanced；随后切回 Ready（语音结束），恢复原参数。输出只含状态、
-//! 设备数与参数，不含地址、设备名或语音内容。
+//! 进入 ThroughputOptimized（15 ms）；随后切到 Disconnected（模拟遥控器断开），
+//! 恢复默认参数。输出只含状态、设备数与参数，不含地址、设备名或语音内容。
 
 use sayall_windows::voice_priority::VoicePriorityRuntime;
 use sayall_windows::{remote_target, ConnectionPhase, ConnectionSnapshot};
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -25,7 +24,7 @@ fn main() {
         phase: ConnectionPhase::Streaming,
         ..ConnectionSnapshot::default()
     }));
-    let runtime = VoicePriorityRuntime::new(Arc::clone(&state), Arc::new(AtomicU64::new(0)));
+    let runtime = VoicePriorityRuntime::new(Arc::clone(&state));
     for tick in 0..8 {
         thread::sleep(Duration::from_secs(1));
         let snapshot = runtime.snapshot();
@@ -36,9 +35,9 @@ fn main() {
         );
     }
 
-    // 语音结束：运行时应在一个轮询周期内恢复键鼠参数。
+    // 遥控器断开：运行时应在一个轮询周期内恢复键鼠参数。
     *state.lock().unwrap() = ConnectionSnapshot {
-        phase: ConnectionPhase::Ready,
+        phase: ConnectionPhase::Disconnected,
         ..ConnectionSnapshot::default()
     };
     thread::sleep(Duration::from_secs(3));
