@@ -22,17 +22,19 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use windows::core::GUID;
+use windows::core::{Interface, GUID, HSTRING};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristic, GattCharacteristicProperties,
     GattClientCharacteristicConfigurationDescriptorValue, GattCommunicationStatus,
     GattDeviceService, GattValueChangedEventArgs, GattWriteOption,
 };
 use windows::Devices::Bluetooth::{
-    BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice,
+    BluetoothAdapter, BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice,
     BluetoothLEPreferredConnectionParameters, BluetoothLEPreferredConnectionParametersRequest,
 };
-use windows::Foundation::TypedEventHandler;
+use windows::Devices::Enumeration::{DeviceAccessStatus, DeviceInformation};
+use windows::Devices::Radios::RadioState;
+use windows::Foundation::{IPropertyValue, TypedEventHandler};
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows_future::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
@@ -52,6 +54,7 @@ const BATTERY_SERVICE_UUID: GUID = GUID::from_u128(0x0000180f00001000800000805f9
 const BATTERY_LEVEL_UUID: GUID = GUID::from_u128(0x00002a1900001000800000805f9b34fb);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
+const ADAPTER_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// WinRT 异步操作的硬上限（2026-10-21 现场）：旧的半死链路上
 /// `BluetoothLEDevice` 已经拿到、`Name()` 也能读，但随后的 GATT 查询
 /// 永不返回，工作线程被 `block_on` 永久占住——UI 一直停在「正在连接遥控器」，
@@ -917,6 +920,7 @@ fn worker_loop(
         return;
     }
     let _apartment = WinRtApartment;
+    spawn_adapter_capability_probe();
     let mut session: Option<BleSession> = None;
     let mut pipeline = AtvvVoicePipeline::default();
     let mut active_voice_samples = 0_u64;
@@ -1941,6 +1945,241 @@ fn link_status_token(status: Option<BluetoothConnectionStatus>) -> &'static str 
         Some(BluetoothConnectionStatus::Connected) => "connected",
         Some(BluetoothConnectionStatus::Disconnected) => "disconnected",
         _ => "unknown",
+    }
+}
+
+/// 可选布尔能力的稳定日志 token。
+fn capability_token(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+/// 蓝牙 Radio 状态的稳定日志 token；不记录 Radio 名称或适配器地址。
+fn radio_state_token(state: Option<RadioState>) -> &'static str {
+    match state {
+        Some(RadioState::On) => "on",
+        Some(RadioState::Off) => "off",
+        Some(RadioState::Disabled) => "disabled",
+        _ => "unknown",
+    }
+}
+
+/// 适配器能力行。只记录 BLE/角色能力与 Radio 状态；不含适配器名称、地址、
+/// 设备 ID 或驱动路径（LOGGING.md 隐私红线）。
+fn adapter_capability_note(
+    low_energy: Option<bool>,
+    central_role: Option<bool>,
+    peripheral_role: Option<bool>,
+    classic: Option<bool>,
+    radio_state: Option<RadioState>,
+) -> String {
+    format!(
+        "ble_adapter phase=observed low_energy={} central_role={} peripheral_role={} classic={} radio_state={}",
+        capability_token(low_energy),
+        capability_token(central_role),
+        capability_token(peripheral_role),
+        capability_token(classic),
+        radio_state_token(radio_state)
+    )
+}
+
+/// 设备访问状态的稳定 token。
+fn access_status_token(status: Option<DeviceAccessStatus>) -> &'static str {
+    match status {
+        Some(DeviceAccessStatus::Allowed) => "allowed",
+        Some(DeviceAccessStatus::DeniedByUser) => "denied_by_user",
+        Some(DeviceAccessStatus::DeniedBySystem) => "denied_by_system",
+        Some(DeviceAccessStatus::Unspecified) => "unspecified",
+        _ => "unknown",
+    }
+}
+
+/// 从 `DeviceInformation.Properties` 读取 AEP 布尔属性。AEP 在部分 Windows
+/// 版本/适配器上不返回该键，调用方按 `unknown` 记录，不猜测在场状态。
+fn aep_boolean(information: &DeviceInformation, key: &str) -> Option<bool> {
+    let properties = information.Properties().ok()?;
+    let value = properties.Lookup(&HSTRING::from(key)).ok()?;
+    let value: IPropertyValue = value.cast().ok()?;
+    value.GetBoolean().ok()
+}
+
+/// 每次连接尝试的访问/配对/在场快照。用于区分"只有配对记录"、"权限被拒"、
+/// "设备不在场"与"链路已建立"；只记录布尔/枚举 token，不记录设备名、地址
+/// 或设备 ID。
+fn device_access_note(
+    connection_generation: u64,
+    attempt: u32,
+    access_status: Option<DeviceAccessStatus>,
+    is_paired: Option<bool>,
+    is_present: Option<bool>,
+    is_connected: Option<bool>,
+    is_enabled: Option<bool>,
+) -> String {
+    format!(
+        "ble_device phase=access connection_generation={connection_generation} attempt={attempt} access_status={} is_paired={} is_present={} is_connected={} is_enabled={}",
+        access_status_token(access_status),
+        capability_token(is_paired),
+        capability_token(is_present),
+        capability_token(is_connected),
+        capability_token(is_enabled)
+    )
+}
+
+/// 失败尝试期间的链路状态变化行。该观察器在设备对象创建后立即注册，
+/// 早于 `service_discovery`，因此能看到 Windows 是否曾在尝试中短暂连上。
+fn link_observed_note(
+    connection_generation: u64,
+    attempt: u32,
+    status: Option<BluetoothConnectionStatus>,
+    elapsed_ms: u128,
+) -> String {
+    format!(
+        "ble_link phase=observed status={} connection_generation={connection_generation} attempt={attempt} elapsed_ms={elapsed_ms}",
+        link_status_token(status)
+    )
+}
+
+/// 进程启动时落一次适配器能力，不参与连接决策。
+///
+/// issue #104 的 1.9.5 日志只能看到“配对成功但服务发现失败”，无法判断 USB
+/// 适配器是否具备 BLE 主机角色。这里只记录能力布尔与 Radio 状态；查询失败
+/// 写 `unknown`，不把原始错误或适配器身份写进日志。
+fn log_adapter_capabilities() {
+    let observation = (|| -> Result<_, PlatformError> {
+        let operation = BluetoothAdapter::GetDefaultAsync().map_err(windows_error)?;
+        let adapter = wait_async(
+            operation,
+            ADAPTER_QUERY_TIMEOUT,
+            "bluetooth_adapter_default",
+        )?;
+        let radio_state = adapter
+            .GetRadioAsync()
+            .ok()
+            .and_then(|operation| {
+                wait_async(operation, ADAPTER_QUERY_TIMEOUT, "bluetooth_adapter_radio").ok()
+            })
+            .and_then(|radio| radio.State().ok());
+        Ok((
+            adapter.IsLowEnergySupported().ok(),
+            adapter.IsCentralRoleSupported().ok(),
+            adapter.IsPeripheralRoleSupported().ok(),
+            adapter.IsClassicSupported().ok(),
+            radio_state,
+        ))
+    })();
+    match observation {
+        Ok((low_energy, central_role, peripheral_role, classic, radio_state)) => {
+            gatt_note(adapter_capability_note(
+                low_energy,
+                central_role,
+                peripheral_role,
+                classic,
+                radio_state,
+            ));
+        }
+        Err(error) => gatt_note(format!(
+            "ble_adapter phase=observed terminal_result=unavailable error_domain=bluetooth error_code={} reason=adapter_unavailable",
+            ble_error_code(&error)
+        )),
+    }
+}
+
+/// 适配器能力查询放到独立短生命周期线程，避免 WinRT 卡住时拖慢 BLE
+/// 工作线程的首个连接尝试。查询失败只落一条 unavailable，不影响主路径。
+fn spawn_adapter_capability_probe() {
+    let spawned = thread::Builder::new()
+        .name("sayall-ble-adapter-log".to_owned())
+        .spawn(|| {
+            let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+            if initialized {
+                log_adapter_capabilities();
+                unsafe { RoUninitialize() };
+            } else {
+                gatt_note(
+                    "ble_adapter phase=observed terminal_result=unavailable reason=winrt_init_failed"
+                        .to_owned(),
+                );
+            }
+        });
+    if spawned.is_err() {
+        gatt_note(
+            "ble_adapter phase=observed terminal_result=unavailable reason=probe_thread_failed"
+                .to_owned(),
+        );
+    }
+}
+
+/// 在设备对象创建后、服务发现前记录访问/配对状态。
+fn log_device_access(device: &BluetoothLEDevice, connection_generation: u64, attempt: u32) {
+    let access_status = device
+        .DeviceAccessInformation()
+        .ok()
+        .and_then(|information| information.CurrentStatus().ok());
+    let information = device.DeviceInformation().ok();
+    let is_paired = information
+        .as_ref()
+        .and_then(|information| information.Pairing().ok())
+        .and_then(|pairing| pairing.IsPaired().ok());
+    let is_present = information
+        .as_ref()
+        .and_then(|information| aep_boolean(information, "System.Devices.Aep.IsPresent"));
+    let is_connected = information
+        .as_ref()
+        .and_then(|information| aep_boolean(information, "System.Devices.Aep.IsConnected"));
+    let is_enabled = information
+        .as_ref()
+        .and_then(|information| information.IsEnabled().ok());
+    gatt_note(device_access_note(
+        connection_generation,
+        attempt,
+        access_status,
+        is_paired,
+        is_present,
+        is_connected,
+        is_enabled,
+    ));
+}
+
+/// 注册只读的早期链路观察器。
+///
+/// `ConnectionStatusChanged` 的功能性订阅目前要等 `service_discovery` 和特征
+/// 订阅成功后才建立；失败的尝试因此看不到 Windows 是否短暂连上。这里在
+/// 设备对象创建后立刻注册一个只调用 `gatt_note` 的观察器，不发送 worker
+/// 消息、不改变重连状态机。成功路径在 `finish` 前释放，失败路径由
+/// `PendingBleConnection::cleanup` 释放，保持注册/释放配对。
+fn register_diagnostic_link_observer(
+    pending: &mut PendingBleConnection,
+    connection_generation: u64,
+    attempt: u32,
+) {
+    let started = Instant::now();
+    let handler = TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
+        move |device, _| {
+            if let Some(device) = device.as_ref() {
+                gatt_note(link_observed_note(
+                    connection_generation,
+                    attempt,
+                    device.ConnectionStatus().ok(),
+                    started.elapsed().as_millis(),
+                ));
+            }
+            Ok(())
+        },
+    );
+    match pending.device().ConnectionStatusChanged(&handler) {
+        Ok(token) => {
+            pending.diagnostic_connection_token = Some(token);
+            gatt_note(format!(
+                "ble_link phase=observer terminal_result=registered connection_generation={connection_generation} attempt={attempt}"
+            ));
+        }
+        Err(error) => gatt_note(format!(
+            "ble_link phase=observer terminal_result=unavailable connection_generation={connection_generation} attempt={attempt} error_domain=bluetooth error_code=subscribe_failed hresult=0x{:08X}",
+            error.code().0 as u32
+        )),
     }
 }
 
@@ -3153,6 +3392,7 @@ struct PendingBleConnection {
     audio_token: Option<i64>,
     control_token: Option<i64>,
     connection_token: Option<i64>,
+    diagnostic_connection_token: Option<i64>,
     params_token: Option<i64>,
     params_request: Option<BluetoothLEPreferredConnectionParametersRequest>,
 }
@@ -3170,6 +3410,7 @@ impl PendingBleConnection {
             audio_token: None,
             control_token: None,
             connection_token: None,
+            diagnostic_connection_token: None,
             params_token: None,
             params_request: None,
         }
@@ -3197,7 +3438,27 @@ impl PendingBleConnection {
             .expect("pending control characteristic is owned")
     }
 
+    fn release_diagnostic_link_observer(&mut self, source: &'static str) {
+        if let (Some(device), Some(token)) = (
+            self.device.as_ref(),
+            self.diagnostic_connection_token.take(),
+        ) {
+            match device.RemoveConnectionStatusChanged(token) {
+                Ok(()) => gatt_note(format!(
+                    "ble_link phase=observer terminal_result=released source={source} connection_generation={}",
+                    self.connection_generation
+                )),
+                Err(error) => gatt_note(format!(
+                    "ble_link phase=observer terminal_result=release_failed source={source} connection_generation={} error_domain=bluetooth error_code=unsubscribe_failed hresult=0x{:08X}",
+                    self.connection_generation,
+                    error.code().0 as u32
+                )),
+            }
+        }
+    }
+
     fn finish(mut self, name: String, model: RemoteModel) -> BleSession {
+        self.release_diagnostic_link_observer("success");
         BleSession {
             connection_generation: self.connection_generation,
             battery_monitor: None,
@@ -3267,6 +3528,26 @@ impl PendingBleConnection {
             attempted += 1;
             if device.RemoveConnectionStatusChanged(token).is_err() {
                 failures += 1;
+            }
+        }
+        if let (Some(device), Some(token)) = (
+            self.device.as_ref(),
+            self.diagnostic_connection_token.take(),
+        ) {
+            attempted += 1;
+            match device.RemoveConnectionStatusChanged(token) {
+                Ok(()) => gatt_note(format!(
+                    "ble_link phase=observer terminal_result=released source=cleanup connection_generation={}",
+                    self.connection_generation
+                )),
+                Err(error) => {
+                    failures += 1;
+                    gatt_note(format!(
+                        "ble_link phase=observer terminal_result=release_failed source=cleanup connection_generation={} error_domain=bluetooth error_code=unsubscribe_failed hresult=0x{:08X}",
+                        self.connection_generation,
+                        error.code().0 as u32
+                    ));
+                }
             }
         }
         if let (Some(device), Some(token)) = (self.device.as_ref(), self.params_token.take()) {
@@ -3412,6 +3693,8 @@ impl BleSession {
             "ble_device phase=created connection_generation={connection_generation} attempt={reconnect_attempt} link_status={}",
             link_status_token(pending.device().ConnectionStatus().ok())
         ));
+        log_device_access(pending.device(), connection_generation, reconnect_attempt);
+        register_diagnostic_link_observer(&mut pending, connection_generation, reconnect_attempt);
         let parameters_sender = sender.clone();
         let parameters_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
@@ -5060,6 +5343,71 @@ mod tests {
             "disconnected"
         );
         assert_eq!(link_status_token(None), "unknown");
+    }
+
+    #[test]
+    fn adapter_capability_note_is_stable_and_identity_free() {
+        let note = adapter_capability_note(
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(RadioState::On),
+        );
+        assert_eq!(
+            note,
+            "ble_adapter phase=observed low_energy=yes central_role=yes peripheral_role=no classic=yes radio_state=on"
+        );
+        assert!(!note.contains("地址"), "{note}");
+        assert!(!note.contains("BluetoothAdapter"), "{note}");
+
+        let unknown = adapter_capability_note(None, None, None, None, Some(RadioState(99)));
+        assert!(unknown.contains("low_energy=unknown"), "{unknown}");
+        assert!(unknown.contains("central_role=unknown"), "{unknown}");
+        assert!(unknown.contains("radio_state=unknown"), "{unknown}");
+    }
+
+    #[test]
+    fn device_access_note_distinguishes_access_and_pairing() {
+        let allowed = device_access_note(
+            12,
+            3,
+            Some(DeviceAccessStatus::Allowed),
+            Some(true),
+            Some(true),
+            Some(false),
+            Some(true),
+        );
+        assert_eq!(
+            allowed,
+            "ble_device phase=access connection_generation=12 attempt=3 access_status=allowed is_paired=yes is_present=yes is_connected=no is_enabled=yes"
+        );
+        let denied = device_access_note(
+            13,
+            4,
+            Some(DeviceAccessStatus::DeniedByUser),
+            Some(false),
+            None,
+            Some(false),
+            None,
+        );
+        assert!(denied.contains("access_status=denied_by_user"), "{denied}");
+        assert!(denied.contains("is_paired=no"), "{denied}");
+        assert!(denied.contains("is_present=unknown"), "{denied}");
+        assert!(denied.contains("is_connected=no"), "{denied}");
+        assert!(denied.contains("is_enabled=unknown"), "{denied}");
+    }
+
+    #[test]
+    fn early_link_observer_records_transitions_without_identity() {
+        let note = link_observed_note(21, 2, Some(BluetoothConnectionStatus::Connected), 1_234);
+        assert_eq!(
+            note,
+            "ble_link phase=observed status=connected connection_generation=21 attempt=2 elapsed_ms=1234"
+        );
+        assert!(!note.contains("Bluetooth"), "{note}");
+        assert!(!note.contains("address"), "{note}");
+        assert!(!note.contains("device_id"), "{note}");
     }
 
     #[test]
