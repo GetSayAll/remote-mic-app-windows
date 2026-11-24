@@ -2,31 +2,26 @@
 import { computed } from "vue";
 import { buttonLabel, type RemoteButton } from "../../lib/bridge";
 import { t } from "../../lib/i18n";
+import { ONBOARDING_CONTROL_BUTTONS, isOnboardingControlButton } from "../control-buttons";
 
 const props = defineProps<{
   observed: Array<{ button: RemoteButton; count: number }>;
   voiceKeyMistake: boolean;
 }>();
 
-/** 固定展示顺序：电源 / 主页 / 返回 / 菜单 / TV / 确定 / 方向 / 音量 / 静音。 */
-const BUTTON_ORDER: RemoteButton[] = [
-  "power",
-  "home",
-  "back",
-  "menu",
-  "tv",
-  "ok",
-  "up",
-  "down",
-  "left",
-  "right",
-  "volume_up",
-  "volume_down",
-  "volume_mute",
-];
+/** 固定展示顺序（见 `control-buttons.ts`）：静音键不参与本步骤。 */
+const BUTTON_ORDER = ONBOARDING_CONTROL_BUTTONS;
 
-const observedButtons = computed(() => new Set(props.observed.map((item) => item.button)));
-const distinctCount = computed(() => Math.min(3, observedButtons.value.size));
+const observedButtons = computed(
+  () =>
+    new Set(
+      props.observed
+        .filter((item) => isOnboardingControlButton(item.button))
+        .map((item) => item.button),
+    ),
+);
+const observedCount = computed(() => observedButtons.value.size);
+const distinctCount = computed(() => Math.min(3, observedCount.value));
 </script>
 
 <template>
@@ -49,10 +44,10 @@ const distinctCount = computed(() => Math.min(3, observedButtons.value.size));
 
     <div class="onboarding-dots">
       <span v-for="index in 3" :key="index" class="dot" :class="{ on: index <= distinctCount }"></span>
-      <span v-if="observed.length < 3 && observed.length > 0">{{
-        t("再按 {count} 个不同的普通按键。", { count: 3 - observed.length })
+      <span v-if="observedCount < 3 && observedCount > 0">{{
+        t("再按 {count} 个不同的普通按键。", { count: 3 - observedCount })
       }}</span>
-      <span v-else-if="observed.length >= 3">{{ t("三个按键都收到了，这一项可以继续了。") }}</span>
+      <span v-else-if="observedCount >= 3">{{ t("三个按键都收到了，这一项可以继续了。") }}</span>
       <span v-else>{{ t("还没有收到按键；按一下遥控器上的任意普通按键开始。") }}</span>
     </div>
 

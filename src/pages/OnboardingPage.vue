@@ -89,6 +89,7 @@ import RemoteStep from "../onboarding/steps/RemoteStep.vue";
 import VoiceTestStep from "../onboarding/steps/VoiceTestStep.vue";
 import VoiceToolStep from "../onboarding/steps/VoiceToolStep.vue";
 import WelcomeStep from "../onboarding/steps/WelcomeStep.vue";
+import { isOnboardingControlButton } from "../onboarding/control-buttons";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
@@ -757,6 +758,9 @@ function handleButtonEdge(edge: ButtonEdge): void {
     return;
   }
   if (step.value === "controls") {
+    // 静音键不参与本步骤（2026-11-24 用户要求）：不计数、不改变纠偏状态，
+    // 与 ControlsStep 的展示清单共用同一份来源。
+    if (!isOnboardingControlButton(edge.button)) return;
     const counts = observedButtons.value;
     const next = (counts.get(edge.button) ?? 0) + 1;
     counts.set(edge.button, next);

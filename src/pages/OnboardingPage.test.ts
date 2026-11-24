@@ -1452,6 +1452,26 @@ describe("Onboarding controls & completion steps", () => {
     expect(mocks.setMappingSuspension).toHaveBeenLastCalledWith(false);
   });
 
+  it("ignores the mute key while counting the 3 distinct ordinary buttons", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
+    const wrapper = await mountWizard(connectedRuntime());
+    const continueButton = wrapper.find(".onboarding-actions .primary-button");
+
+    // 静音键（2026-11-24 用户要求）：既不在芯片格里，也不计入 3 键门禁。
+    expect(wrapper.findAll(".onboarding-bchip").map((node) => node.text())).not.toContain("静音");
+    mocks.buttonHandler?.({ button: "volume_mute", isPressed: true });
+    await flushPromises();
+    expect(continueButton.attributes("data-gate-code")).toBe("controls.not_confirmed");
+    expect(wrapper.text()).toContain("还没有收到按键");
+
+    mocks.buttonHandler?.({ button: "home", isPressed: true });
+    mocks.buttonHandler?.({ button: "ok", isPressed: true });
+    mocks.buttonHandler?.({ button: "back", isPressed: true });
+    await flushPromises();
+    expect(continueButton.attributes("data-gate-ready")).toBe("true");
+    wrapper.unmount();
+  });
+
   it("corrects a mistaken voice-key press during the controls step", async () => {
     mocks.getOnboardingState.mockResolvedValue(activeState("controls"));
     const wrapper = await mountWizard(connectedRuntime());

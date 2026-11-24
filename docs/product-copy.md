@@ -890,3 +890,11 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   `src/pages/ConnectionPage.vue`、`src/lib/bridge.ts`、`src/lib/i18n/en/*.ts`、
   `src/lib/voice-audio-health.ts` 及对应测试；机制与 A/B 证据见
   `docs/investigations/2026-11-22-bt-hid-yield-balanced.md`。
+- 2026-11-24（向导界面微调，Andy 截图指出）：
+  ① 第①步（准备）与最后一步（完成）右栏的应用标识统一改用「几何鸭」
+     （`/app-icon-faceted-duck.webp`），不再使用水彩鸭 `app-logo.webp`。
+  ② 普通按键步骤去掉「静音」芯片；静音键也不再计入「3 个不同的普通按键」的
+     进度与门禁，避免出现“按了但没亮、计数却增加”。芯片格由 13 键改为 12 键。
+  落点：`src/components/onboarding/StepSide.vue`、`src/onboarding/control-buttons.ts`、
+  `src/onboarding/steps/ControlsStep.vue`、`src/pages/OnboardingPage.vue`；
+  验收手册 `Testing/WindowsOnboardingWizard.md` 同步。
