@@ -1,7 +1,8 @@
 # issue #104：配对记录在、GATT 链路不在（诊断与向导指引）
 
 - 发现日期：2026-11-19（issue #104 最新 1.9.3 报告；同一 issue 自 2026-09-20 起有多次报告）
-- 状态：诊断与向导指引已实现；真机复测 `deferred`
+- 状态：诊断与向导指引已实现；2026-11-23 已扩展五条 GATT 发现路径的逐路径日志；
+  受影响用户机器与 RC001/RC003 故障态复测 `deferred`
 - 影响范围：1.9.3（`a4b5512`）、Windows 10.0.26200 x64、MediaTek 蓝牙适配器
   （USB ID 13D3:3602）；issue 内另有 1.8.0 / 1.8.3 / 0.8.6 / 0.3.0 报告
 - 功能点：BLE `service_discovery` 诊断日志；首次设置向导②步长时间重连指引
@@ -58,6 +59,77 @@
    - 纯判定在 `src/onboarding/reconnect-guidance.ts`；组件计时与渲染在
      `src/onboarding/steps/RemoteStep.vue`。
 
+## 2026-11-23 五路径诊断（新增）
+
+原日志只有一条 `BluetoothLEDevice` 级 Uncached 查询的结果，无法区分“服务真的
+不可达”与“这条访问路径不可用”。现在 `crates/sayall-windows/src/ble/gatt_discovery.rs`
+按固定顺序尝试五条路径，并逐条落结构化日志：
+
+| order | path | 含义 |
+| --- | --- | --- |
+| 1 | `device_uuid_uncached` | 历史主路径：`BluetoothLEDevice` 级 UUID 查询，Uncached |
+| 2 | `device_uuid_cached` | 同一查询的 Cached 形态 |
+| 3 | `device_all_services_uncached` | 枚举全部服务后按 UUID 筛选，Uncached |
+| 4 | `device_all_services_cached` | 枚举全部服务后按 UUID 筛选，Cached |
+| 5 | `service_selector_from_id` | `GattDeviceService` 接口选择器 + `FromIdAsync`（共享访问候选） |
+
+每次连接会落：
+
+- `ble_device phase=created|properties`：设备对象创建后与读取名称后的链路状态、
+  名称是否存在、名称推断型号；不记录名称正文。
+- `ble_service_discovery phase=requested|completed`：路径总数、尝试数、失败数、
+  `path_results=` 全量汇总（passed/failed/skipped 都出现）。
+- `ble_service_path phase=requested|completed|skipped|failure_detail`：每条路径的
+  `gatt_status`、`service_count`、`interface_count`、`match_reason`、`hresult`、
+  `elapsed_ms` 与失败原始错误。
+- 主路径成功时，其余四条落 `skipped reason=earlier_path_succeeded`；某条路径超时
+  后，剩余路径落 `skipped reason=earlier_timeout`，不把重连继续拖长。
+
+`FromIdAsync` 单独有状态检查：Windows 10 实测可能出现 **`S_OK`/HRESULT 0 但返回
+空服务对象**；现在落 `match_reason=from_id_s_ok_null hresult=0x00000000`，不会再被
+压成一句无法归因的“操作成功完成”。
+
+### 本机真机探测（Windows 10 19045，已配对受支持遥控器）
+
+- `real_remote_service_discovery_paths`：`passed`。主路径 130ms 成功；
+  其余四条均按预期落 `skipped`，汇总行包含全部五条路径。
+- `real_remote_probes_each_service_path`：`passed`（测试只断言主路径可用）。
+  逐条结果：
+  - `device_uuid_uncached`：`passed`，`gatt_status=0`，`service_count=1`
+  - `device_uuid_cached`：`passed`，`gatt_status=0`，`service_count=1`
+  - `device_all_services_uncached`：`passed`，`gatt_status=0`，`service_count=9`
+  - `device_all_services_cached`：`passed`，`gatt_status=0`，`service_count=9`
+  - `service_selector_from_id`：`failed`，`interface_count=1`，
+    `match_reason=from_id_s_ok_null`，`hresult=0x00000000`
+- 结论边界：selector 路径在本机 Windows 10 **不是可靠修复**；它现在只作为最后
+  一条可观察候选。真正可能救回的是 Cached / 全服务枚举路径，必须等受影响用户
+  日志确认哪条成功。不能把 selector 当已确认根因或已确认修复。
+
+### 2026-11-23 第二份用户日志（链路已断开）
+
+另一用户（Windows 11、MediaTek、小米蓝牙遥控器 2）的 41,148 行日志，覆盖
+1.8.3 / 1.9.3 / 1.9.5：
+
+- 1.8.3：39 次成功、634 次失败；1.9.3：21 次成功、279 次失败。
+- 1.9.5：**0 次成功、68 次失败**；68 条 `ble_connect_link` **全部**
+  `link_status=disconnected`。
+- 1.9.5 的 `ble_scan` 每次都 `total_paired_count=3 supported_count=1
+  found_count=1`：只证明配对记录在，不证明设备在当前无线电上。
+- 1.9.5 的 `binding_initial` 全部是 `matched_device_count=0 phase=awaiting`；
+  24 次 `device_arrived` 没有一次转成 `binding_audit action=present`。
+- 因此这**不是**上一份日志的“Windows 认为 connected、GATT Unreachable”形态；
+  它是链路确实断开、HID 接口不在场。Cached/全服务/选择器都无法凭空建立链路，
+  继续叠加只会多等几个 7.7 秒。
+
+已按这份日志加保护：主路径失败后如果 `link_status=disconnected`，剩余四条路径
+直接落 `skipped reason=link_disconnected`，不再继续试。日志仍保留主路径的首次
+尝试，因为它可能触发系统重新连接。
+
+边界：1.9.5 段 0 成功不能单独证明是应用回归；同一遥控器在 1.8.3/1.9.3 有成功
+记录，也可能是遥控器休眠/电量/被其它主机占用，或 Windows 11 蓝牙栈状态。需要
+下一次用户复现时确认 HID 是否重新到场、按遥控器键是否能让链路恢复；不能把
+“休眠/没电”直接写成结论。
+
 ## 验证
 
 - `cargo fmt --all -- --check`：`passed`
@@ -73,6 +145,23 @@
 - `pnpm build`（`vue-tsc --noEmit && vite build`）：`passed`
 - 真机复测 `deferred`：需要 RC001 / RC003 分别复现“配对在、链路不在”，确认
   `link_status` 与 HID 到场信号；1.9.3 报告人的完整日志仍缺失。
+
+2026-11-23 多路径日志补充验证：
+
+- `cargo fmt --all -- --check`：`passed`
+- `cargo test -p sayall-windows --lib`：`passed`（588 passed / 19 ignored /
+  0 failed；新增 `gatt_discovery` 纯逻辑 6 例、真机手工测试 2 例）
+- `cargo test --workspace --no-fail-fast`：`passed`（sayall-windows 588 passed /
+  19 ignored；sayall-windows-app 225 passed / 2 ignored；其余 crate 与文档测试
+  0 failed）
+- `cargo check --workspace`：`passed`
+- `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
+- 本机真机：`real_remote_service_discovery_paths` `passed`；
+  `real_remote_probes_each_service_path` `passed`（五条路径中 4 条成功；
+  selector 以 `from_id_s_ok_null` 失败，见上节）
+- 受影响用户机器、RC001 与 RC003 故障态：`deferred`。下一次报障只需拉一份
+  `sayall-diagnostic.log`，按 `ble_service_discovery ... path_results=` 即可看到
+  哪条路径成功或失败；无需再让用户取电池或重配对。
 
 ## 本地测试包（2026-11-20）
 
