@@ -3808,6 +3808,7 @@ impl BleSession {
                     SERVICE_UUID,
                     connection_generation,
                     reconnect_attempt,
+                    |service| find_characteristic(service, TRANSMIT_UUID, "transmit"),
                 )
             });
         if let Err(error) = &service_result {
@@ -3821,25 +3822,41 @@ impl BleSession {
                 error,
             ));
         }
-        pending.service = Some(service_result?);
-        pending.transmit = Some(connect_stage(
-            reconnecting,
-            reconnect_attempt,
-            "characteristic_transmit",
-            || find_characteristic(pending.service(), TRANSMIT_UUID, "transmit"),
-        )?);
-        pending.audio = Some(connect_stage(
+        let (service, transmit) = service_result?;
+        pending.service = Some(service);
+        pending.transmit = Some(transmit);
+        let audio_result = connect_stage(
             reconnecting,
             reconnect_attempt,
             "characteristic_audio",
             || find_characteristic(pending.service(), AUDIO_UUID, "audio"),
-        )?);
-        pending.control = Some(connect_stage(
+        );
+        if let Err(error) = &audio_result {
+            gatt_note(connect_link_state_note(
+                "characteristic_audio",
+                connection_generation,
+                reconnect_attempt,
+                pending.device().ConnectionStatus().ok(),
+                error,
+            ));
+        }
+        pending.audio = Some(audio_result?);
+        let control_result = connect_stage(
             reconnecting,
             reconnect_attempt,
             "characteristic_control",
             || find_characteristic(pending.service(), CONTROL_UUID, "control"),
-        )?);
+        );
+        if let Err(error) = &control_result {
+            gatt_note(connect_link_state_note(
+                "characteristic_control",
+                connection_generation,
+                reconnect_attempt,
+                pending.device().ConnectionStatus().ok(),
+                error,
+            ));
+        }
+        pending.control = Some(control_result?);
 
         pending.audio_token = Some(connect_stage(
             reconnecting,
