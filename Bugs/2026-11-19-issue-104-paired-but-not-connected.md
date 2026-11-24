@@ -1,10 +1,11 @@
 # issue #104：配对记录在、GATT 链路不在（诊断与向导指引）
 
 - 发现日期：2026-11-19（issue #104 最新 1.9.3 报告；同一 issue 自 2026-09-20 起有多次报告）
-- 状态：诊断与向导指引已实现；2026-11-23 已扩展五条 GATT 发现路径的逐路径日志；
-  受影响用户机器与 RC001/RC003 故障态复测 `deferred`
-- 影响范围：1.9.3（`a4b5512`）、Windows 10.0.26200 x64、MediaTek 蓝牙适配器
-  （USB ID 13D3:3602）；issue 内另有 1.8.0 / 1.8.3 / 0.8.6 / 0.3.0 报告
+- 状态：诊断与向导指引已实现；1.9.6 五路径日志已落地；2026-11-24 增加
+  transmit 特征验证，修正 cached 服务假阳性；受影响用户 1.9.7 现场复测 `deferred`
+- 影响范围：1.9.3（`a4b5512`）、1.9.5（`4ead96e`）、1.9.6（`7860681`）、
+  Windows 10.0.26200/19045 x64、MediaTek 与 USB 蓝牙适配器、RC003；
+  issue 内另有 1.8.0 / 1.8.3 / 0.8.6 / 0.3.0 报告
 - 功能点：BLE `service_discovery` 诊断日志；首次设置向导②步长时间重连指引
 - 现象：Windows 蓝牙设置/设备管理器显示遥控器已配对（用户描述为“已连接”），
   应用停在 `reconnecting`；日志反复出现
@@ -176,6 +177,68 @@
 - `scripts/ci-preflight.ps1`：7/7 `passed`（首次运行出现一次已有的
   `button_mapping` 并行测试偶发失败，单测复跑与完整自检复跑均通过）
 - 安装包/真实 RC001/RC003 上观察新增日志：待本次诊断构建的本地包验证
+
+### 2026-11-24 第四份用户日志（1.9.6：链路在，缓存服务不可用）
+
+用户在同一日志里继续追加 1.9.6（`7860681`，1386 行，约 2 分 35 秒）：
+31 次连接尝试、0 次成功。
+
+- `ble_adapter phase=observed low_energy=yes central_role=yes peripheral_role=yes classic=yes radio_state=on`：
+  适配器能力正常。
+- `ble_device phase=access` 31 次：`access_status=allowed`、`is_paired=yes`；
+  `is_present=unknown`、`is_connected=unknown`、`is_enabled=no`。AEP 在场/连接
+  属性在这台机器上仍读不到，不能据此推断设备离线。
+- `ble_scan`：`total_paired_count=4 supported_count=1 found_count=1`。
+- 31 次 `ble_service_discovery`：
+  - 30 次 `device_uuid_cached` 通过，`service_count=1`；
+  - 随后 30 次 `characteristic_transmit` 失败，`gatt_unreachable` / `gatt_status=1`；
+  - 1 次主路径失败后链路短暂 disconnected，剩余路径按设计 `skipped`；
+  - `device_uuid_uncached` 31 次全部失败，`device_all_services_*` 与
+    `service_selector_from_id` 全部因为 cached 先通过而 `skipped`。
+- `ble_link phase=observed`：7 次 disconnected、10 次 connected；多次
+  cached 服务返回后紧接着链路断开。说明 cached 路径只是从本地缓存取到
+  服务对象，并没有证明 ATT 可达。
+- `raw_input` 仍有 `device_arrived matched_device_count=1` 98 次，HID 接口
+  在场；2 分 35 秒内 `keys_seen=0`，用户没有按键，不能据此判断按键失效。
+
+结论：1.9.6 的五路径 fallback 已把失败从服务发现推进到 transmit 特征发现，
+但“cached 服务对象成功”是假阳性；原实现拿到它就停止，导致真正可能可用的
+`device_all_services_uncached` / selector 路径没有机会执行。修复方向不是继续
+叠加路径，而是每条服务路径必须通过 transmit 特征探测才被接受，特征失败后
+继续下一条。
+
+实现（`crates/sayall-windows/src/ble/gatt_discovery.rs`）：
+
+- `discover_atvv_service` 增加 `validate_service` 回调，调用方传入
+  `find_characteristic(..., TRANSMIT_UUID, "transmit")`；
+- 服务对象返回后记录 `ble_service_path phase=service_ready`，再记录
+  `phase=characteristic_probe`；探测失败时关闭该服务对象，标记路径 failed，
+  在链路仍 connected 且非超时的情况下继续下一条；
+- 最终 `phase=completed` 带 `characteristic_probe=passed|failed`，只有 passed
+  的路径才会被选中；`characteristic_transmit` 不再作为独立阶段重复查询；
+- 音频/控制特征失败也会落 `ble_connect_link` 的具体 stage 与 link_status，
+  补齐非 transmit 阶段的现场。
+
+验证：
+
+- `cargo fmt --all -- --check`：`passed`
+- `cargo test -p sayall-windows --lib`：`passed`（595 passed / 20 ignored；
+  新增 3 个 transmit 探测决策单测 + 1 个手工 transmit 真机测试）
+- `cargo test --workspace`：`passed`（sayall-windows 595 / 20 ignored；
+  sayall-windows-app 226 / 2 ignored；其余 crate 与文档测试 0 failed）
+- `cargo check --workspace`：`passed`
+- `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
+- `scripts/ci-preflight.ps1`：7/7 `passed`（设置 `CARGO_BUILD_JOBS=2`；
+  首次运行在第 5 步因系统提交内存不足出现 `LNK1102`/页面文件不足，
+  非代码失败，降低并行度后复跑通过）
+- 本机真机 `real_remote_service_discovery_paths`：`passed`（只验证服务路径；
+  主路径 81ms `service_count=1`，其余路径 skipped）。
+- 本机真机 `real_remote_service_and_transmit_paths`：`failed`（本机有两个
+  `sayall-windows-app` 进程占用同一 GATT 服务，测试进程收到
+  `gatt_access_denied`；不是连接路径的结论）。关闭其他 SayAll 进程后的
+  单进程复测仍为 `deferred`。
+- 受影响用户 1.9.7 现场：`deferred`；需要看新的
+  `ble_service_path phase=characteristic_probe ... path_results=`。
 
 ## 验证
 

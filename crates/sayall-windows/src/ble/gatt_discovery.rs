@@ -578,19 +578,130 @@ fn link_allows_fallback(link_status: &'static str) -> bool {
     link_status != "disconnected"
 }
 
+/// 服务路径只有通过 transmit 特征探测才算可用：
+/// 2026-11-24 的 1.9.6 日志里，cached 服务路径 30 次返回 `service_count=1`，
+/// 但紧接着的 `characteristic_transmit` 全部 `gatt_unreachable`；只拿到缓存里的
+/// 服务对象不代表 ATT 真的可达，不能把它当成成功路径。
+fn probe_outcome<T>(result: &Result<T, PlatformError>) -> ServicePathOutcome {
+    if result.is_ok() {
+        ServicePathOutcome::Passed
+    } else {
+        ServicePathOutcome::Failed
+    }
+}
+
+/// 路径失败后是否还要继续下一条。超时说明系统 GATT 队列被占住；
+/// 链路已断开则回退路径不可能凭空建立会话；其余错误（尤其
+/// `gatt_unreachable` 且链路仍 connected）继续试下一条。
+fn should_stop_after_failure(
+    error: &PlatformError,
+    link_status: &'static str,
+) -> Option<&'static str> {
+    if service_discovery_should_stop(error) {
+        Some("earlier_timeout")
+    } else if !link_allows_fallback(link_status) {
+        Some("link_disconnected")
+    } else {
+        None
+    }
+}
+
 /// 当前 `ConnectionStatus` 的稳定 token，供链路策略判断。
 fn current_link_status(device: &BluetoothLEDevice) -> &'static str {
     link_status_token(device.ConnectionStatus().ok())
 }
 
-/// 服务发现总入口：逐条尝试所有路径，先成功者胜，失败也保留每条路径证据。
-pub(super) fn discover_atvv_service(
+/// 对一条已返回服务对象的路径做 transmit 特征探测，并记录服务/特征两段结果。
+/// 服务对象成功但特征失败时，调用方会继续下一条服务路径。
+#[allow(clippy::too_many_arguments)]
+fn probe_service_path<T>(
+    path: ServiceDiscoveryPath,
+    order: usize,
+    service: &GattDeviceService,
+    gatt_status: Option<i32>,
+    service_count: Option<u32>,
+    interface_count: Option<u32>,
+    match_reason: Option<&'static str>,
+    hresult: Option<u32>,
+    device: &BluetoothLEDevice,
+    connection_generation: u64,
+    attempt: u32,
+    path_elapsed: u128,
+    validate_service: &mut impl FnMut(&GattDeviceService) -> Result<T, PlatformError>,
+) -> Result<T, PlatformError> {
+    gatt_note(format!(
+        "ble_service_path phase=service_ready path={} order={} connection_generation={connection_generation} attempt={attempt} gatt_status={} service_count={} interface_count={} match_reason={} hresult={} elapsed_ms={path_elapsed} link_status_after={}",
+        path.label(),
+        order + 1,
+        optional_gatt_status(gatt_status),
+        optional_u32(service_count),
+        optional_u32(interface_count),
+        optional_match_reason(match_reason),
+        optional_hresult(hresult),
+        current_link_status(device)
+    ));
+    let probe_started = Instant::now();
+    let probe_result = validate_service(service);
+    let probe_elapsed = probe_started.elapsed().as_millis();
+    let link_after = current_link_status(device);
+    let outcome = probe_outcome(&probe_result);
+    let probe_error = probe_result.as_ref().err();
+    gatt_note(format!(
+        "ble_service_path phase=characteristic_probe path={} order={} connection_generation={connection_generation} attempt={attempt} terminal_result={} error_domain={} error_code={} gatt_status={} service_count={} interface_count={} match_reason={} hresult={} elapsed_ms={probe_elapsed} link_status_after={link_after} retryable={}",
+        path.label(),
+        order + 1,
+        outcome.token(),
+        if probe_error.is_some() { "bluetooth" } else { "none" },
+        probe_error.map(ble_error_code).unwrap_or("none"),
+        optional_gatt_status(probe_error.and_then(gatt_status_code)),
+        optional_u32(service_count),
+        optional_u32(interface_count),
+        optional_match_reason(match_reason),
+        optional_hresult(hresult),
+        probe_error.is_some()
+    ));
+    let terminal_status = match &probe_result {
+        Ok(_) => optional_gatt_status(gatt_status),
+        Err(error) => optional_gatt_status(gatt_status_code(error)),
+    };
+    let terminal_error = probe_result.as_ref().err();
+    gatt_note(format!(
+        "ble_service_path phase=completed path={} order={} connection_generation={connection_generation} attempt={attempt} terminal_result={} error_domain={} error_code={} gatt_status={} service_count={} interface_count={} match_reason={} hresult={} elapsed_ms={} link_status_after={link_after} characteristic_probe={} retryable={}",
+        path.label(),
+        order + 1,
+        outcome.token(),
+        if terminal_error.is_some() { "bluetooth" } else { "none" },
+        terminal_error.map(ble_error_code).unwrap_or("none"),
+        terminal_status,
+        optional_u32(service_count),
+        optional_u32(interface_count),
+        optional_match_reason(match_reason),
+        optional_hresult(hresult),
+        path_elapsed + probe_elapsed,
+        outcome.token(),
+        terminal_error.is_some()
+    ));
+    if let Err(error) = &probe_result {
+        gatt_note(format!(
+            "ble_service_path phase=failure_detail path={} order={} connection_generation={connection_generation} attempt={attempt} raw_error={}",
+            path.label(),
+            order + 1,
+            redact_raw_error(raw_error_text(error))
+        ));
+    }
+    probe_result
+}
+
+/// 服务发现总入口：逐条尝试所有路径；只有服务对象和 transmit 特征都能解析
+/// 才算成功，失败也保留每条路径证据。
+pub(super) fn discover_atvv_service<T>(
     device: &BluetoothLEDevice,
     address: u64,
     uuid: GUID,
     connection_generation: u64,
     reconnect_attempt: u32,
-) -> Result<GattDeviceService, PlatformError> {
+    mut validate_service: impl FnMut(&GattDeviceService) -> Result<T, PlatformError>,
+) -> Result<(GattDeviceService, T), PlatformError> {
     let started = Instant::now();
     let link_before = current_link_status(device);
     gatt_note(format!(
@@ -635,34 +746,60 @@ pub(super) fn discover_atvv_service(
         match result {
             Ok(service) => {
                 attempted += 1;
-                outcomes[order] = (path, ServicePathOutcome::Passed);
-                gatt_note(format!(
-                    "ble_service_path phase=completed path={} order={} connection_generation={connection_generation} attempt={reconnect_attempt} terminal_result=passed error_domain=none error_code=none gatt_status={} service_count={} interface_count={} match_reason={} hresult={} elapsed_ms={path_elapsed} link_status_after={link_after} retryable=false",
-                    path.label(),
-                    order + 1,
-                    optional_gatt_status(gatt_status),
-                    optional_u32(service_count),
-                    optional_u32(interface_count),
-                    optional_match_reason(match_reason),
-                    optional_hresult(hresult)
-                ));
-                for (remaining_order, remaining_path) in
-                    ServiceDiscoveryPath::ALL.iter().enumerate().skip(order + 1)
-                {
-                    outcomes[remaining_order] = (*remaining_path, ServicePathOutcome::Skipped);
-                    gatt_note(format!(
-                        "ble_service_path phase=skipped path={} order={} connection_generation={connection_generation} attempt={reconnect_attempt} terminal_result=skipped reason=earlier_path_succeeded retryable=false",
-                        remaining_path.label(),
-                        remaining_order + 1
-                    ));
+                let probe_result = probe_service_path(
+                    path,
+                    order,
+                    &service,
+                    gatt_status,
+                    service_count,
+                    interface_count,
+                    match_reason,
+                    hresult,
+                    device,
+                    connection_generation,
+                    reconnect_attempt,
+                    path_elapsed,
+                    &mut validate_service,
+                );
+                match probe_result {
+                    Ok(validated) => {
+                        outcomes[order] = (path, ServicePathOutcome::Passed);
+                        for (remaining_order, remaining_path) in
+                            ServiceDiscoveryPath::ALL.iter().enumerate().skip(order + 1)
+                        {
+                            outcomes[remaining_order] =
+                                (*remaining_path, ServicePathOutcome::Skipped);
+                            gatt_note(format!(
+                                "ble_service_path phase=skipped path={} order={} connection_generation={connection_generation} attempt={reconnect_attempt} terminal_result=skipped reason=earlier_path_succeeded retryable=false",
+                                remaining_path.label(),
+                                remaining_order + 1
+                            ));
+                        }
+                        let link_after = current_link_status(device);
+                        gatt_note(format!(
+                            "ble_service_discovery phase=completed terminal_result=passed selected_path={} connection_generation={connection_generation} attempt={reconnect_attempt} paths_attempted={attempted} paths_failed={failed} path_results={} link_status_before={link_before} link_status_after={link_after} elapsed_ms={} retryable=false",
+                            path.label(),
+                            format_service_path_results(&outcomes),
+                            started.elapsed().as_millis()
+                        ));
+                        return Ok((service, validated));
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        outcomes[order] = (path, ServicePathOutcome::Failed);
+                        // 释放这条路径拿到的服务对象，避免它继续持有 GATT 会话，
+                        // 让下一条路径/下一次尝试误收 `gatt_access_denied`。
+                        let _ = service.Close();
+                        if primary_error.is_none() {
+                            primary_error = Some(error.clone());
+                        }
+                        if let Some(reason) =
+                            should_stop_after_failure(&error, current_link_status(device))
+                        {
+                            stop_reason = Some(reason);
+                        }
+                    }
                 }
-                gatt_note(format!(
-                    "ble_service_discovery phase=completed terminal_result=passed selected_path={} connection_generation={connection_generation} attempt={reconnect_attempt} paths_attempted={attempted} paths_failed={failed} path_results={} link_status_before={link_before} link_status_after={link_after} elapsed_ms={} retryable=false",
-                    path.label(),
-                    format_service_path_results(&outcomes),
-                    started.elapsed().as_millis()
-                ));
-                return Ok(service);
             }
             Err(error) => {
                 attempted += 1;
@@ -688,10 +825,8 @@ pub(super) fn discover_atvv_service(
                     order + 1,
                     redact_raw_error(raw_error_text(&error))
                 ));
-                if service_discovery_should_stop(&error) {
-                    stop_reason = Some("earlier_timeout");
-                } else if !link_allows_fallback(link_after) {
-                    stop_reason = Some("link_disconnected");
+                if let Some(reason) = should_stop_after_failure(&error, link_after) {
+                    stop_reason = Some(reason);
                 }
             }
         }
@@ -822,10 +957,39 @@ mod tests {
     }
 
     #[test]
+    fn transmit_probe_failure_marks_a_service_path_failed() {
+        assert_eq!(probe_outcome(&Ok(())), ServicePathOutcome::Passed);
+        let failed: Result<(), PlatformError> =
+            Err(PlatformError::GattUnreachable("test".to_owned()));
+        assert_eq!(probe_outcome(&failed), ServicePathOutcome::Failed);
+    }
+
+    #[test]
+    fn transmit_probe_failure_continues_while_link_is_connected() {
+        let error = PlatformError::GattUnreachable("test".to_owned());
+        assert_eq!(should_stop_after_failure(&error, "connected"), None);
+        assert_eq!(should_stop_after_failure(&error, "unknown"), None);
+        assert_eq!(
+            should_stop_after_failure(&error, "disconnected"),
+            Some("link_disconnected")
+        );
+    }
+
+    #[test]
+    fn transmit_probe_timeout_stops_remaining_paths() {
+        assert_eq!(
+            should_stop_after_failure(&PlatformError::OperationTimedOut, "connected"),
+            Some("earlier_timeout")
+        );
+    }
+
+    #[test]
     #[ignore = "真机：需要已配对的 RC001/RC003；会实际发起 GATT 服务发现"]
     fn real_remote_service_discovery_paths() {
         // 手工验收用：把本机已配对的受支持遥控器当作目标，真实走一遍五条路径。
         // 日志用 SAYALL_GATT_LOG 指到临时文件；测试本身不打印设备身份。
+        // 注意：本测试传空 validator，只验证服务路径；它的 characteristic_probe=passed
+        // 不是 transmit 特征证据，transmit 需要跑下一个 real_remote_service_and_transmit_paths。
         use windows::Devices::Bluetooth::BluetoothLEDevice;
         use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 
@@ -853,8 +1017,59 @@ mod tests {
             "gatt_discovery_real_device",
         )
         .expect("create BluetoothLEDevice");
-        let service = discover_atvv_service(&device, address, super::super::SERVICE_UUID, 1, 1)
+        let (service, ()) =
+            discover_atvv_service(&device, address, super::super::SERVICE_UUID, 1, 1, |_| {
+                Ok(())
+            })
             .expect("ATVV service discovery");
+        let _ = service.Close();
+        let _ = device.Close();
+    }
+
+    #[test]
+    #[ignore = "真机：需要已配对 RC001/RC003，且没有其他 SayAll 进程占用该设备"]
+    fn real_remote_service_and_transmit_paths() {
+        // 与上一条不同：服务对象必须再解析 transmit 特征才算成功。
+        // 若本机已运行的 SayAll 进程占着同一 GATT 服务，这里会得到
+        // `gatt_access_denied`；那是测试进程的共享冲突，不是连接路径的结论。
+        use windows::Devices::Bluetooth::BluetoothLEDevice;
+        use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+
+        struct Apartment;
+        impl Drop for Apartment {
+            fn drop(&mut self) {
+                unsafe { RoUninitialize() };
+            }
+        }
+
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.expect("RoInitialize");
+        let _apartment = Apartment;
+        let remotes = crate::scan_paired_remotes().expect("scan paired remotes");
+        let remote = remotes
+            .iter()
+            .find(|remote| remote.is_supported_candidate)
+            .expect("no paired RC001/RC003");
+        let address = crate::ble::bluetooth_address_from_device_id(&remote.id)
+            .expect("paired remote id has no peer address");
+        let operation = BluetoothLEDevice::FromBluetoothAddressAsync(address)
+            .expect("FromBluetoothAddressAsync");
+        let device = wait_async(
+            operation,
+            Duration::from_secs(10),
+            "gatt_discovery_real_device",
+        )
+        .expect("create BluetoothLEDevice");
+        let (service, _transmit) = discover_atvv_service(
+            &device,
+            address,
+            super::super::SERVICE_UUID,
+            1,
+            1,
+            |service| {
+                super::super::find_characteristic(service, super::super::TRANSMIT_UUID, "transmit")
+            },
+        )
+        .expect("ATVV service + transmit characteristic discovery");
         let _ = service.Close();
         let _ = device.Close();
     }

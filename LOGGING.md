@@ -123,8 +123,8 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 ### BLE 适配器与链路建立诊断（2026-11-24）
 
 issue #104 的 1.9.5 日志能证明“配对记录存在、服务发现失败”，但不能回答
-“Windows 在尝试期间是否曾经连上过”。连接路径补充三类只读日志，不改变重连
-或 GATT 决策：
+“Windows 在尝试期间是否曾经连上过”。连接路径补充三类只读日志（这三类日志
+本身不改变重连或 GATT 决策；后续的服务路径验证见本节末尾）：
 
 - `ble_adapter phase=observed low_energy=... central_role=... peripheral_role=... classic=... radio_state=...`：
   进程启动后由独立短生命周期线程查询 `BluetoothAdapter`，只记录能力布尔和 Radio
@@ -141,6 +141,24 @@ issue #104 的 1.9.5 日志能证明“配对记录存在、服务发现失败�
 
 这些行只用于区分“适配器不支持 BLE 主机角色 / 配对记录存在但设备不在场 /
 权限被拒 / 链路短暂建立后 GATT 失败”，不能替代 `ble_service_path` 的路径结果。
+
+2026-11-24 的 1.9.6 日志进一步证明：`device_uuid_cached` 可以返回
+`service_count=1`，但随后的 transmit 特征查询仍是 `gatt_unreachable`。因此
+“拿到服务对象”不再算路径成功；每条路径必须再解析 transmit 特征：
+
+- `ble_service_path phase=service_ready ...`：该路径已返回服务对象，记录
+  `gatt_status`、`service_count`、`elapsed_ms` 和当时链路状态。
+- `ble_service_path phase=characteristic_probe ... terminal_result=passed|failed ...`
+  ：对服务对象查询 transmit 特征的结果；失败带 `error_code`、`gatt_status`、
+  `link_status_after`，然后继续下一条服务路径（除非超时或链路已断开）。
+- `ble_service_path phase=completed ... characteristic_probe=passed|failed`：
+  路径最终结果。只有 `characteristic_probe=passed` 的路径才会被选中。
+- 若路径失败时链路仍 `connected`，尤其 `gatt_unreachable`，继续尝试剩余路径；
+  若超时或链路 `disconnected`，剩余路径落 `skipped`，不拖长每次重连。
+
+对应的 `characteristic_transmit` 查询现在属于服务路径验证；日志看
+`ble_service_path ... characteristic_probe`，不再依赖单独的
+`ble_connect_stage stage=characteristic_transmit`。
 
 ## 隐私红线
 
