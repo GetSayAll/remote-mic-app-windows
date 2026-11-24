@@ -37,6 +37,8 @@ use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows_future::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
 
+mod gatt_discovery;
+
 const SERVICE_UUID: GUID = GUID::from_u128(0xab5e00015a214f05bc7daf01f617b664);
 const TRANSMIT_UUID: GUID = GUID::from_u128(0xab5e00025a214f05bc7daf01f617b664);
 const AUDIO_UUID: GUID = GUID::from_u128(0xab5e00035a214f05bc7daf01f617b664);
@@ -3406,6 +3408,10 @@ impl BleSession {
             },
         )?;
         let mut pending = PendingBleConnection::new(device, address, connection_generation);
+        gatt_note(format!(
+            "ble_device phase=created connection_generation={connection_generation} attempt={reconnect_attempt} link_status={}",
+            link_status_token(pending.device().ConnectionStatus().ok())
+        ));
         let parameters_sender = sender.clone();
         let parameters_handler =
             TypedEventHandler::<BluetoothLEDevice, windows::core::IInspectable>::new(
@@ -3489,6 +3495,11 @@ impl BleSession {
                 .map(|name| name.to_string())
         })?;
         let inferred_model = remote_model_from_name(&name);
+        gatt_note(format!(
+            "ble_device phase=properties connection_generation={connection_generation} attempt={reconnect_attempt} name_present={} inferred_model={inferred_model:?} link_status={}",
+            !name.is_empty(),
+            link_status_token(pending.device().ConnectionStatus().ok())
+        ));
         // 型号只用于界面显示：**不在 `service_discovery` 之前做 GATT 查询**。
         // 2026-11-01 用户日志：断链状态下 Namespace 0x180A 的查询每次都要等满
         // 5 秒超时，取消后紧接着发现 ATVV 服务，导致每次重连先白耗 5 秒，
@@ -3508,7 +3519,13 @@ impl BleSession {
         }
         let service_result =
             connect_stage(reconnecting, reconnect_attempt, "service_discovery", || {
-                find_service(pending.device(), SERVICE_UUID)
+                gatt_discovery::discover_atvv_service(
+                    pending.device(),
+                    address,
+                    SERVICE_UUID,
+                    connection_generation,
+                    reconnect_attempt,
+                )
             });
         if let Err(error) = &service_result {
             // issue #104（2026-11-19）：失败瞬间记录 Windows 自己认为的链路状态。
@@ -4474,22 +4491,6 @@ fn disable_notifications(characteristic: &GattCharacteristic) -> Result<(), Plat
         .map_err(windows_error)?;
     let status = wait_async(operation, GATT_ASYNC_TIMEOUT, "gatt_disable_notify")?;
     require_success(status, "取消 GATT 通知")
-}
-
-fn find_service(
-    device: &BluetoothLEDevice,
-    uuid: GUID,
-) -> Result<GattDeviceService, PlatformError> {
-    let operation = device
-        .GetGattServicesForUuidWithCacheModeAsync(uuid, BluetoothCacheMode::Uncached)
-        .map_err(windows_error)?;
-    let result = wait_async(operation, GATT_DISCOVERY_TIMEOUT, "gatt_find_atvv_service")?;
-    require_success(result.Status().map_err(windows_error)?, "发现 ATVV 服务")?;
-    let services = result.Services().map_err(windows_error)?;
-    if services.Size().map_err(windows_error)? != 1 {
-        return Err(PlatformError::VoiceServiceMissing);
-    }
-    services.GetAt(0).map_err(windows_error)
 }
 
 /// best-effort 定位标准 Battery Service（0x180F）。设备固件没有 BAS、
