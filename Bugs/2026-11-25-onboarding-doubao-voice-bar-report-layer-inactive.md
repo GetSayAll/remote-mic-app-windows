@@ -271,6 +271,27 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
   `Enabled=true` / 当前安装目录助手；安装版二进制含 `task_unusable` /
   `task_command_invalid` 等新标记。**未启动安装版**（沙箱禁止代启，需用户双击）；
   包内含并行未提交的 `ble.rs`/注释修改，**不是纯净提交包**。
+- **2026-11-25 用户实机复测（1.9.8 本地测试包，`a29a097`）passed（健康任务路径）**：
+  - `10:56:47.797Z` 启动对账摘要全部通过：
+    `task_installed=true helper_path_known=true task_command_present=true
+    task_command_exists=true task_command_matches=true task_file_matches=true
+    task_enabled=true task_logon_type=InteractiveToken task_run_level=HighestAvailable
+    task_power_policy=true`，**没有** `terminal_result=revoked`。
+  - `10:56:47.809Z` `auto_trigger` attempt 1；attempt 2 后
+    `10:56:53.242Z helper_authenticated helper_pid=704`；
+    `10:56:58.099Z auto_trigger phase=completed terminal_result=passed
+    reason=helper_connected trigger_attempts=2`。
+  - `10:56:58` / `10:57:19` / `10:57:33` 三次语音会话均完成
+    `usage_stats voice_begin/voice_finish terminal_result=passed`；
+    每次 `voice_attempt ... path=report_layer synth_confirmed=true`；
+    session 4 `voice_verify ... verdict=reacted`。用户目视语音正常。
+  - 前两次 session 的 `voice_verify` 在 2.5s 内是 `not_reacted`（探测标记，不是语音失败；
+    `voice_begin/finish` 仍 passed），本轮未深挖。
+  - 最后一条会话有 `transcript_capture action=baseline result=failed
+    reason=unsupported_control_type|initial_focus_unavailable`，属于回眸文字抓取，
+    与语音/报告层无关，本轮未处理。
+  - **stale task 故障路径仍未实机触发**：原故障任务已被用户清数据后重建为健康任务；
+    本机已验证“健康任务不被误回落”，`TaskSnapshot` 的失败分支由单测覆盖。
 - **deferred（真机）**：客户机恢复报告层后，豆包第⑥步出现语音条/文字；以及现场
   `torn_end_frame` / `slow_snapshot` / `helper_not_connected` 三行的实际出现。
 - **deferred（机器侧）**：助手启动失败原因；需客户机的 `helper-task.log` 与任务 XML。
