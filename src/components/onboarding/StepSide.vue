@@ -35,13 +35,14 @@ const WAVE = [14, 30, 46, 30, 54, 22, 34];
         draggable="false"
       />
       <template v-else-if="props.panel.visual === 'app'">
-        <img class="side-appicon" src="/app-logo.webp" alt="" />
+        <!-- 首步与完成步统一使用「几何鸭」（2026-11-24 用户要求）。 -->
+        <img class="side-appicon" src="/app-icon-faceted-duck.webp" alt="" />
         <span class="side-wave" aria-hidden="true">
           <i v-for="(height, index) in WAVE" :key="index" :style="{ height: `${height}px` }"></i>
         </span>
       </template>
       <span v-else class="side-logo-done">
-        <img class="side-appicon" src="/app-logo.webp" alt="" />
+        <img class="side-appicon" src="/app-icon-faceted-duck.webp" alt="" />
         <span class="side-done-badge" aria-hidden="true">✓</span>
       </span>
       <span v-if="props.panel.caption" class="side-caption">{{ props.panel.caption }}</span>
