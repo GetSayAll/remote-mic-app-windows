@@ -40,9 +40,10 @@ use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
 use crate::send_input::{
-    native_key, ButtonAction, ButtonActions, ButtonMappings, ButtonTrigger, KeyChord, KeyCode,
-    MouseClickKind, MoveDirection, ScrollDirection,
+    native_key, ButtonAction, ButtonActions, ButtonMappings, ButtonTrigger, DirectionalHold,
+    KeyChord, KeyCode, MouseClickKind, MoveDirection, ScrollDirection,
 };
+use crate::RemoteModel;
 use crate::UsageCounters;
 
 /// 「打开应用」实际使用的聚焦档案。
@@ -221,6 +222,8 @@ pub enum EngineMessage {
     MappingsChanged,
     /// 键位方案覆盖层已更新：重建手势配置。
     ProfileOverlayChanged,
+    /// 当前遥控器型号已变化：按新型号的分桶手势时间重建配置。
+    ActiveModelChanged,
     /// 临时暂挂（向导第⑥步"只看不动"）：仍观察边沿与手势，但不执行任何动作。
     /// 内存态、不落盘；进程结束自然消失。
     SetSuspended(bool),
@@ -237,6 +240,16 @@ pub enum EngineMessage {
 /// 动作注入器抽象（生产实现包装 `SendInputRuntime`，测试实现记录调用）。
 pub trait MappingInjector: Send + Sync {
     fn tap(&self, chord: &KeyChord) -> Result<(), String>;
+    /// 按住方向键：只提交键按下沿，直到 [`Self::key_up`] 配对释放。
+    ///
+    /// 默认实现失败：不支持按住注入的平台不得静默降级为点按。
+    fn key_down(&self, _chord: &KeyChord) -> Result<(), String> {
+        Err("当前平台不支持按住方向键".to_owned())
+    }
+    /// 释放 [`Self::key_down`] 提交的键，按反序提交释放沿。
+    fn key_up(&self, _chord: &KeyChord) -> Result<(), String> {
+        Err("当前平台不支持按住方向键".to_owned())
+    }
     fn scroll(&self, direction: ScrollDirection, steps: u16) -> Result<(), String>;
     /// APP 级翻页：优先 `ScrollPattern`，没有档案时由后端找当前前台窗口的
     /// 最大可滚动区域；最后才退到不移动光标的滚轮消息。
@@ -432,6 +445,20 @@ impl MappingInjector for SendInputInjector {
     fn tap(&self, chord: &KeyChord) -> Result<(), String> {
         self.runtime
             .tap(chord.clone())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn key_down(&self, chord: &KeyChord) -> Result<(), String> {
+        self.runtime
+            .press(chord)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn key_up(&self, chord: &KeyChord) -> Result<(), String> {
+        self.runtime
+            .release(chord)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -888,6 +915,8 @@ pub struct ButtonMappingRuntime {
     /// 键位方案覆盖层：`None` = 无方案生效，完全走基础映射。
     /// 私有组件在前后台切换时更新；公开引擎只负责合并与执行。
     profile_overlay: Arc<RwLock<Option<ButtonMappings>>>,
+    /// 当前遥控器型号（`gestureTimingsByModel` 的桶选择依据）。
+    active_model: Arc<RwLock<RemoteModel>>,
     sender: Sender<EngineMessage>,
     receiver: Mutex<Option<Receiver<EngineMessage>>>,
     state: Arc<Mutex<EngineState>>,
@@ -917,6 +946,7 @@ impl ButtonMappingRuntime {
         }));
         let mappings = Arc::new(RwLock::new(ButtonMappings::default()));
         let profile_overlay = Arc::new(RwLock::new(None));
+        let active_model = Arc::new(RwLock::new(RemoteModel::Unknown));
         let state = Arc::new(Mutex::new(EngineState::default()));
         let edge_callbacks = Arc::new(RwLock::new(Vec::new()));
         let gesture_callbacks = Arc::new(RwLock::new(Vec::new()));
@@ -934,6 +964,7 @@ impl ButtonMappingRuntime {
         let runtime = Self {
             mappings: Arc::clone(&mappings),
             profile_overlay: Arc::clone(&profile_overlay),
+            active_model: Arc::clone(&active_model),
             sender,
             receiver: Mutex::new(Some(receiver)),
             state: Arc::clone(&state),
@@ -949,6 +980,7 @@ impl ButtonMappingRuntime {
             .spawn({
                 let mappings = Arc::clone(&mappings);
                 let profile_overlay = Arc::clone(&profile_overlay);
+                let active_model = Arc::clone(&active_model);
                 let state = Arc::clone(&state);
                 let snapshot = Arc::clone(&snapshot);
                 let edge_callbacks = Arc::clone(&edge_callbacks);
@@ -964,6 +996,7 @@ impl ButtonMappingRuntime {
                         receiver,
                         mappings,
                         profile_overlay,
+                        active_model,
                         state,
                         snapshot,
                         edge_callbacks,
@@ -1034,6 +1067,32 @@ impl ButtonMappingRuntime {
         key_gate::configure(merged.enabled, mask);
         key_gate::set_persistent_mask(persistent_suppress_mask(mask));
         let _ = self.sender.send(EngineMessage::ProfileOverlayChanged);
+    }
+
+    /// 更新当前遥控器型号：后续按压立即使用该型号的分桶手势时间。
+    ///
+    /// 型号未变时不发消息（UI 每次轮询快照都会调用，避免空转重配）。
+    pub fn set_active_model(&self, model: RemoteModel) {
+        let changed = {
+            let mut active = self
+                .active_model
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *active == model {
+                false
+            } else {
+                *active = model;
+                true
+            }
+        };
+        if changed {
+            let _ = self.sender.send(EngineMessage::ActiveModelChanged);
+        }
+    }
+
+    /// 当前型号（诊断/测试用）。
+    pub fn active_model(&self) -> RemoteModel {
+        *read_lock(&self.active_model)
     }
 
     /// 当前覆盖层（测试/诊断用）。
@@ -1335,6 +1394,7 @@ fn engine_worker(
     receiver: Receiver<EngineMessage>,
     mappings: Arc<RwLock<ButtonMappings>>,
     profile_overlay: Arc<RwLock<Option<ButtonMappings>>>,
+    active_model: Arc<RwLock<RemoteModel>>,
     state: Arc<Mutex<EngineState>>,
     snapshot: Arc<Mutex<RawInputSnapshot>>,
     edge_callbacks: Arc<RwLock<Vec<ButtonEdgeCallback>>>,
@@ -1346,10 +1406,9 @@ fn engine_worker(
     let mut merger = ButtonStateMerger::default();
     let mut recognizer = GestureRecognizer::new();
     let initial_overlay = read_lock(&profile_overlay).clone();
-    recognizer.configure(&merged_mappings(
-        &read_lock(&mappings).clone(),
-        initial_overlay.as_ref(),
-    ));
+    let initial_mappings = merged_mappings(&read_lock(&mappings).clone(), initial_overlay.as_ref());
+    let initial_timing = initial_mappings.gesture_timing_for(*read_lock(&active_model));
+    recognizer.configure_with_timing(&initial_mappings, initial_timing);
     // 泄漏对冲标记：本次按住的原始键已泄漏进 OS（原生动作已交付）的按键。
     // 由 [`EngineMessage::Keyboard`]（泄漏路径）的按压边沿置位，Single 同键
     // 映射触发时消费并跳过注入；门控吞下的按压（[`EngineMessage::GateEdge`]）
@@ -1365,6 +1424,9 @@ fn engine_worker(
     let mut last_remote_move_at: Option<Instant> = None;
     // 应用切换器（Alt+Tab）临时会话：状态与计时都留在引擎线程，避免跨线程锁。
     let mut app_switcher = AppSwitcherSession::new();
+    // 方向键按住：按下/释放/长按阈值都由本表配对，配置变化与设备移除统一补释放。
+    let mut directional_holds = DirectionalHolds::default();
+    directional_holds.set_long_press(initial_timing.long_press_threshold());
 
     loop {
         // 消息密集时 recv_timeout 可能一直不超时；在每条消息前补一次会话心跳，
@@ -1385,17 +1447,28 @@ fn engine_worker(
             drain_app_switcher_end(&mut app_switcher, &state);
         }
 
-        let timeout = match (recognizer.next_deadline(), app_switcher.next_deadline()) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-            (None, None) => None,
-        }
+        let timeout = [
+            recognizer.next_deadline(),
+            app_switcher.next_deadline(),
+            directional_holds.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
         .map(|deadline| deadline.saturating_duration_since(Instant::now()));
         let message = match timeout {
             Some(timeout) => match receiver.recv_timeout(timeout) {
                 Ok(message) => message,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
+                    for step in directional_holds.due(now) {
+                        apply_directional_step(
+                            step,
+                            injector.as_ref(),
+                            &state,
+                            &mut directional_holds,
+                        );
+                    }
                     // 只有连续触发计时器产生的拍才计入 map_repeat 聚合；
                     // 双击窗补发的单击与首次长按是一次性手势（2026-10-05 评审发现 1）。
                     let (fired, ticks) = recognizer.advance_with_ticks(now);
@@ -1415,6 +1488,12 @@ fn engine_worker(
                             &macro_runtime,
                             &mut app_switcher,
                         ) {
+                            release_directional_holds(
+                                &mut directional_holds,
+                                injector.as_ref(),
+                                &state,
+                                "terminal_action",
+                            );
                             reset_after_terminal_action(
                                 "lock_workstation",
                                 &mut merger,
@@ -1446,6 +1525,12 @@ fn engine_worker(
                     app_switcher.cancel(EndReason::EngineStopped, Instant::now(), &io);
                     drain_app_switcher_end(&mut app_switcher, &state);
                     key_gate::set_app_switcher_mask(0);
+                    release_directional_holds(
+                        &mut directional_holds,
+                        injector.as_ref(),
+                        &state,
+                        "engine_stopped",
+                    );
                     finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                     break;
                 }
@@ -1457,6 +1542,12 @@ fn engine_worker(
                     app_switcher.cancel(EndReason::EngineStopped, Instant::now(), &io);
                     drain_app_switcher_end(&mut app_switcher, &state);
                     key_gate::set_app_switcher_mask(0);
+                    release_directional_holds(
+                        &mut directional_holds,
+                        injector.as_ref(),
+                        &state,
+                        "engine_stopped",
+                    );
                     finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                     break;
                 }
@@ -1492,6 +1583,7 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    &mut directional_holds,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -1516,6 +1608,7 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    &mut directional_holds,
                 );
             }
             EngineMessage::GateEdge(edge) => {
@@ -1544,6 +1637,7 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    &mut directional_holds,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
@@ -1566,6 +1660,12 @@ fn engine_worker(
                 // 常用语面板（可选私有组件）：来源失效（断连、监听停止、睡眠
                 // 唤醒后的 HID 接口移除）时关闭面板并清认领状态；未接入时空操作。
                 injector.common_phrase_host().reset(reason);
+                release_directional_holds(
+                    &mut directional_holds,
+                    injector.as_ref(),
+                    &state,
+                    reason,
+                );
                 // 释放全部按住状态：取消所有手势计时，不触发动作。
                 recognizer.release_all();
                 let edges = merger.release_all();
@@ -1591,11 +1691,14 @@ fn engine_worker(
                     &mut last_remote_move_at,
                     &macro_runtime,
                     &mut app_switcher,
+                    &mut directional_holds,
                 );
                 // 认领集合无需在此显式清理：被认领的按住都在上面 release_all
                 // 产生的释放边沿里配对消费并移出（见 handle_edges 释放分支）。
             }
-            EngineMessage::MappingsChanged | EngineMessage::ProfileOverlayChanged => {
+            EngineMessage::MappingsChanged
+            | EngineMessage::ProfileOverlayChanged
+            | EngineMessage::ActiveModelChanged => {
                 // 配置变化可能改变启动键的动作或总开关：先安全释放 Alt，
                 // 不让会话跨配置存活。
                 {
@@ -1606,7 +1709,15 @@ fn engine_worker(
                 let base = read_lock(&mappings).clone();
                 let overlay = read_lock(&profile_overlay).clone();
                 let merged = merged_mappings(&base, overlay.as_ref());
-                recognizer.configure(&merged);
+                let timing = merged.gesture_timing_for(*read_lock(&active_model));
+                release_directional_holds(
+                    &mut directional_holds,
+                    injector.as_ref(),
+                    &state,
+                    "reconfigure",
+                );
+                recognizer.configure_with_timing(&merged, timing);
+                directional_holds.set_long_press(timing.long_press_threshold());
                 // 配置变化重置全部手势状态：挂起的泄漏对冲标记一并失效。
                 // 常用语认领集合保留：正被认领按住的键仍靠它的释放沿配对消费。
                 native_pending.clear();
@@ -1614,8 +1725,10 @@ fn engine_worker(
                 let configured = crate::raw_input::ALL_BUTTONS
                     .iter()
                     .filter(|button| {
-                        crate::button_gestures::GestureConfig::for_button(&merged, **button)
-                            .is_some()
+                        crate::button_gestures::GestureConfig::for_button_with_timing(
+                            &merged, **button, timing,
+                        )
+                        .is_some()
                     })
                     .count();
                 crate::ble::gatt_note(format!(
@@ -1631,7 +1744,18 @@ fn engine_worker(
                     let io = InjectorAppSwitcherIo(injector.as_ref());
                     app_switcher.cancel(EndReason::Suspended, Instant::now(), &io);
                     drain_app_switcher_end(&mut app_switcher, &state);
+                    release_directional_holds(
+                        &mut directional_holds,
+                        injector.as_ref(),
+                        &state,
+                        "suspended",
+                    );
                 }
+                // 暂挂边界必须丢弃手势计时。否则学习最后一下若被识别为单击，
+                // 双击窗会在解除暂挂后补发一次单击（2026-11-24 现场：学完长按
+                // 后 150ms 打开记事本）。两端都清，避免学习前遗留的计时跨入。
+                recognizer.release_all();
+                finish_all_repeat_runs(&mut repeat_runs, "suspension");
                 lock_state(&state).suspended = suspended;
                 crate::ble::gatt_note(format!("map_suspension suspended={suspended}"));
             }
@@ -1697,10 +1821,303 @@ fn engine_worker(
                 app_switcher.cancel(EndReason::Shutdown, Instant::now(), &io);
                 drain_app_switcher_end(&mut app_switcher, &state);
                 key_gate::set_app_switcher_mask(0);
+                release_directional_holds(
+                    &mut directional_holds,
+                    injector.as_ref(),
+                    &state,
+                    "shutdown",
+                );
                 // 显式关闭同样要补齐进行中的连续触发聚合日志（评审发现 2）。
                 finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                 break;
             }
+        }
+    }
+}
+
+/// 方向键按住的运行时状态：只在引擎线程内使用，不持锁、不跨线程。
+///
+/// 与手势识别器分离：方向键按住没有双击/长按判定，按下即开始或到达阈值后
+/// 开始，松开即释放。这样长按阈值、释放兜底和配置变化清理都只有一处。
+#[derive(Debug)]
+struct DirectionalHoldEntry {
+    mode: DirectionalHold,
+    hold_chord: KeyChord,
+    tap_chord: Option<KeyChord>,
+    deadline: Option<Instant>,
+    active: bool,
+}
+
+#[derive(Debug)]
+struct DirectionalHolds {
+    entries: BTreeMap<RemoteButton, DirectionalHoldEntry>,
+    /// `Long` 模式的长按阈值，来自当前型号生效的手势时间
+    /// （`gestureTimingsByModel` 桶或旧版 `gestureTiming`）；
+    /// 缺省为历史常量 [`crate::button_gestures::LONG_PRESS_THRESHOLD`]。
+    long_press: Duration,
+}
+
+impl Default for DirectionalHolds {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            long_press: crate::button_gestures::LONG_PRESS_THRESHOLD,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DirectionalHoldStep {
+    Start(RemoteButton, KeyChord),
+    Stop(RemoteButton, KeyChord),
+    Tap(RemoteButton, KeyChord),
+}
+
+impl DirectionalHolds {
+    /// 按映射文档更新长按阈值；只影响之后登记的 `Long` 条目（进行中的
+    /// 条目在配置变化时已统一释放）。
+    fn set_long_press(&mut self, threshold: Duration) {
+        self.long_press = threshold;
+    }
+
+    /// 按下方向键：返回立即需要的注入步骤。
+    ///
+    /// `Single` 模式立即开始按住；`Long` 模式只登记阈值，等 [`Self::due`]。
+    fn press(
+        &mut self,
+        button: RemoteButton,
+        mode: DirectionalHold,
+        single: Option<KeyChord>,
+        long: KeyChord,
+        now: Instant,
+    ) -> Vec<DirectionalHoldStep> {
+        let mut steps = Vec::new();
+        // 同一键收到第二个按下沿而没见到释放：先把旧按住释放，避免卡键。
+        if let Some(step) = self.release(button) {
+            steps.push(step);
+        }
+        let entry = match mode {
+            DirectionalHold::Single => {
+                let Some(single) = single.clone() else {
+                    return steps;
+                };
+                DirectionalHoldEntry {
+                    mode,
+                    hold_chord: single,
+                    tap_chord: None,
+                    deadline: None,
+                    active: false,
+                }
+            }
+            DirectionalHold::Long => DirectionalHoldEntry {
+                mode,
+                hold_chord: long,
+                tap_chord: single.clone(),
+                deadline: Some(now + self.long_press),
+                active: false,
+            },
+        };
+        self.entries.insert(button, entry);
+        if mode == DirectionalHold::Single {
+            if let Some(single) = single {
+                steps.push(DirectionalHoldStep::Start(button, single));
+            }
+        }
+        steps
+    }
+
+    /// 注入器确认键按下沿已提交后调用，标记该键正在被按住。
+    fn mark_active(&mut self, button: RemoteButton) {
+        if let Some(entry) = self.entries.get_mut(&button) {
+            entry.active = true;
+            entry.deadline = None;
+        }
+    }
+
+    /// 释放方向键：返回释放或补点按的步骤。
+    fn release(&mut self, button: RemoteButton) -> Option<DirectionalHoldStep> {
+        let entry = self.entries.remove(&button)?;
+        if entry.active {
+            return Some(DirectionalHoldStep::Stop(button, entry.hold_chord));
+        }
+        match (entry.mode, entry.tap_chord) {
+            // 长按阈值前松开：按单击/双击语义补一次点按。
+            (DirectionalHold::Long, Some(tap)) => Some(DirectionalHoldStep::Tap(button, tap)),
+            _ => None,
+        }
+    }
+
+    /// 到达长按阈值的 `Long` 条目：返回开始按住的步骤。
+    fn due(&mut self, now: Instant) -> Vec<DirectionalHoldStep> {
+        let mut steps = Vec::new();
+        for (button, entry) in &mut self.entries {
+            if entry.active {
+                continue;
+            }
+            if let Some(deadline) = entry.deadline {
+                if deadline <= now {
+                    entry.deadline = None;
+                    steps.push(DirectionalHoldStep::Start(
+                        *button,
+                        entry.hold_chord.clone(),
+                    ));
+                }
+            }
+        }
+        steps
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.entries
+            .values()
+            .filter_map(|entry| entry.deadline)
+            .min()
+    }
+
+    fn contains(&self, button: RemoteButton) -> bool {
+        self.entries.contains_key(&button)
+    }
+
+    /// 配置变化/设备移除/退出：返回所有仍在按住的键，调用方负责补释放沿。
+    fn release_all(&mut self) -> Vec<(RemoteButton, KeyChord)> {
+        let mut released = Vec::new();
+        for (button, entry) in std::mem::take(&mut self.entries) {
+            if entry.active {
+                released.push((button, entry.hold_chord));
+            }
+        }
+        released
+    }
+}
+
+fn apply_directional_step(
+    step: DirectionalHoldStep,
+    injector: &dyn MappingInjector,
+    state: &Arc<Mutex<EngineState>>,
+    holds: &mut DirectionalHolds,
+) {
+    match step {
+        DirectionalHoldStep::Start(button, chord) => match injector.key_down(&chord) {
+            Ok(()) => {
+                holds.mark_active(button);
+                crate::ble::gatt_note(format!(
+                    "map_directional_hold phase=start result=ok button={button:?} chord={}",
+                    chord_log(&chord)
+                ));
+            }
+            Err(error) => {
+                crate::ble::gatt_note(format!(
+                        "map_directional_hold phase=start result=failed button={button:?} error_domain=send_input retryable=true error={error}"
+                    ));
+                lock_state(state).last_error = Some(format!("按住方向键失败：{error}"));
+            }
+        },
+        DirectionalHoldStep::Stop(button, chord) => {
+            if let Err(error) = injector.key_up(&chord) {
+                crate::ble::gatt_note(format!(
+                    "map_directional_hold phase=stop result=failed button={button:?} error_domain=send_input retryable=true error={error}"
+                ));
+                lock_state(state).last_error = Some(format!("释放方向键失败：{error}"));
+            } else {
+                crate::ble::gatt_note(format!(
+                    "map_directional_hold phase=stop result=ok button={button:?} chord={}",
+                    chord_log(&chord)
+                ));
+            }
+        }
+        DirectionalHoldStep::Tap(button, chord) => {
+            if let Err(error) = injector.tap(&chord) {
+                crate::ble::gatt_note(format!(
+                    "map_directional_hold phase=tap result=failed button={button:?} error_domain=send_input retryable=true error={error}"
+                ));
+                lock_state(state).last_error = Some(format!("方向键点按失败：{error}"));
+            } else {
+                crate::ble::gatt_note(format!(
+                    "map_directional_hold phase=tap result=ok button={button:?} chord={}",
+                    chord_log(&chord)
+                ));
+            }
+        }
+    }
+}
+
+fn release_directional_holds(
+    holds: &mut DirectionalHolds,
+    injector: &dyn MappingInjector,
+    state: &Arc<Mutex<EngineState>>,
+    reason: &str,
+) {
+    for (button, chord) in holds.release_all() {
+        if let Err(error) = injector.key_up(&chord) {
+            crate::ble::gatt_note(format!(
+                "map_directional_hold phase=release_all result=failed reason={reason} button={button:?} error_domain=send_input retryable=true error={error}"
+            ));
+            lock_state(state).last_error = Some(format!("释放方向键失败：{error}"));
+        } else {
+            crate::ble::gatt_note(format!(
+                "map_directional_hold phase=release_all result=ok reason={reason} button={button:?} chord={}",
+                chord_log(&chord)
+            ));
+        }
+    }
+}
+
+fn chord_log(chord: &KeyChord) -> String {
+    chord
+        .keys
+        .iter()
+        .map(|key| format!("{key:?}"))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// 该键当前动作是否配置了方向键按住。
+///
+/// 返回 `(单击点按和弦, 按住和弦)`。长按模式允许单击未配置（`None`）：按住仍然
+/// 有效，快速点按不产生动作。
+fn directional_hold_chords(
+    actions: &ButtonActions,
+    mode: DirectionalHold,
+) -> Option<(Option<KeyChord>, KeyChord)> {
+    let single = match &actions.single {
+        ButtonAction::Shortcut { chord } => Some(chord.clone()),
+        ButtonAction::Disabled => None,
+        _ => return None,
+    };
+    match mode {
+        DirectionalHold::Single => {
+            let single = single?;
+            Some((Some(single.clone()), single))
+        }
+        DirectionalHold::Long => {
+            let long = match &actions.long {
+                ButtonAction::Shortcut { chord } => chord.clone(),
+                _ => return None,
+            };
+            Some((single, long))
+        }
+    }
+}
+
+/// 原生键泄漏已交付时，方向键按住的注入是否会双输入。
+fn directional_hold_native_covered(
+    button: RemoteButton,
+    mode: DirectionalHold,
+    single: Option<&KeyChord>,
+    long: &KeyChord,
+) -> bool {
+    let native = native_key(button);
+    let Some(native) = native else {
+        return false;
+    };
+    match mode {
+        DirectionalHold::Single => {
+            single.is_some_and(|single| single.keys.len() == 1 && single.keys[0] == native)
+        }
+        DirectionalHold::Long => {
+            let single_covered =
+                single.is_none_or(|single| single.keys.len() == 1 && single.keys[0] == native);
+            single_covered && long.keys.len() == 1 && long.keys[0] == native
         }
     }
 }
@@ -1725,6 +2142,7 @@ fn handle_edges(
     last_remote_move_at: &mut Option<Instant>,
     macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
     app_switcher: &mut AppSwitcherSession,
+    directional_holds: &mut DirectionalHolds,
 ) {
     if edges.is_empty() {
         return;
@@ -1850,12 +2268,60 @@ fn handle_edges(
                     recognizer.swallow_press(edge.button);
                     Vec::new()
                 } else {
+                    let base = read_lock(mappings).clone();
+                    let overlay = read_lock(profile_overlay).clone();
+                    let actions = effective_actions(&base, overlay.as_ref(), edge.button);
+                    if let Some(mode) = actions.directional_hold {
+                        if base.enabled && key_gate::is_gate_thread_alive() {
+                            if let Some((single, long)) = directional_hold_chords(&actions, mode) {
+                                let native_leaked = native_pending.contains(&edge.button);
+                                if native_leaked
+                                    && directional_hold_native_covered(
+                                        edge.button,
+                                        mode,
+                                        single.as_ref(),
+                                        &long,
+                                    )
+                                {
+                                    native_pending.remove(&edge.button);
+                                    crate::ble::gatt_note(format!(
+                                        "map_directional_hold phase=skip reason=native_covers_action button={:?} mode={mode:?}",
+                                        edge.button
+                                    ));
+                                    recognizer.cancel_press(edge.button);
+                                    continue;
+                                }
+                                native_pending.remove(&edge.button);
+                                let steps =
+                                    directional_holds.press(edge.button, mode, single, long, now);
+                                for step in steps {
+                                    apply_directional_step(
+                                        step,
+                                        injector.as_ref(),
+                                        state,
+                                        directional_holds,
+                                    );
+                                }
+                                // 方向键按住完全接管本次按压：不进手势识别，
+                                // 释放沿由 `directional_holds` 配对消费。
+                                recognizer.cancel_press(edge.button);
+                                continue;
+                            }
+                        }
+                    }
                     recognizer.press(edge.button, now)
                 }
             }
         } else {
             // 释放沿：应用切换器会话认领过的按下必须配对消费（即使会话已在
             // 按下沿结束，例如 OK 确认 / 返回取消）。
+            if directional_holds.contains(edge.button) {
+                finish_repeat_run(repeat_runs, edge.button, "directional_hold");
+                if let Some(step) = directional_holds.release(edge.button) {
+                    apply_directional_step(step, injector.as_ref(), state, directional_holds);
+                }
+                continue;
+            }
             if app_switcher.release(edge.button) {
                 finish_repeat_run(repeat_runs, edge.button, "app_switcher");
                 continue;
@@ -1899,6 +2365,12 @@ fn handle_edges(
                 macro_runtime,
                 app_switcher,
             ) {
+                release_directional_holds(
+                    directional_holds,
+                    injector.as_ref(),
+                    state,
+                    "terminal_action",
+                );
                 reset_after_terminal_action(
                     "lock_workstation",
                     merger,
@@ -2532,6 +3004,8 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingInjector {
         taps: StdMutex<Vec<KeyChord>>,
+        key_downs: StdMutex<Vec<KeyChord>>,
+        key_ups: StdMutex<Vec<KeyChord>>,
         launches: StdMutex<Vec<String>>,
         scrolls: StdMutex<Vec<(ScrollDirection, u16)>>,
         clicks: StdMutex<Vec<MouseClickKind>>,
@@ -2604,6 +3078,22 @@ mod tests {
                 return Err("注入失败（测试）".to_owned());
             }
             self.taps.lock().unwrap().push(chord.clone());
+            Ok(())
+        }
+
+        fn key_down(&self, chord: &KeyChord) -> Result<(), String> {
+            if self.fail {
+                return Err("按住注入失败（测试）".to_owned());
+            }
+            self.key_downs.lock().unwrap().push(chord.clone());
+            Ok(())
+        }
+
+        fn key_up(&self, chord: &KeyChord) -> Result<(), String> {
+            if self.fail {
+                return Err("释放注入失败（测试）".to_owned());
+            }
+            self.key_ups.lock().unwrap().push(chord.clone());
             Ok(())
         }
 
@@ -3271,6 +3761,92 @@ mod tests {
         assert_eq!(snapshot.last_button, Some(RemoteButton::Ok));
     }
 
+    /// 切换当前型号立即换用该型号的时间桶，不需要重新写映射。
+    #[test]
+    fn active_model_switch_selects_gesture_timing_bucket() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let shortcut = |key: KeyCode| ButtonAction::Shortcut {
+            chord: KeyChord { keys: vec![key] },
+        };
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Ok,
+            ButtonActions {
+                single: shortcut(KeyCode::Enter),
+                double: shortcut(KeyCode::Space),
+                ..ButtonActions::default()
+            },
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc001".to_owned(),
+            crate::send_input::ButtonGestureTiming {
+                double_click_ms: 500,
+                ..crate::send_input::ButtonGestureTiming::DEFAULT
+            },
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc003".to_owned(),
+            crate::send_input::ButtonGestureTiming {
+                double_click_ms: 100,
+                ..crate::send_input::ButtonGestureTiming::DEFAULT
+            },
+        );
+        runtime.set_active_model(crate::RemoteModel::Rc001);
+        runtime.set_mappings(mappings);
+
+        let fired = Arc::new(StdMutex::new(Vec::new()));
+        let fired_sink = Arc::clone(&fired);
+        runtime.subscribe_button_gestures(Arc::new(move |gesture| {
+            fired_sink.lock().unwrap().push(gesture.trigger);
+        }));
+
+        let sender = runtime.sender();
+        let press_release = |sender: &Sender<EngineMessage>, gap: Duration| {
+            sender
+                .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+                .unwrap();
+            sender
+                .send(EngineMessage::HidUsages(BTreeSet::new()))
+                .unwrap();
+            std::thread::sleep(gap);
+        };
+
+        // rc001：300ms 后仍在 500ms 双击窗内 → 第二击构成双击。
+        press_release(&sender, Duration::from_millis(300));
+        press_release(&sender, Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            fired.lock().unwrap().as_slice(),
+            &[ButtonTrigger::Double],
+            "rc001 桶下 300ms 内第二击应为双击"
+        );
+
+        // 切到 rc003（100ms 窗）：同样的间隔已是两次独立单击。
+        fired.lock().unwrap().clear();
+        runtime.set_active_model(crate::RemoteModel::Rc003);
+        assert_eq!(runtime.active_model(), crate::RemoteModel::Rc003);
+        std::thread::sleep(Duration::from_millis(50));
+        press_release(&sender, Duration::from_millis(300));
+        press_release(&sender, Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            fired.lock().unwrap().as_slice(),
+            &[ButtonTrigger::Single, ButtonTrigger::Single],
+            "rc003 桶下 300ms 间隔应拆成两次单击"
+        );
+
+        drop(runtime);
+    }
+
     /// 向导第⑥步：暂挂期间手势仍被观察（回调照发），但不执行注入；解除后恢复。
     #[test]
     fn suspended_engine_observes_gestures_without_injecting() {
@@ -3320,6 +3896,52 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(fired.lock().unwrap().len(), 2, "解除暂挂后手势继续被观察");
         assert_eq!(tap_count(), 1, "解除暂挂后应恢复注入");
+
+        drop(runtime);
+        drop(gate);
+    }
+
+    /// 学习暂挂解除时，必须丢弃暂挂期间留下的双击窗计时；否则学习最后一下
+    /// 被识别成单击时，会在解除后补发原单击动作（2026-11-24 现场回归）。
+    #[test]
+    fn releasing_suspension_discards_pending_single_click() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let mut mappings = mappings_with_single(RemoteButton::Ok, KeyCode::Enter);
+        mappings.actions.get_mut(&RemoteButton::Ok).unwrap().double = ButtonAction::Shortcut {
+            chord: KeyChord {
+                keys: vec![KeyCode::Tab],
+            },
+        };
+        runtime.set_mappings(mappings);
+        let sender = runtime.sender();
+
+        runtime.set_suspended(true);
+        std::thread::sleep(Duration::from_millis(30));
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        runtime.set_suspended(false);
+        std::thread::sleep(Duration::from_millis(350));
+
+        assert!(
+            injector.taps.lock().unwrap().is_empty(),
+            "解除暂挂不得补发学习期间的单击，实际 {:?}",
+            injector.taps.lock().unwrap()
+        );
 
         drop(runtime);
         drop(gate);
@@ -5212,6 +5834,291 @@ mod tests {
                 keys: vec![KeyCode::Space]
             }],
             "运行时必须执行覆盖层动作，而不是基础映射"
+        );
+        drop(runtime);
+        drop(gate);
+    }
+
+    #[test]
+    fn directional_hold_state_machine_holds_single_and_long_slots() {
+        let mut holds = DirectionalHolds::default();
+        let t0 = Instant::now();
+        let left = KeyChord {
+            keys: vec![KeyCode::Left],
+        };
+        let right = KeyChord {
+            keys: vec![KeyCode::Right],
+        };
+
+        let steps = holds.press(
+            RemoteButton::Left,
+            DirectionalHold::Single,
+            Some(left.clone()),
+            left.clone(),
+            t0,
+        );
+        assert!(matches!(
+            steps.as_slice(),
+            [DirectionalHoldStep::Start(RemoteButton::Left, chord)] if chord == &left
+        ));
+        holds.mark_active(RemoteButton::Left);
+        assert!(matches!(
+            holds.release(RemoteButton::Left),
+            Some(DirectionalHoldStep::Stop(RemoteButton::Left, chord)) if chord == left
+        ));
+
+        let steps = holds.press(
+            RemoteButton::Right,
+            DirectionalHold::Long,
+            Some(right.clone()),
+            left.clone(),
+            t0,
+        );
+        assert!(steps.is_empty());
+        assert_eq!(
+            holds.next_deadline(),
+            Some(t0 + crate::button_gestures::LONG_PRESS_THRESHOLD)
+        );
+        assert!(holds
+            .due(t0 + crate::button_gestures::LONG_PRESS_THRESHOLD - Duration::from_millis(1))
+            .is_empty());
+        let steps = holds.due(t0 + crate::button_gestures::LONG_PRESS_THRESHOLD);
+        assert!(matches!(
+            steps.as_slice(),
+            [DirectionalHoldStep::Start(RemoteButton::Right, chord)] if chord == &left
+        ));
+        holds.mark_active(RemoteButton::Right);
+        assert!(matches!(
+            holds.release(RemoteButton::Right),
+            Some(DirectionalHoldStep::Stop(RemoteButton::Right, chord)) if chord == left
+        ));
+
+        let steps = holds.press(
+            RemoteButton::Right,
+            DirectionalHold::Long,
+            Some(right.clone()),
+            left.clone(),
+            t0,
+        );
+        assert!(steps.is_empty());
+        assert!(matches!(
+            holds.release(RemoteButton::Right),
+            Some(DirectionalHoldStep::Tap(RemoteButton::Right, chord)) if chord == right
+        ));
+
+        // 长按按住允许单击未配置：按住仍开始，快速点按不产生动作。
+        let steps = holds.press(
+            RemoteButton::Right,
+            DirectionalHold::Long,
+            None,
+            left.clone(),
+            t0,
+        );
+        assert!(steps.is_empty());
+        assert!(holds.release(RemoteButton::Right).is_none());
+    }
+
+    #[test]
+    fn directional_hold_long_uses_configured_long_press_threshold() {
+        let t0 = Instant::now();
+        let left = KeyChord {
+            keys: vec![KeyCode::Left],
+        };
+        let right = KeyChord {
+            keys: vec![KeyCode::Right],
+        };
+        let mut holds = DirectionalHolds::default();
+        holds.set_long_press(Duration::from_millis(900));
+
+        let steps = holds.press(
+            RemoteButton::Right,
+            DirectionalHold::Long,
+            Some(right.clone()),
+            left.clone(),
+            t0,
+        );
+        assert!(steps.is_empty());
+        assert_eq!(holds.next_deadline(), Some(t0 + Duration::from_millis(900)));
+        // 默认 550ms 不再生效：到默认阈值仍不开始按住。
+        assert!(holds
+            .due(t0 + crate::button_gestures::LONG_PRESS_THRESHOLD)
+            .is_empty());
+        let steps = holds.due(t0 + Duration::from_millis(900));
+        assert!(matches!(
+            steps.as_slice(),
+            [DirectionalHoldStep::Start(RemoteButton::Right, chord)] if chord == &left
+        ));
+    }
+
+    #[test]
+    fn directional_hold_single_submits_key_down_and_key_up() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        std::thread::sleep(Duration::from_millis(50));
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Left,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Left],
+                    },
+                },
+                directional_hold: Some(DirectionalHold::Single),
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings.normalized().unwrap());
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Left,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(
+                || injector.key_downs.lock().unwrap().len() == 1,
+                Duration::from_millis(2000)
+            ),
+            "按下左键必须提交一次方向键按下沿"
+        );
+        assert_eq!(
+            injector.key_downs.lock().unwrap().clone(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Left]
+            }]
+        );
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Left,
+                is_pressed: false,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(
+                || injector.key_ups.lock().unwrap().len() == 1,
+                Duration::from_millis(2000)
+            ),
+            "松开左键必须提交配对的释放沿"
+        );
+        assert_eq!(
+            injector.key_ups.lock().unwrap().clone(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Left]
+            }]
+        );
+        drop(runtime);
+        drop(gate);
+    }
+
+    #[test]
+    fn directional_hold_long_starts_after_threshold_and_taps_quick_press() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let gate = crate::key_gate::KeyGate::start();
+        std::thread::sleep(Duration::from_millis(50));
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Left,
+            ButtonActions {
+                single: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Left],
+                    },
+                },
+                long: ButtonAction::Shortcut {
+                    chord: KeyChord {
+                        keys: vec![KeyCode::Right],
+                    },
+                },
+                directional_hold: Some(DirectionalHold::Long),
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings.normalized().unwrap());
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Left,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(
+                || injector.key_downs.lock().unwrap().len() == 1,
+                Duration::from_millis(2000)
+            ),
+            "按住超过阈值后必须提交长按方向键的按下沿"
+        );
+        assert_eq!(
+            injector.key_downs.lock().unwrap().clone(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Right]
+            }]
+        );
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Left,
+                is_pressed: false,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(
+                || injector.key_ups.lock().unwrap().len() == 1,
+                Duration::from_millis(2000)
+            ),
+            "松开时必须释放长按方向键"
+        );
+        assert_eq!(
+            injector.key_ups.lock().unwrap().clone(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Right]
+            }]
+        );
+
+        // 阈值前松开：不进入按住，补一次单击点按。
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Left,
+                is_pressed: true,
+            }))
+            .unwrap();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Left,
+                is_pressed: false,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(
+                || injector.taps.lock().unwrap().len() == 1,
+                Duration::from_millis(2000)
+            ),
+            "阈值前松开必须补一次单击点按"
+        );
+        assert_eq!(
+            injector.taps.lock().unwrap().clone(),
+            vec![KeyChord {
+                keys: vec![KeyCode::Left]
+            }]
         );
         drop(runtime);
         drop(gate);

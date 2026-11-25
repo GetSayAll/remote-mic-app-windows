@@ -192,6 +192,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
     // 「锁定当前按键」偏好（2026-10-18 持久化）：默认开启；用例内按需覆盖。
     getLockMappingSelection: vi.fn(async () => true),
     saveLockMappingSelection: vi.fn(async (locked: boolean) => locked),
+    setMappingSuspension: vi.fn(async () => true),
   };
 });
 
@@ -216,6 +217,7 @@ import {
   resolvePresetTarget,
   pickCustomApp,
   saveLockMappingSelection,
+  setMappingSuspension,
   scanPairedRemotes,
   subscribeButtonEdges,
   subscribeButtonGestures,
@@ -307,6 +309,15 @@ async function mountPage(
   });
   mountedPages.push(wrapper);
   return wrapper;
+}
+
+/** 旧用例按「全部」检查候选动作：打开按键后默认会按已配置动作选分类。 */
+async function showAllActions(page: VueWrapper): Promise<void> {
+  const all = page.findAll(".action-filter-chip").find((chip) => chip.text() === "全部");
+  if (all) {
+    await all.trigger("click");
+    await flushPromises();
+  }
 }
 
 /** 通过「添加应用」选中 mock 的 Registered Example（自定义应用）。 */
@@ -432,6 +443,8 @@ beforeEach(() => {
   vi.mocked(getLockMappingSelection).mockResolvedValue(true);
   vi.mocked(saveLockMappingSelection).mockReset();
   vi.mocked(saveLockMappingSelection).mockImplementation(async (locked: boolean) => locked);
+  vi.mocked(setMappingSuspension).mockReset();
+  vi.mocked(setMappingSuspension).mockResolvedValue(true);
 });
 
 /** 构造一份指定相位的桥接快照（其余计数字段对 UI 无关，取零值）。 */
@@ -519,8 +532,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await addScannedApp(wrapper);
 
     const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
@@ -547,8 +561,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     if (!wrapper.find(".custom-app-group").exists()) {
       await wrapper
         .findAll("button")
@@ -584,8 +599,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     // 先加一个自定义应用（复用扫描流程），保证「目标 APP」非空。
     await addScannedApp(wrapper);
 
@@ -610,41 +626,69 @@ describe("buttons mapping page", () => {
     wrapper.unmount();
   });
 
+  it("首次打开自定义 APP 时滚动到目标列表，保证列表完整可见", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await okCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
+
+    const original = HTMLElement.prototype.scrollIntoView;
+    const scrollSpy = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollSpy;
+    try {
+      await wrapper
+        .findAll("button.chip")
+        .find((button) => button.text() === "打开自定义 APP")!
+        .trigger("click");
+      await flushPromises();
+      expect(wrapper.find(".custom-app-group").exists()).toBe(true);
+      expect(scrollSpy).toHaveBeenCalledWith({ block: "start", behavior: "auto" });
+    } finally {
+      if (original) HTMLElement.prototype.scrollIntoView = original;
+      else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    }
+  });
+
   it("动作分组按用户指定顺序排列，鼠标动作固定在最后（2026-10-22）", async () => {
     const wrapper = await mountPage();
     await flushPromises();
     const downCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "下")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "下键")!;
     await downCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
-    expect(titles.slice(0, 3)).toEqual(["基础按键", "系统与媒体", "自定义动作"]);
-    expect(titles.indexOf("自定义动作")).toBeLessThan(titles.indexOf("打开 APP"));
+    expect(titles.slice(0, 4)).toEqual(["基础按键", "系统与媒体", "自定义按键", "输入框"]);
+    expect(titles.indexOf("输入框")).toBeLessThan(titles.indexOf("打开 APP"));
     expect(titles.indexOf("打开 APP")).toBeLessThan(titles.indexOf("组合动作"));
     expect(titles).not.toContain("设备操作");
-    expect(titles.slice(-2)).toEqual(["鼠标动作", "连续执行"]);
+    expect(titles.slice(-2)).toEqual(["鼠标动作", "按住行为"]);
     expect(titles).not.toContain("鼠标滚轮");
     expect(titles).not.toContain("鼠标点击");
     expect(titles).not.toContain("鼠标移动");
 
-    // 主分组顺序：自定义动作 → 打开 APP → 组合动作。
+    // 主分组顺序：自定义按键 → 输入框 → 打开 APP → 组合动作。
     const customSection = wrapper
       .findAll(".mapping-editor .action-section")
-      .find((item) => item.find(".action-section-title").text() === "自定义动作")!;
+      .find((item) => item.find(".action-section-title").text() === "自定义按键")!;
+    const inputSection = wrapper
+      .findAll(".mapping-editor .action-section")
+      .find((item) => item.find(".action-section-title").text() === "输入框")!;
     const appSection = wrapper
       .findAll(".mapping-editor .action-section")
       .find((item) => item.find(".action-section-title").text() === "打开 APP")!;
-    expect(customSection.element.nextElementSibling).toBe(appSection.element);
+    expect(customSection.element.nextElementSibling).toBe(inputSection.element);
+    expect(inputSection.element.nextElementSibling).toBe(appSection.element);
 
-    // 「连续执行」独立成组，放在鼠标动作下面。
+    // 「按住行为」独立成组，放在鼠标动作下面。
     const mouseContainer = wrapper.find(".mapping-editor .mouse-action-sections");
     const repeatContainer = wrapper.find(".mapping-editor .repeat-action-sections");
     expect(mouseContainer.exists()).toBe(true);
-    expect(repeatContainer.exists(), "方向键应显示「连续执行」").toBe(true);
+    expect(repeatContainer.exists(), "方向键应显示「按住行为」").toBe(true);
     expect(mouseContainer.element.nextElementSibling).toBe(repeatContainer.element);
-    expect(repeatContainer.find(".action-section-title").text()).toBe("连续执行");
+    expect(repeatContainer.find(".action-section-title").text()).toBe("按住行为");
     expect(repeatContainer.findAll(".repeat-options .chip").map((chip) => chip.text())).toEqual([
       "关闭",
       "重复单击动作",
@@ -658,8 +702,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
     const mouseSection = wrapper
       .findAll(".mapping-editor .action-section")
@@ -701,8 +746,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
     const appSection = wrapper
       .findAll(".mapping-editor .action-section")
@@ -726,29 +772,26 @@ describe("buttons mapping page", () => {
     wrapper.unmount();
   });
 
-  it("「聚焦输入框」并入自定义动作，位于录制按钮右侧（2026-10-22）", async () => {
+  it("「聚焦输入框」独立为输入框分类（2026-11-24 对齐 Mac）", async () => {
     const wrapper = await mountPage();
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
     expect(titles, `动作分组：${titles.join(" / ")}`).not.toContain("设备操作");
-    const customSection = wrapper
+    const inputSection = wrapper
       .findAll(".mapping-editor .action-section")
-      .find((item) => item.find(".action-section-title").text() === "自定义动作")!;
-    const rowButtons = customSection
-      .find(".custom-shortcut-row")
-      .findAll("button.chip")
-      .map((button) => button.text());
-    expect(rowButtons).toEqual(["录入自定义快捷键", "聚焦输入框"]);
-    const focusChip = customSection
+      .find((item) => item.find(".action-section-title").text() === "输入框")!;
+    const focusChip = inputSection
       .findAll("button")
       .find((button) => button.text() === "聚焦输入框");
     expect(focusChip, "「聚焦输入框」动作入口必须可见").toBeDefined();
+    expect(inputSection.text()).toContain("学习指定 App 的输入框请去「聚焦与翻页」页面");
 
     // 选中后写入映射（不切换应用、不输入文字，只有动作类型）。
     await focusChip!.trigger("click");
@@ -774,11 +817,12 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     // 按键格摘要：保留该动作并标注当前不可用（不静默替换成别的动作）。
     expect(powerCard.text()).toContain("打开常用语（当前不可用）");
 
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
     const titles = wrapper.findAll(".mapping-editor .action-section-title").map((item) => item.text());
     expect(titles, `动作分组：${titles.join(" / ")}`).not.toContain("常用语");
@@ -801,8 +845,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const section = wrapper
@@ -840,8 +885,9 @@ describe("buttons mapping page", () => {
     await flushPromises();
     const powerCard = wrapper
       .findAll(".mapping-card")
-      .find((item) => item.find(".mapping-card-title strong").text() === "电源")!;
+      .find((item) => item.find(".mapping-card-title strong").text() === "电源键")!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const section = wrapper
@@ -865,7 +911,7 @@ describe("buttons mapping page", () => {
     expect(wrapper.findAll(".mapping-cell")).toHaveLength(36);
     const voiceCard = wrapper.find(".voice-card");
     expect(voiceCard.text()).toContain("语音键");
-    expect(voiceCard.text()).toContain("按住说话");
+    expect(voiceCard.text()).toContain("语音触发键");
   });
 
   it("does not register listeners or polling after unmounting during initial load", async () => {
@@ -959,13 +1005,14 @@ describe("buttons mapping page", () => {
     const singleCell = okCard!.findAll(".mapping-cell")[0]!;
     expect(singleCell.classes()).toContain("set");
     await singleCell.trigger("click");
-    expect(wrapper.find(".mapping-editor").text()).toContain("确定 · 单击");
+    expect(wrapper.find(".mapping-editor").text()).toContain("确定键 · 单击");
   });
 
   it("组合动作分组：选中即写入 run_macro 并即时保存（2026-10-15）", async () => {
     const wrapper = await mountPage();
     const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
     await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
 
     const editor = wrapper.find(".mapping-editor");
     expect(editor.text()).toContain("组合动作");
@@ -1011,6 +1058,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
     await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const editor = wrapper.find(".mapping-editor");
     const macroSection = editor.findAll(".action-section").find((section) =>
       section.text().includes("组合动作"),
@@ -1024,6 +1072,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
     await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const editor = wrapper.find(".mapping-editor");
     expect(editor.text()).toContain("还没有组合动作。先到“组合动作”页创建。");
     const manage = editor.findAll(".chip").find((chip) => chip.text() === "管理组合动作");
@@ -1036,6 +1085,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const powerCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("电源"));
     await powerCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const macroSection = wrapper
       .findAll(".mapping-editor .action-section")
       .find((section) => section.find(".action-section-title").text() === "组合动作")!;
@@ -1051,9 +1101,10 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"));
     await powerCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
 
     const editor = wrapper.find(".mapping-editor");
-    expect(editor.text()).toContain("电源 · 长按");
+    expect(editor.text()).toContain("电源键 · 长按");
     // 点击 Esc 预设即自动保存（无需保存按钮）。
     const chips = editor.findAll(".chip");
     const escapeChip = chips.find((chip) => chip.text() === "Esc");
@@ -1070,21 +1121,43 @@ describe("buttons mapping page", () => {
     expect(saved.actions.power!.long.chord!.keys).toEqual(["escape"]);
     await flushPromises();
 
-    // 禁用按键按钮：禁用当前格并自动保存。
-    const disableButton = wrapper
-      .findAll("button")
-      .find((button) => button.text() === "禁用按键");
-    expect(disableButton).toBeDefined();
-    await disableButton!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".editor-save-status").text()).toBe("自动保存成功");
+
+    // 「停用此动作」开关：停用当前格并自动保存。
+    const disableToggle = wrapper.find(".editor-disable-toggle input");
+    expect(disableToggle.exists()).toBe(true);
+    await disableToggle.setValue(true);
     await vi.waitFor(() => {
       if (vi.mocked(saveButtonMappings).mock.calls.length < 2) {
-        throw new Error("禁用后未自动保存");
+        throw new Error("停用后未自动保存");
       }
     });
     const disabledSaved = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
       actions: Record<string, { long: { type: string } }>;
     };
     expect(disabledSaved.actions.power!.long.type).toBe("disabled");
+  });
+
+  it("自动保存失败时在编辑面板显示重试，重试成功后显示成功", async () => {
+    vi.mocked(saveButtonMappings).mockRejectedValueOnce(new Error("disk full"));
+    const wrapper = await mountPage();
+    await openCell(wrapper, "电源", 0);
+    const editor = wrapper.find(".mapping-editor");
+    const escapeChip = editor
+      .findAll("button.chip")
+      .find((chip) => chip.text() === "Esc");
+    expect(escapeChip).toBeDefined();
+    await escapeChip!.trigger("click");
+    await vi.waitFor(() => {
+      expect(wrapper.find(".editor-save-status").text()).toBe("保存失败");
+    });
+    expect(wrapper.find(".editor-save-retry").exists()).toBe(true);
+
+    await wrapper.find(".editor-save-retry").trigger("click");
+    await vi.waitFor(() => {
+      expect(wrapper.find(".editor-save-status").text()).toBe("自动保存成功");
+    });
   });
 
   it("「按住时连续执行」：选“重复单击动作”写入 holdRepeat=single，改回“关闭”清空", async () => {
@@ -1103,6 +1176,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const chip = (label: string) =>
       wrapper
         .find(".mapping-editor")
@@ -1139,6 +1213,69 @@ describe("buttons mapping page", () => {
     expect(off.actions.up!.holdRepeat).toBeUndefined();
   });
 
+  it("方向键按住选项只出现在左、右键", async () => {
+    const wrapper = await mountPage();
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("上"));
+    await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
+    const labels = wrapper
+      .find(".mapping-editor")
+      .findAll(".repeat-options .chip")
+      .map((chip) => chip.text());
+    expect(labels).not.toContain("按住单击方向");
+    expect(labels).not.toContain("长按后按住方向");
+  });
+
+  it("方向键按住：左键选“按住单击方向”写入 directionalHold=single，关闭清空", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        left: {
+          single: { type: "shortcut", chord: { keys: ["left"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const leftCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("左"));
+    await leftCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
+    const chip = (label: string) =>
+      wrapper
+        .find(".mapping-editor")
+        .findAll(".repeat-options .chip")
+        .find((item) => item.text() === label);
+    expect(chip("按住单击方向")).toBeTruthy();
+    expect((chip("按住单击方向")!.element as HTMLButtonElement).disabled).toBe(false);
+
+    await chip("按住单击方向")!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length === 0) throw new Error("未自动保存");
+    });
+    const saved = vi.mocked(saveButtonMappings).mock.calls[0]![0] as {
+      actions: Record<string, { directionalHold?: string; holdRepeat?: string }>;
+    };
+    expect(saved.actions.left!.directionalHold).toBe("single");
+    expect(saved.actions.left!.holdRepeat).toBeUndefined();
+
+    await vi.waitFor(() => {
+      if ((chip("关闭")!.element as HTMLButtonElement).disabled) throw new Error("等待保存结束");
+    });
+    await chip("关闭")!.trigger("click");
+    await vi.waitFor(() => {
+      if (vi.mocked(saveButtonMappings).mock.calls.length < 2) throw new Error("关闭未保存");
+    });
+    const off = vi.mocked(saveButtonMappings).mock.calls[1]![0] as {
+      actions: Record<string, { directionalHold?: string }>;
+    };
+    expect(off.actions.left!.directionalHold).toBeUndefined();
+  });
+
   it("「按住时连续执行」：长按动作未配置时“重复长按动作”置灰，配置后可选中并保存 long", async () => {
     vi.mocked(getButtonMappings).mockResolvedValueOnce({
       enabled: true,
@@ -1155,6 +1292,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
     const chip = (label: string) =>
       wrapper
         .find(".mapping-editor")
@@ -1205,6 +1343,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
     const backspaceChip = wrapper
       .find(".mapping-editor")
       .findAll(".chip")
@@ -1246,6 +1385,7 @@ describe("buttons mapping page", () => {
       .find((card) => card.text().includes("上"));
     // 编辑双击格，只改双击；单击的未知动作与 holdRepeat 必须原样保留。
     await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    await showAllActions(wrapper);
     const backspaceChip = wrapper
       .find(".mapping-editor")
       .findAll(".chip")
@@ -1278,6 +1418,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const backspaceChip = () =>
       wrapper
         .find(".mapping-editor")
@@ -1318,6 +1459,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    await showAllActions(wrapper);
     const backspaceChip = wrapper
       .find(".mapping-editor")
       .findAll(".chip")
@@ -1351,6 +1493,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[1]!.trigger("click");
+    await showAllActions(wrapper);
     const backspaceChip = wrapper
       .find(".mapping-editor")
       .findAll(".chip")
@@ -1382,11 +1525,13 @@ describe("buttons mapping page", () => {
 
     // 确定键：也显示「连续执行」，但未配置单击动作时选项置灰并说明原因。
     await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(true);
     expect(wrapper.find(".mapping-editor").text()).toContain("先给这个按键配置单击动作");
 
     // 方向键 + 组合键动作：“重复单击动作”置灰并说明原因。
     await findCard("上").findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const chip = wrapper
       .find(".mapping-editor")
       .findAll(".repeat-options .chip")
@@ -1397,6 +1542,7 @@ describe("buttons mapping page", () => {
 
     // 双击页不提供该选项组。
     await findCard("上").findAll(".mapping-cell")[1]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor .repeat-group").exists()).toBe(false);
   });
 
@@ -1416,6 +1562,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("TV"))!;
     await tvCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const group = wrapper.find(".mapping-editor .repeat-group");
     expect(group.exists(), "TV 也应显示「连续执行」").toBe(true);
     const chip = group
@@ -1443,6 +1590,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const chip = (label: string) =>
       wrapper
         .find(".mapping-editor")
@@ -1480,6 +1628,7 @@ describe("buttons mapping page", () => {
         .findAll(".repeat-options .chip")
         .find((item) => item.text() === label);
     await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const editorText = wrapper.find(".mapping-editor").text();
     expect(editorText).not.toContain("单击在按下瞬间执行");
     expect(editorText).not.toContain("长按约 0.55 秒后执行");
@@ -1488,6 +1637,7 @@ describe("buttons mapping page", () => {
       "按住不放，单击动作会不断重复，直到松手",
     );
     await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
     // 未配置长按动作：该选项置灰，悬停显示原因而不是行为说明。
     expect(chip("重复长按动作")!.attributes("title")).toBe("先给这个按键配置长按动作");
   });
@@ -1508,6 +1658,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor").text()).not.toContain(
       "配置了双击：单击会稍等片刻（约 0.3 秒）以区分双击",
     );
@@ -1537,11 +1688,13 @@ describe("buttons mapping page", () => {
       .find((card) => card.text().includes("上"));
     // 单击页：两个选项都不可选，提示给出“先清除长按动作”这条真正可行的下一步。
     await upCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const singleHint = wrapper.find(".mapping-editor").text();
     expect(singleHint).toContain("请先清除长按动作");
     expect(singleHint).not.toContain("请选“重复长按动作”");
     // 长按页：原因不变，且说明句不再承诺“开启后会连续执行”。
     await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
     const longHint = wrapper.find(".mapping-editor").text();
     expect(longHint).toContain("“长按”的动作只执行一次");
     expect(longHint).not.toContain("请选“重复长按动作”");
@@ -1565,6 +1718,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("上"));
     await upCard!.findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
     const appChip = wrapper
       .find(".mapping-editor")
       .findAll(".chip")
@@ -1595,14 +1749,27 @@ describe("buttons mapping page", () => {
 
     // 只对 OK 键显示。
     await findCard("上").findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
 
     // 说明句写明 5 秒窗口与“原动作都不执行”。
     await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
     expect(wrapper.find(".mapping-editor").text()).toContain("刚用遥控器移动过光标（5 秒内）");
     expect(wrapper.find(".mapping-editor").text()).toContain("单击、双击、长按都不会执行");
+    expect(wrapper.find(".mapping-editor > .card-title-row").text()).not.toContain("关闭");
     expect((toggle().element as HTMLInputElement).disabled).toBe(false);
+
+    // 只属于「鼠标动作」分类：自定义动作里不出现，切到鼠标动作才出现。
+    const filterChip = (label: string) =>
+      wrapper.findAll(".action-filter-chip").find((chip) => chip.text() === label)!;
+    await filterChip("自定义动作").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
+    await filterChip("鼠标动作").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
 
     await toggle().setValue(true);
     await vi.waitFor(() => {
@@ -1615,12 +1782,15 @@ describe("buttons mapping page", () => {
 
     // 长按页显示同一开关（按键级）；双击页不显示。
     await findCard("确定").findAll(".mapping-cell")[2]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(true);
     await findCard("确定").findAll(".mapping-cell")[1]!.trigger("click");
+    await showAllActions(wrapper);
     expect(wrapper.find(".mapping-editor .ok-click-toggle").exists()).toBe(false);
 
     // 关闭：先等上一轮保存结束（busy 释放），再清空字段。
     await findCard("确定").findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await vi.waitFor(() => {
       if ((toggle().element as HTMLInputElement).disabled) throw new Error("等待保存结束");
     });
@@ -1644,6 +1814,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const editor = wrapper.find(".mapping-editor");
 
     // 预设应用：内置聚焦与翻页，不在按键页显示可编辑配置或摘要。
@@ -1698,6 +1869,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const summary = wrapper.find(".focus-profile-summary");
@@ -1743,6 +1915,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const summary = wrapper.find(".focus-profile-summary");
@@ -1796,6 +1969,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     const summary = wrapper.find(".focus-profile-summary");
@@ -1825,6 +1999,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const summary = wrapper.find(".focus-profile-summary");
     expect(summary.text()).toContain("使用 APP 快捷键聚焦");
     expect(summary.text()).toContain("翻页：预置可用");
@@ -1860,6 +2035,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     expect(wrapper.text()).toContain("上次聚焦失败：没有找到可用的输入框");
@@ -1868,7 +2044,7 @@ describe("buttons mapping page", () => {
   it("opens the requested button editor from a navigation request", async () => {
     const wrapper = await mountPage("rc003", { button: "ok", trigger: "long" });
     await flushPromises();
-    expect(wrapper.find(".mapping-editor").text()).toContain("确定 · 长按");
+    expect(wrapper.find(".mapping-editor").text()).toContain("确定键 · 长按");
   });
 
   it("自定义应用的聚焦摘要显示已保存的策略", async () => {
@@ -1890,6 +2066,7 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage();
     const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"));
     await okCard!.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
 
     expect(wrapper.find(".focus-profile-summary").text()).toContain("使用 APP 快捷键聚焦");
@@ -1909,6 +2086,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const choose = async (label: string) => {
       await wrapper
         .findAll(".mapping-editor button")
@@ -2034,6 +2212,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     await flushPromises();
     const input = wrapper.get('input[aria-label="每次滚动格数"]');
     expect((input.element as HTMLInputElement).value).toBe("20");
@@ -2054,6 +2233,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const captureButton = wrapper
       .findAll(".mapping-editor .chip")
       .find((button) => button.text().includes("录入自定义快捷键"))!;
@@ -2080,6 +2260,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const captureButton = wrapper
       .findAll(".mapping-editor .chip")
       .find((button) => button.text().includes("录入自定义快捷键"))!;
@@ -2103,6 +2284,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const safeToggle = wrapper.find(".safe-capture-toggle input");
     const shortcutRow = wrapper.find(".custom-shortcut-row");
     const toggleRow = wrapper.find(".safe-capture-toggle");
@@ -2146,6 +2328,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const captureButton = wrapper
       .findAll(".mapping-editor .chip")
       .find((button) => button.text().includes("录入自定义快捷键"))!;
@@ -2173,6 +2356,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((card) => card.text().includes("电源"))!;
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(wrapper);
     const captureButton = wrapper
       .findAll(".mapping-editor .chip")
       .find((button) => button.text().includes("录入自定义快捷键"))!;
@@ -2261,7 +2445,7 @@ describe("buttons mapping page", () => {
     mountedPages.push(wrapper);
     await flushPromises();
 
-    const master = toggleRowByText(wrapper, "启用自定义按键功能").find("input");
+    const master = toggleRowByText(wrapper, "自定义按键").find("input");
     const lock = toggleRowByText(wrapper, "锁定当前按键").find("input");
     expect((master.element as HTMLInputElement).checked).toBe(false);
     expect((lock.element as HTMLInputElement).checked).toBe(false);
@@ -2280,7 +2464,7 @@ describe("buttons mapping page", () => {
     mountedPages.push(wrapper);
     await flushPromises();
 
-    const row = () => toggleRowByText(wrapper, "启用自定义按键功能");
+    const row = () => toggleRowByText(wrapper, "自定义按键");
     const pending = row().find("input");
     expect(pending.exists()).toBe(true);
     expect((pending.element as HTMLInputElement).disabled).toBe(true);
@@ -2299,22 +2483,23 @@ describe("buttons mapping page", () => {
 
   it("底部状态提示显示 8 秒后自动关闭", async () => {
     const wrapper = await mountPage();
-    const bottom = wrapper.find(".mapping-bottom");
-    expect(bottom.find(".mapping-footer").exists()).toBe(true);
-    const master = toggleRowByText(wrapper, "启用自定义按键功能").find("input");
+    const footer = wrapper.find(".mapping-footer");
+    const status = () => wrapper.find(".mapping-status");
+    expect(footer.exists()).toBe(true);
+    const master = toggleRowByText(wrapper, "自定义按键").find("input");
     vi.useFakeTimers();
     await master.setValue(false);
     await flushPromises();
-    expect(bottom.find(".mapping-status").text()).toContain("总开关已更新");
+    expect(status().text()).toContain("总开关已更新");
 
     vi.advanceTimersByTime(7_999);
     await flushPromises();
-    expect(bottom.find(".mapping-status").exists()).toBe(true);
+    expect(status().exists()).toBe(true);
 
     vi.advanceTimersByTime(1);
     await flushPromises();
-    expect(bottom.find(".mapping-status").exists()).toBe(false);
-    expect(bottom.find(".mapping-footer").exists()).toBe(true);
+    expect(status().exists()).toBe(false);
+    expect(footer.exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -2518,6 +2703,7 @@ describe("buttons mapping page", () => {
     expect(card, `未找到卡片：${cardLabel}`).toBeDefined();
     await card!.findAll(".mapping-cell")[triggerIndex]!.trigger("click");
     expect(wrapper.find(".mapping-editor").exists()).toBe(true);
+    await showAllActions(wrapper);
   }
 
   it("全开放：确定·单击所有操作可配（注入链路已真机验证）+ 单响应提示", async () => {
@@ -2593,16 +2779,16 @@ describe("buttons mapping page", () => {
         .findAll(".mapping-icon path")
         .map((path) => path.attributes("d"));
 
-    expect(iconPaths("音量+")).toEqual([
+    expect(iconPaths("音量 +")).toEqual([
       "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
       "M15 9a4.2 4.2 0 0 1 0 6",
       "M17.6 6.4a8 8 0 0 1 0 11.2",
     ]);
-    expect(iconPaths("音量−")).toEqual([
+    expect(iconPaths("音量 −")).toEqual([
       "M4 9.5h3.2L12 6v12l-4.8-3.5H4z",
       "M15 9a4.2 4.2 0 0 1 0 6",
     ]);
-    expect(iconPaths("确定")).toEqual([
+    expect(iconPaths("确定键")).toEqual([
       "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6z",
       "M8.2 12.3l2.4 2.4 5.2-5.4",
     ]);
@@ -2696,7 +2882,7 @@ describe("buttons mapping page", () => {
       const wrapper = await mountPage(model);
       const backCard = wrapper
         .findAll(".mapping-card")
-        .find((c) => c.find(".mapping-card-title strong").text() === "返回")!;
+        .find((c) => c.find(".mapping-card-title strong").text() === "返回键")!;
       expect(backCard.classes(), `${model} 返回卡片应置灰`).toContain("is-locked");
       expect(backCard.attributes("title"), `${model} 返回卡片悬停提示`).toBe(TRI_KEY_GATED_TITLE);
       const backCell = backCard.findAll(".mapping-cell")[0]!;
@@ -2718,9 +2904,10 @@ describe("buttons mapping page", () => {
       // 其余按键不受影响：电源卡片照常可进编辑器。
       const powerCard = wrapper
         .findAll(".mapping-card")
-        .find((c) => c.find(".mapping-card-title strong").text() === "电源")!;
+        .find((c) => c.find(".mapping-card-title strong").text() === "电源键")!;
       expect(powerCard.classes(), `${model} 电源卡片不应置灰`).not.toContain("is-locked");
       await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+      await showAllActions(wrapper);
       expect(wrapper.find(".mapping-editor").exists(), `${model} 电源格子应可打开编辑器`).toBe(true);
       wrapper.unmount();
     }
@@ -2737,12 +2924,12 @@ describe("buttons mapping page", () => {
     const wrapper = await mountPage("rc003");
     const backCard = wrapper
       .findAll(".mapping-card")
-      .find((c) => c.find(".mapping-card-title strong").text() === "返回")!;
+      .find((c) => c.find(".mapping-card-title strong").text() === "返回键")!;
     expect(backCard.classes()).not.toContain("is-locked");
     expect(backCard.attributes("title")).toBeUndefined();
     const backCell = backCard.findAll(".mapping-cell")[0]!;
     expect((backCell.element as HTMLButtonElement).disabled).toBe(false);
-    expect(backCell.attributes("title")).toContain("返回 · 单击");
+    expect(backCell.attributes("title")).toContain("返回键 · 单击");
     await backCell.trigger("click");
     expect(wrapper.find(".mapping-editor").exists()).toBe(true);
   });
@@ -2762,6 +2949,7 @@ describe("buttons mapping page", () => {
       .findAll(".mapping-card")
       .find((c) => c.text().includes("返回"))!;
     await closingBackCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(rc003Closing);
     await vi.waitFor(
       () => {
         expect(rc003Closing.find(".capability-note").text()).toContain("映射现在生效");
@@ -2804,7 +2992,7 @@ describe("buttons mapping page", () => {
         expect(
           rc003On
             .findAll(".mapping-card")
-            .find((c) => c.find(".mapping-card-title strong").text() === "返回")!
+            .find((c) => c.find(".mapping-card-title strong").text() === "返回键")!
             .classes(),
         ).not.toContain("is-locked");
       },
@@ -2862,8 +3050,9 @@ describe("buttons mapping page", () => {
     const page = await mountPage("rc003");
     const home = page
       .findAll(".mapping-card")
-      .find((card) => card.find(".mapping-card-title strong").text() === "主页")!;
+      .find((card) => card.find(".mapping-card-title strong").text() === "主页键")!;
     await home.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(page);
     await vi.waitFor(() => {
       expect(captureRow(page)).toBeDefined();
     });
@@ -2912,7 +3101,7 @@ describe("buttons mapping page", () => {
     await page.vm.$nextTick();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
-    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
     expect(page.findAll(".device-chip").filter((chip) => chip.text().includes("全按键支持"))).toHaveLength(0);
   });
 
@@ -2936,7 +3125,7 @@ describe("buttons mapping page", () => {
     expect(captureRow(page)!.find(".status-dot").exists()).toBe(false);
     expect(captureRow(page)!.find(".toggle-spinner").exists()).toBe(false);
     expect(page.text()).not.toContain("未开启");
-    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
   });
 
   it("「开着但没生效」给一句用户语言（2026-10-13）：只在后端说没生效时出现，生效后收回", async () => {
@@ -2972,7 +3161,7 @@ describe("buttons mapping page", () => {
       );
       await vi.waitFor(
         () => {
-          expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+          expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
         },
         { timeout: 3000 },
       );
@@ -3023,7 +3212,7 @@ describe("buttons mapping page", () => {
     const page = await mountPage("rc003");
     await vi.waitFor(
       () => {
-        expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+        expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
       },
       { timeout: 3000 },
     );
@@ -3149,7 +3338,7 @@ describe("buttons mapping page", () => {
     vi.mocked(getRc003BridgeSnapshot).mockResolvedValue(bridgeSnapshot("connected"));
     await vi.waitFor(
       () => {
-        expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+        expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
       },
       { timeout: 3000 },
     );
@@ -3456,7 +3645,7 @@ describe("按键页头部：副标题与遥控器信息卡片（2026-10-04）", 
   // 2026-10-04 Andy 定稿：标题下加副标题，右上角改「遥控器信息卡片」（图标 + 型号 + 状态/电量 + 重新连接）。
   it("标题下给出「点击按键进行自定义配置」引导", async () => {
     const page = await mountPage();
-    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
     page.unmount();
   });
 
@@ -3650,7 +3839,7 @@ describe("全按键支持在本机不可用（issue #206）", () => {
 
     const backCard = page
       .findAll(".mapping-card")
-      .find((card) => card.find(".mapping-card-title strong").text() === "返回")!;
+      .find((card) => card.find(".mapping-card-title strong").text() === "返回键")!;
     expect(backCard.classes()).toContain("is-locked");
     expect(backCard.attributes("title")).toBe(TRI_KEY_UNSUPPORTED_TITLE);
     expect(backCard.attributes("title")).not.toContain("开启后恢复正常");
@@ -3670,9 +3859,10 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     // 其余按键不受影响（短说明里的「其他按键不受影响」必须是真的）。
     const powerCard = page
       .findAll(".mapping-card")
-      .find((card) => card.find(".mapping-card-title strong").text() === "电源")!;
+      .find((card) => card.find(".mapping-card-title strong").text() === "电源键")!;
     expect(powerCard.classes()).not.toContain("is-locked");
     await powerCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await showAllActions(page);
     expect(page.find(".mapping-editor").exists()).toBe(true);
     page.unmount();
   });
@@ -3691,7 +3881,7 @@ describe("全按键支持在本机不可用（issue #206）", () => {
 
     const backCard = page
       .findAll(".mapping-card")
-      .find((card) => card.find(".mapping-card-title strong").text() === "返回")!;
+      .find((card) => card.find(".mapping-card-title strong").text() === "返回键")!;
     expect(backCard.classes()).toContain("is-locked");
     expect(backCard.attributes("title")).toBe(TRI_KEY_GATED_TITLE);
     page.unmount();
@@ -3714,7 +3904,7 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     expect(row.find(".status-dot").exists()).toBe(false);
     expect(row.find(".toggle-spinner").exists()).toBe(false);
     expect(page.text()).not.toContain("正在启动");
-    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
     expect(unavailableNote(page).exists()).toBe(false);
     page.unmount();
   });
@@ -3759,7 +3949,7 @@ describe("全按键支持在本机不可用（issue #206）", () => {
       expect(row.find(".toggle-spinner").exists()).toBe(false);
     });
     expect((checkbox.element as HTMLInputElement).checked).toBe(true);
-    expect(page.find(".page-subtitle").text()).toBe("点击按键进行自定义配置");
+    expect(page.find(".page-subtitle").text()).toBe("点击按键进行设置");
     page.unmount();
   });
 
@@ -3774,5 +3964,313 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     );
     expect(unavailableNote(page).exists()).toBe(false);
     page.unmount();
+  });
+
+  it("动作分类：打开按键按已配置动作选中分类，切换只影响候选动作", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    const openOkSingle = async () => {
+      await okCard.findAll(".mapping-cell")[0]!.trigger("click");
+      await flushPromises();
+    };
+    const filterChip = (label: string) =>
+      wrapper.findAll(".action-filter-chip").find((chip) => chip.text() === label)!;
+    const presetLabels = () =>
+      wrapper.find(".mapping-editor").findAll(".preset-grid .chip").map((chip) => chip.text());
+    await openOkSingle();
+    const filterLabels = wrapper.findAll(".action-filter-chip").map((chip) => chip.text());
+    expect(filterLabels).toEqual([
+      "全部",
+      "基础按键",
+      "自定义动作",
+      "打开 App",
+      "鼠标动作",
+      "组合动作",
+      "按住",
+      "按键速度",
+    ]);
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("基础按键");
+    expect(presetLabels()).toContain("Enter");
+    // 基础按键合并了「基础按键」和「系统与媒体」。
+    expect(presetLabels()).toContain("Alt + Tab");
+
+    await filterChip("自定义动作").trigger("click");
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("自定义动作");
+    expect(wrapper.find(".mapping-editor").text()).toContain("录入自定义快捷键");
+    expect(wrapper.find(".mapping-editor").text()).toContain("聚焦输入框");
+
+    // 再点同一个按键：即使分类值没变，也要重新按当前动作选中分类。
+    await filterChip("全部").trigger("click");
+    await openOkSingle();
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("基础按键");
+  });
+
+  it("动作分类：停用动作回到「全部」，打开 App 动作选中对应分类", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await okCard.findAll(".mapping-cell")[1]!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("全部");
+
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "open_app", target: "notepad" },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const appWrapper = await mountPage();
+    await flushPromises();
+    const appOkCard = appWrapper
+      .findAll(".mapping-card")
+      .find((card) => card.text().includes("确定"))!;
+    await appOkCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    expect(appWrapper.find(".action-filter-chip.selected").text()).toBe("打开 App");
+    expect(
+      appWrapper
+        .find(".mapping-editor")
+        .findAll(".action-section-title")
+        .map((title) => title.text()),
+    ).toContain("打开 APP");
+  });
+
+  it("按住面板：左右键可选四项，选择「按住」写入 directionalHold", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        left: {
+          single: { type: "shortcut", chord: { keys: ["left"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const leftCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("左"))!;
+    await leftCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".action-filter-chip")
+      .find((chip) => chip.text() === "按住")!
+      .trigger("click");
+    await flushPromises();
+
+    const cards = wrapper.findAll(".mapping-hold-panel .hold-mode-card");
+    expect(cards).toHaveLength(4);
+    await cards[2]!.trigger("click");
+    await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(saved.actions.left!.directionalHold).toBe("single");
+    expect(saved.actions.left!.holdRepeat).toBeUndefined();
+  });
+
+  it("按键速度：按遥控器机型读取各自的桶", async () => {
+    const buckets = {
+      rc001: { doubleClickMs: 400, longPressMs: 800, repeatStartMs: 350 },
+      rc003: { doubleClickMs: 200, longPressMs: 600, repeatStartMs: 400 },
+    };
+    const mappings = {
+      enabled: true,
+      actions: {
+        ok: {
+          single: { type: "shortcut" as const, chord: { keys: ["enter" as const] } },
+          double: { type: "disabled" as const },
+          long: { type: "disabled" as const },
+        },
+      },
+      gestureTimingsByModel: buckets,
+    };
+    vi.mocked(getButtonMappings).mockResolvedValueOnce(mappings);
+    const rc001 = await mountPage("rc001");
+    await flushPromises();
+    const rc001Card = rc001.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await rc001Card.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    await rc001
+      .findAll(".action-filter-chip")
+      .find((chip) => chip.text() === "按键速度")!
+      .trigger("click");
+    await flushPromises();
+    const rc001Sliders = rc001.findAll(".mapping-speed-panel input[type='range']");
+    expect((rc001Sliders[0]!.element as HTMLInputElement).value).toBe("400");
+    expect((rc001Sliders[1]!.element as HTMLInputElement).value).toBe("800");
+
+    vi.mocked(getButtonMappings).mockResolvedValueOnce(mappings);
+    const rc003 = await mountPage("rc003");
+    await flushPromises();
+    const rc003Card = rc003.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await rc003Card.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    await rc003
+      .findAll(".action-filter-chip")
+      .find((chip) => chip.text() === "按键速度")!
+      .trigger("click");
+    await flushPromises();
+    const rc003Sliders = rc003.findAll(".mapping-speed-panel input[type='range']");
+    expect((rc003Sliders[0]!.element as HTMLInputElement).value).toBe("200");
+    expect((rc003Sliders[1]!.element as HTMLInputElement).value).toBe("600");
+  });
+
+  it("按键速度学习：重新打开后保留上次学习完成的状态", async () => {
+    localStorage.setItem(
+      "sayall.buttonGestureLearning.v1.rc003",
+      JSON.stringify({ single: 200, double: 180, long: 1000 }),
+    );
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await okCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".action-filter-chip")
+      .find((chip) => chip.text() === "按键速度")!
+      .trigger("click");
+    await flushPromises();
+
+    const panel = wrapper.find(".mapping-speed-panel");
+    expect(panel.text()).toContain("学习完成");
+    expect(panel.text()).toContain("200 ms");
+    expect(panel.text()).toContain("180 ms");
+    expect(panel.text()).toContain("1000 ms");
+  });
+
+  it("按键速度学习：暂停按键动作，完成后回填滑杆并显示提示", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await okCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".action-filter-chip")
+      .find((chip) => chip.text() === "按键速度")!
+      .trigger("click");
+    await flushPromises();
+
+    let now = 1000;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const start = wrapper
+      .findAll(".mapping-speed-panel button")
+      .find((button) => button.text() === "开始学习")!;
+    await start.trigger("click");
+    await flushPromises();
+    expect(setMappingSuspension).toHaveBeenCalledWith(true);
+    expect(wrapper.find(".mapping-speed-panel").text()).toContain("正在学习 1/3");
+
+    const edge = (isPressed: boolean) => edgeHandler!({ button: "ok", isPressed });
+    edge(true);
+    now = 1200;
+    edge(false);
+    now = 1500;
+    edge(true);
+    now = 1600;
+    edge(false);
+    now = 1700;
+    edge(true);
+    now = 1800;
+    edge(false);
+    now = 2000;
+    edge(true);
+    now = 3000;
+    edge(false);
+    await flushPromises();
+
+    expect(wrapper.find(".mapping-speed-panel").text()).toContain("学习完成");
+    const sliders = wrapper.findAll(".mapping-speed-panel input[type='range']");
+    expect((sliders[0]!.element as HTMLInputElement).value).toBe("150");
+    expect((sliders[1]!.element as HTMLInputElement).value).toBe("1000");
+    expect(wrapper.find(".mapping-speed-panel").text()).toContain(
+      "学习结果会填入识别时间并保留，重新打开也会显示学习完成，点保存后才会用到按键上。",
+    );
+    expect(
+      wrapper.find(".mapping-speed-panel .speed-save-row .primary-button").attributes("disabled"),
+    ).toBeUndefined();
+    expect(setMappingSuspension).toHaveBeenLastCalledWith(false);
+
+    await wrapper.find(".mapping-speed-panel .speed-save-row .primary-button").trigger("click");
+    await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    expect(vi.mocked(saveButtonMappings).mock.lastCall![0].gestureTiming).toEqual({
+      doubleClickMs: 150,
+      longPressMs: 1000,
+      repeatStartMs: 350,
+    });
+    clock.mockRestore();
+  });
+
+  it("按键速度：滑杆保存写入 gestureTiming", async () => {
+    const wrapper = await mountPage();
+    const okCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("确定"))!;
+    await okCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    await wrapper
+      .findAll(".action-filter-chip")
+      .find((chip) => chip.text() === "按键速度")!
+      .trigger("click");
+    await flushPromises();
+
+    const sliders = wrapper.findAll(".mapping-speed-panel input[type='range']");
+    await sliders[0]!.setValue("400");
+    await sliders[1]!.setValue("800");
+    await flushPromises();
+    await wrapper.find(".mapping-speed-panel .primary-button").trigger("click");
+    await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalled());
+    await flushPromises();
+
+    const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(saved.gestureTiming).toEqual({
+      doubleClickMs: 400,
+      longPressMs: 800,
+      repeatStartMs: 350,
+    });
+    expect(saved.gestureTimingsByModel).toEqual({
+      rc003: {
+        doubleClickMs: 400,
+        longPressMs: 800,
+        repeatStartMs: 350,
+      },
+    });
+  });
+
+  it("动作分类：自定义动作合并自定义按键与输入框，鼠标/按住/按键速度独立", async () => {
+    vi.mocked(getButtonMappings).mockResolvedValueOnce({
+      enabled: true,
+      actions: {
+        left: {
+          single: { type: "shortcut", chord: { keys: ["left"] } },
+          double: { type: "disabled" },
+          long: { type: "disabled" },
+        },
+      },
+    });
+    const wrapper = await mountPage();
+    const leftCard = wrapper.findAll(".mapping-card").find((card) => card.text().includes("左"))!;
+    await leftCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+    const filterChip = (label: string) =>
+      wrapper.findAll(".action-filter-chip").find((chip) => chip.text() === label)!;
+
+    await filterChip("自定义动作").trigger("click");
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("自定义动作");
+    expect(wrapper.find(".mapping-editor").text()).toContain("录入自定义快捷键");
+    expect(wrapper.find(".mapping-editor").text()).toContain("聚焦输入框");
+    expect(wrapper.find(".mapping-editor").text()).toContain("学习指定 App 的输入框请去「聚焦与翻页」页面");
+
+    await filterChip("鼠标动作").trigger("click");
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("鼠标动作");
+    expect(wrapper.find(".mouse-action-sections").exists()).toBe(true);
+    expect(wrapper.find(".mapping-editor").text()).not.toContain("录入自定义快捷键");
+
+    await filterChip("按住").trigger("click");
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("按住");
+    expect(wrapper.find(".mapping-hold-panel").exists()).toBe(true);
+    expect(wrapper.findAll(".mapping-hold-panel .hold-mode-card")).toHaveLength(4);
+
+    await filterChip("按键速度").trigger("click");
+    expect(wrapper.find(".action-filter-chip.selected").text()).toBe("按键速度");
+    expect(wrapper.find(".mapping-speed-panel").exists()).toBe(true);
+    expect(wrapper.findAll(".mapping-speed-panel input[type='range']")).toHaveLength(2);
   });
 });
