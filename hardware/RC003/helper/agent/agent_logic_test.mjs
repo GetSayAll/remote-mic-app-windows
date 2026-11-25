@@ -83,15 +83,32 @@ const fakeHandle = (name) => ({
 });
 
 /** NtDeviceIoControlFile 的 10 个参数（0 与 5..9 被 agent 用到）。 */
-function fakeArgs(outPtr, source = 'h0') {
+function fakeArgs(outPtr, source = 'h0', iosb = num(0), inBuf = null) {
   const a = new Array(10).fill(null).map(() => num(0));
   a[0] = fakeHandle(source);                                // FileHandle = 报告来源
+  a[4] = iosb;                                              // IoStatusBlock（来源画像读长度）
   a[5] = num(0x80018483);                                   // IoControlCode
-  a[6] = { isNull: () => false, readByteArray: () => toArrayBuffer(Uint8Array.from([0, 0, 0, 0, 0x02, 0x01, 0, 0])) };
+  a[6] = {
+    isNull: () => false,
+    readByteArray: () => toArrayBuffer(Uint8Array.from(
+      inBuf || [0, 0, 0, 0, 0x02, 0x01, 0, 0])),
+  };
   a[7] = num(8);                                            // InputBufferLength
   a[8] = outPtr;                                            // OutputBuffer
   a[9] = num(9);                                            // OutputBufferLength
   return a;
+}
+
+/** 假 IO_STATUS_BLOCK：Status 在 +0，Information 在 +pointerSize。 */
+function fakeIosb(info, status = 0) {
+  return {
+    isNull: () => false,
+    readU32: () => status,
+    add: () => ({
+      readU64: () => ({ toNumber: () => info }),
+      readU32: () => info,
+    }),
+  };
 }
 
 const handlers = {};
@@ -719,6 +736,90 @@ if (typeof ctx.sourceKeyOf === 'function') {
   check('增强捕获关闭：voice_clear_hits 不增长',
     (ctx.stat.voice_clear_hits || 0) === beforeVoiceClear,
     `voice_clear=${ctx.stat.voice_clear_hits}`);
+}
+
+/* ------------- 16. 来源画像（2026-11-25）：只诊断，不改判定 ------------------- */
+{
+  ctx.DIAG.maxSources = 64;
+  ctx.DIAG.lastFlushAt = 0;
+
+  /* 两个不同句柄必须是两条来源记录；同句柄累加。 */
+  pressOn('diag-a', 0x0028);
+  pressOn('diag-b', 0x0028);
+  pressOn('diag-a', 0x0028);
+  const ra = ctx.DIAG.sources['diag-a'];
+  const rb = ctx.DIAG.sources['diag-b'];
+  check('画像：不同句柄分成不同来源',
+    ra && rb && ra.id !== rb.id, `a=${ra && ra.id} b=${rb && rb.id}`);
+  check('画像：同句柄累加计数', ra && ra.count === 2, `a.count=${ra && ra.count}`);
+  check('画像：名字退回句柄时打 nmh=1',
+    sentLines.some((l) => l.includes('diag:src_new') && l.includes('h=diag-a')
+      && l.includes('nmh=1')));
+
+  /* 请求头：同一份新值连来两次只计一次变化、样本 +1。 */
+  const beforeChg = ra.inChanges;
+  const newBuf = [0x01, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00];
+  handlers.onEnter.call({}, fakeArgs(fakePtr(report(0x0028)), 'diag-a', fakeIosb(9), newBuf));
+  handlers.onEnter.call({}, fakeArgs(fakePtr(report(0x0028)), 'diag-a', fakeIosb(9), newBuf));
+  check('画像：请求头变化计数（只计真实变化）',
+    ra.inChanges === beforeChg + 1 && ra.inSamples === 2,
+    `chg=${ra.inChanges} n=${ra.inSamples}`);
+
+  /* 完成状态与实际长度：只有 onLeave 拿得到。 */
+  function diagPress(source, info, status, inBuf, ...usages) {
+    const ptr = fakePtr(report(...usages));
+    const self = {};
+    handlers.onEnter.call(self, fakeArgs(ptr, source, fakeIosb(info, status), inBuf));
+    handlers.onLeave.call(self, 0);
+    return { ptr, self };
+  }
+  diagPress('diag-len', 9, 0, null, 0x0028);
+  diagPress('diag-len', 10, 0, null, 0x0028);
+  diagPress('diag-len', 0, 0x103, null, 0x0028);
+  const rl = ctx.DIAG.sources['diag-len'];
+  check('画像：长度直方图按 Information 统计',
+    rl && rl.lenHist['9'] === 1 && rl.lenHist['10'] === 1,
+    `hist=${JSON.stringify(rl && rl.lenHist)}`);
+  check('画像：STATUS_PENDING 单独计入状态直方图',
+    rl && rl.statusHist['0x103'] === 1,
+    `st=${JSON.stringify(rl && rl.statusHist)}`);
+
+  /* 汇总：有新报告才落；同一周期重复调用不重复落。 */
+  const flushBefore = sentLines.length;
+  ctx.diagFlush(Date.now() + 60000);
+  const firstFlush = sentLines.slice(flushBefore).filter((l) => l.includes('diag:src id='));
+  check('画像：周期汇总落 diag:src 行', firstFlush.length >= 3, `lines=${firstFlush.length}`);
+  check('画像：汇总带速率/长度/请求头',
+    firstFlush.some((l) => l.includes('rate=') && l.includes('len=') && l.includes('in=')),
+    firstFlush[0] || '');
+  check('画像：请求头多变时列出样本',
+    firstFlush.some((l) => l.includes('h=diag-a') && l.includes('smp=')));
+  const againBefore = sentLines.length;
+  ctx.diagFlush(Date.now() + 120000);
+  check('画像：本周期无新报告就不重复落',
+    sentLines.slice(againBefore).filter((l) => l.includes('diag:src id=')).length === 0);
+
+  /* 幽灵边沿必须能和来源对上：出边沿时额外落一行 diag:edge。 */
+  ctx.handleCommand('{"type":"renew"}');
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 99, report: [0x00f1, 0x0080, 0x0081],
+    clear: [0x00f1, 0x0080, 0x0081],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+  const edgeBefore = sentLines.length;
+  diagPress('diag-edge', 9, 0, null, 0x00f1);
+  const edgeLine = sentLines.slice(edgeBefore).find((l) => l.includes('diag:edge'));
+  check('画像：边沿带上来源 id 与长度',
+    !!edgeLine && edgeLine.includes('u=0x00f1') && edgeLine.includes('len=9')
+      && edgeLine.includes('slot=0'),
+    edgeLine || '（无 diag:edge 行）');
+
+  /* 句柄关闭：落最后一行并释放槽位（句柄号会被复用）。 */
+  closeHandle('diag-b');
+  check('画像：句柄关闭后释放槽位', ctx.DIAG.sources['diag-b'] === undefined);
+  check('画像：关闭落一行汇总',
+    sentLines.some((l) => l.includes('diag:src_closed') && l.includes('h=diag-b')));
 }
 
 const failed = results.filter((r) => !r.ok);
