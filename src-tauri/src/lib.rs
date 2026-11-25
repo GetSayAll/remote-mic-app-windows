@@ -2227,6 +2227,19 @@ fn helper_startup_failing(streak: u32) -> bool {
     streak >= HELPER_STARTUP_FAILURE_ACCEPTS
 }
 
+/// 桥在监听、但连续多少轮都等不到助手连接 ⇒ 判定"助手根本没启动"。
+///
+/// 与 `HELPER_STARTUP_FAILURE_ACCEPTS` 互补：后者要求"握手成功过一瞬"；
+/// 2026-11-25 现场是助手连一次都没连上（accepts 恒为 0、日志里除一次升级清理外
+/// 没有任何 `[ENV]`/`[APP-BRIDGE]`），只能看触发轮数。10 轮覆盖快速期与两次
+/// `/end`+`/run` 兜底，约 60–90 s；此时界面必须从 `starting`（不显示文案）
+/// 进入 `inactive`，否则用户只看到"开关开着、豆包没反应、没有任何提示"。
+const HELPER_NOT_CONNECTED_INACTIVE_ROUNDS: u32 = 10;
+
+fn helper_not_connected_failing(consecutive: u32) -> bool {
+    consecutive >= HELPER_NOT_CONNECTED_INACTIVE_ROUNDS
+}
+
 /// 把"助手反复启动失败"叠到本轮生效状态上（纯函数，单测覆盖）。
 ///
 /// 只在**没有所有权**时生效：一旦真的接管，界面必须立刻回到 `active`——
@@ -2628,17 +2641,25 @@ fn rc003_auto_trigger_reconcile(
             );
             helper_accept_streak = next_streak;
             helper_accepts_seen = next_seen;
-            let failing = helper_startup_failing(helper_accept_streak);
+            let accept_failing = helper_startup_failing(helper_accept_streak);
+            let not_connected_failing = helper_not_connected_failing(consecutive);
+            let failing = accept_failing || not_connected_failing;
+            let failure_reason = if accept_failing {
+                "helper_startup_failing"
+            } else {
+                "helper_not_connected"
+            };
             // 原因与 health 同轮发布：界面只在 `inactive` 时读它，但两者必须一致，
             // 否则会出现"提示说启动失败、状态却是 active"的错位。
             CaptureUnavailable::from_startup_failing(failing).publish(&capture_unavailable);
             if failing && !startup_failing_logged {
                 // hint 说**下一步动作**：这条断在 PC 内部的环境冲突上（端口被系统保留 /
                 // 被别的进程占住），继续按遥控器或重开开关都可能无效，先看环境。
+                // `rounds=` 让"一次都没连上"（accepts=0）与"连上就断"（accepts>0）可区分。
                 sayall_windows::gatt_note(format!(
                     "rc003 feature=enhanced-capture action=capture_unavailable phase=completed \
-                     terminal_result=failed reason=helper_startup_failing accepts={helper_accept_streak} \
-                     owned_usages=0 retryable=true hint=check_environment_conflict {}",
+                     terminal_result=failed reason={failure_reason} accepts={helper_accept_streak} \
+                     rounds={consecutive} owned_usages=0 retryable=true hint=check_environment_conflict {}",
                     bridge_health_summary(&snapshot)
                 ));
                 startup_failing_logged = true;
@@ -7434,6 +7455,24 @@ mod tests {
         assert_eq!(advance_helper_accept_streak(2, 9, 4, 0), (2, 4));
         // 同一个累计值重复观察不重复计数（对账每轮都会读同一个快照）。
         assert_eq!(advance_helper_accept_streak(1, 5, 5, 0), (1, 5));
+    }
+
+    /// 2026-11-25：助手一次都没连上（accepted_total 恒 0、没有任何 [ENV]/[APP-BRIDGE]）
+    /// 时，接受次数判据永远不触发；必须看连续触发轮数，否则界面永远停在 starting
+    /// （不显示文案），用户只看到"开关开着、豆包没反应"。
+    #[test]
+    fn helper_not_connected_failing_starts_after_planned_rounds() {
+        assert!(!helper_not_connected_failing(0));
+        assert!(!helper_not_connected_failing(
+            HELPER_NOT_CONNECTED_INACTIVE_ROUNDS - 1
+        ));
+        assert!(helper_not_connected_failing(
+            HELPER_NOT_CONNECTED_INACTIVE_ROUNDS
+        ));
+        assert!(helper_not_connected_failing(
+            HELPER_NOT_CONNECTED_INACTIVE_ROUNDS + 1
+        ));
+        assert_eq!(HELPER_NOT_CONNECTED_INACTIVE_ROUNDS, 10);
     }
 
     /// 启动失败只压「没有所有权」的轮次（issue #291）。

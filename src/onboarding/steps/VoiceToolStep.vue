@@ -11,6 +11,8 @@ const props = defineProps<{
   captureEnabled: boolean;
   captureBusy: boolean;
   captureHint: string;
+  /** 「开着但还没生效」的提示（2026-11-25）：开关失败文字优先，其次这一句。 */
+  captureHealthHint: string;
   conflict: boolean;
   vokie: VokieInstallation | null;
   vokieBusy: boolean;
@@ -137,6 +139,9 @@ function isOtherKeySelected(keys: KeyCode[]): boolean {
       </div>
       <!-- 失败文案是开关旁唯一的文字（2026-10-10）：普通用户语言，其余情况不显示。 -->
       <p v-if="captureFailure" class="onboarding-error">{{ captureFailure }}</p>
+      <p v-else-if="captureHealthHint" class="onboarding-capture-failure">
+        {{ captureHealthHint }}
+      </p>
       <p class="onboarding-muted">{{ t("每次开启都会弹出 Windows 授权窗口，请选择“是”。") }}</p>
     </div>
 

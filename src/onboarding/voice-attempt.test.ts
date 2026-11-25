@@ -56,6 +56,7 @@ describe("voice attempt tracker", () => {
         submittedSamples: 640,
         queuedEnd: 0,
         drainObserved: true,
+        endFrameTorn: false,
       },
       elapsedMs: 900,
     } satisfies VoiceAttemptTerminal);
@@ -118,6 +119,65 @@ describe("voice attempt tracker", () => {
     );
     expect(terminal?.result).toBe("failed");
     expect(terminal?.code).toBe("voice.no_samples");
+  });
+
+  it("结束方向的撕裂快照不判投递失败（2026-11-25 现场回归）", () => {
+    // 现场（1.9.7）：主线程 IPC 阻塞约 15–23 s，恢复后第一个快照落在下一会话的
+    // StreamStart 窗口：connection 已是上一会话的 idle，audio 已是新会话的
+    // streaming、submittedSamples 被 BeginSession 归零。旧逻辑把它当成上一会话
+    // "结束但未排空"，判成 voice.audio_delivery_failed（detail d26160_s23280_q0_drain0），
+    // 而同一会话的 voice_audio_rate 是 full、实际提交 26160 采样。
+    const attempt = tracker();
+    attempt.arm(frame({ decodedSamples: 100 }), 0);
+    expect(
+      attempt.observe(
+        frame({
+          voiceState: "streaming",
+          audioPhase: "streaming",
+          decodedSamples: 23280,
+          submittedSamples: 23280,
+        }),
+        200,
+      ),
+    ).toBeNull();
+
+    expect(
+      attempt.observe(
+        frame({ decodedSamples: 26160, submittedSamples: 0, audioPhase: "streaming" }),
+        29_000,
+      ),
+    ).toBeNull();
+    expect(attempt.state()).toBe("waiting_transcript");
+
+    const terminal = attempt.observe(
+      frame({ decodedSamples: 26160, submittedSamples: 0, audioPhase: "streaming" }),
+      32_100,
+    );
+    expect(terminal?.result).toBe("failed");
+    expect(terminal?.code).toBe("voice.no_transcript");
+    expect(terminal?.evidence.endFrameTorn).toBe(true);
+    expect(terminal?.evidence.submittedSamples).toBe(23280);
+    expect(terminal?.evidence.drainObserved).toBe(true);
+  });
+
+  it("真未排空的结束仍判投递失败（撕裂守卫不过度放宽）", () => {
+    const attempt = tracker();
+    attempt.arm(frame({ decodedSamples: 100 }), 0);
+    attempt.observe(
+      frame({ voiceState: "streaming", audioPhase: "streaming", decodedSamples: 500, submittedSamples: 5200 }),
+      200,
+    );
+    const terminal = attempt.observe(
+      frame({
+        decodedSamples: 520,
+        submittedSamples: 5200,
+        queuedSamples: 640,
+        audioPhase: "streaming",
+      }),
+      400,
+    );
+    expect(terminal?.code).toBe("voice.audio_delivery_failed");
+    expect(terminal?.evidence.endFrameTorn).toBe(false);
   });
 
   it("classifies decoded-but-not-delivered as a delivery failure", () => {

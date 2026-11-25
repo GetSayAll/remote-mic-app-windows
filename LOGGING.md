@@ -110,6 +110,29 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 连接与 Raw Input 的详细 stage 仍由既有
 `ble_connect*` / `raw_input*` 行提供。现场只取一份 `sayall-diagnostic.log`，即可区分
 「没连上」「连上但无 HID 按键通道」「通道在位但按键没有到达」。
+### 向导语音测试慢轮询与撕裂结束帧（2026-11-25）
+
+1.9.7 现场（`Bugs/2026-11-25-onboarding-doubao-voice-bar-report-layer-inactive.md`）：
+向导第⑥步的 200 ms 轮询在会话结束后 **23 s** 才看到 idle，日志里只有终态
+`detail=d26160_s23280_q0_drain0`，无法区分"主线程排队""快照子系统阻塞"与"撕裂帧"。
+本次补三类只读日志：
+
+- 前端轮询往返：`frontend event=onboarding phase=poll result=unknown reason=slow_snapshot step=voice_test detail=rt_<ms>`。
+  只在一次 `getRuntimeSnapshot` 往返 ≥ 1 s 时落一行；它回答"主线程/IPC 是否被卡住"。
+- Rust 快照分段：`runtime_snapshot phase=completed terminal_result=slow elapsed_ms=<总> connection_ms=<段> audio_ms=<段> raw_input_ms=<段> send_input_ms=<段> button_mapping_ms=<段> voice_priority_ms=<段>`。
+  只在一次 `PlatformSnapshot::snapshot()` ≥ 1 s 时落一行；它回答"卡在哪个子系统"。
+  前端 `renderer` 读取与 Rust 命令执行是两个事实，必须分两行记录。
+- 结束方向撕裂帧：`frontend event=onboarding phase=voice_attempt result=unknown reason=torn_end_frame step=voice_test detail=vs_<voiceState>_ap_<audioPhase>_s<submitted>_q<queued>_d<decoded>`。
+  每次 attempt 最多一条；命中判据 = `voiceState=idle` + `audioPhase=streaming|draining` +
+  `audioLastError=null` + `queuedSamples=0`（正常结束时后端先让 audio 回到 ready，再让
+  voiceState 回到 idle，因此这个组合只可能是撕裂）。相应终态的 `detail` 追加 `_torn1`。
+- 捕获生效状态（第④/⑤/⑥步）：`frontend event=onboarding phase=capture result=passed|failed reason=read|changed|read_failed step=<full_key|voice_tool|voice_test> detail=health_<状态>_reason_<原因>`。
+  进入步骤时 `read`，5 s 轮询只在变化时 `changed`，读失败只落一次 `read_failed`。
+- 助手从未连上：`rc003 feature=enhanced-capture action=capture_unavailable phase=completed terminal_result=failed reason=helper_not_connected accepts=<累计接受> rounds=<连续触发轮> owned_usages=0 …`。
+  `accepts=0` 表示助手一次都没握手；`reason=helper_startup_failing`（`accepts>0`）是"连上就断"的另一形态。两者都让界面从 `starting` 进入 `inactive`。
+
+隐私：以上字段只有状态 token、计数与毫秒；不含窗口标题、设备身份、输入文字或路径。
+
 ### 向导主按钮可见性（2026-11-24）
 
 - 步骤进入（DOM 更新后）、resize 去抖 250ms、点击主按钮时各落一条

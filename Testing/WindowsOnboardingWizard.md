@@ -254,11 +254,24 @@
    门控迁移与「全按键支持」helper 相互独立，helper 关闭不得影响上述行为。
 10. 日志核对（每次 attempt 必须成对）：
    - `frontend event=onboarding phase=voice_attempt result=unknown reason=armed …`（一次 attempt 一条）；
-   - 终态一条：`result=passed` 或 `result=failed reason=voice.*`，`detail=d…_s…_q…_drain0|1` 为采样 / 投递 / 队列计数；
+   - 终态一条：`result=passed` 或 `result=failed reason=voice.*`，`detail=d…_s…_q…_drain0|1` 为采样 / 投递 / 队列计数；结束方向撕裂帧修好后 detail 追加 `_torn1`（2026-11-25）；
    - 迟到接受 / 迟到否决 / 现值读回各一条（`late_transcript` / `late_transcript_manual` / `transcript_value_readback`）；
    - `input_observation … action=begin/end` 成对出现；`action=end … count=0`（正常路径，判定口径见用例三.4）；
      `action=end` 行含 `keys=`（窗口内计入的按键列表，最多 12 个）——出现非 0 计数时一眼看清是哪些键被计入。
    - 日志不得包含任何输入文字内容。
+11. **报告层未生效 / 撕裂结束帧（2026-11-25）**：
+   - 第④/⑤/⑥步在「支持更多输入工具」开着但 `captureHealth=inactive` 时，开关旁/测试页出现
+     「…还没有生效，正在自动重试…」；恢复 `active` 后该句消失。日志
+     `phase=capture result=passed reason=read|changed detail=health_<状态>_reason_<原因>`。
+   - 豆包在报告层未生效时按住语音键：终态应为 `voice.no_transcript`，不得再出现
+     `voice.audio_delivery_failed`（后者只留给真实的队列未排空 / 音频错误）。日志若出现
+     `reason=torn_end_frame detail=vs_idle_ap_streaming_s0_q0_d…` 且终态 detail 带 `_torn1`，
+     说明修的是结束方向撕裂帧，不是音频真的没送到。
+   - 语音测试轮询 IPC 往返 ≥1 s：`phase=poll result=unknown reason=slow_snapshot detail=rt_<ms>`；
+     Rust 侧对应 `runtime_snapshot phase=completed terminal_result=slow elapsed_ms=… connection_ms=… audio_ms=… raw_input_ms=… send_input_ms=… button_mapping_ms=… voice_priority_ms=…`。
+   - 助手从未连上时，`auto_trigger` 第 10 轮后应出现
+     `action=capture_unavailable reason=helper_not_connected rounds=<N>`，界面由 starting 转 inactive；
+     `accepts>0` 的形态仍走 `reason=helper_startup_failing`，两者不要混为一谈。
 
 ## 分步日志（卡住定位速查，2026-10-05 起）
 

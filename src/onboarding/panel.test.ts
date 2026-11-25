@@ -201,6 +201,23 @@ describe("onboarding side panel", () => {
       context({ voicePhase: "terminal", voiceTerminalCode: "voice.no_transcript" }),
     );
     expect(noTranscript.rows?.[3].state).toBe("warn");
+
+    // 2026-11-25：结束方向撕裂帧修好后，终态是 no_transcript 而不是
+    // audio_delivery_failed；音频三行仍应是"已收到"，不能因为撕裂帧变红。
+    const tornEndNoTranscript = buildSidePanel(
+      "voice_test",
+      context({
+        voicePhase: "terminal",
+        voiceTerminalCode: "voice.no_transcript",
+        voiceEvidence: { decodedSamples: 26060, submittedSamples: 23280, drainObserved: true },
+      }),
+    );
+    expect(tornEndNoTranscript.rows?.map((row) => row.state)).toEqual([
+      "ok",
+      "ok",
+      "ok",
+      "warn",
+    ]);
   });
 
   it("controls rows carry the counter and the mapping suspension", () => {

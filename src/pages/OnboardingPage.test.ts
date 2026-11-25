@@ -1756,6 +1756,80 @@ describe("Onboarding voice test step", () => {
     wrapper.unmount();
   });
 
+  // 2026-11-25 现场：第⑥步开始之前就应看到"报告层没生效"，而不是让用户先做一次
+  // 注定失败的测试。提示只在豆包 + 开关开启 + 遥控器链路正常时出现。
+  it("第⑥步进入时，豆包 + 捕获未生效：先显示「还没有生效」提示并记 capture 日志", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getRc003TaskStatus.mockResolvedValue({
+      ...mocks.rc003Disabled,
+      enabled: true,
+    });
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "inactive" }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("还没有生效");
+    expect(wrapper.text()).toContain("支持更多输入工具");
+    const captureLogs = onboardingEvents("capture");
+    expect(
+      captureLogs.some(
+        (payload) =>
+          payload.reason === "read" &&
+          payload.detail === "health_inactive_reason_none",
+      ),
+    ).toBe(true);
+    wrapper.unmount();
+  });
+
+  // 2026-11-25 现场回归：主线程恢复后第一个快照落在下一会话 StreamStart 窗口
+  // （voiceState=idle、audioPhase=streaming、submitted=0），旧逻辑判
+  // audio_delivery_failed；现在应判 no_transcript 并走捕获提示。
+  it("结束方向的撕裂帧不报音频投递失败，改判无文字 + 捕获提示", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("voice_test"));
+    mocks.getVoiceInputTool.mockResolvedValue("doubao");
+    mocks.getRc003TaskStatus.mockResolvedValue({
+      ...mocks.rc003Disabled,
+      enabled: true,
+    });
+    mocks.getRc003BridgeSnapshot.mockResolvedValue(
+      rc003BridgeSnapshot({ captureHealth: "inactive" }),
+    );
+    mocks.endKeyObservation.mockResolvedValue(0);
+    queueSnapshots(
+      runtimeWith(), // arm
+      streamingFrame({ decodedSamples: 23280, submittedSamples: 23280 }),
+      runtimeWith({
+        connectionPhase: "ready",
+        bleVoiceReady: true,
+        rawInputPhase: "ready",
+        voiceState: "idle",
+        audioPhase: "streaming",
+        decodedSamples: 26160,
+        submittedSamples: 0,
+        queuedSamples: 0,
+      }),
+    );
+
+    const wrapper = await mountWizard(connectedRuntime(), { attach: true });
+    await vi.advanceTimersByTimeAsync(200); // streaming 帧
+    await vi.advanceTimersByTimeAsync(200); // 撕裂结束帧 → waiting_transcript
+    await vi.advanceTimersByTimeAsync(3_200); // 转写窗口到期 → no_transcript
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("还没有生效");
+    expect(wrapper.text()).not.toContain("声音没有完整送达");
+    const attempts = onboardingEvents("voice_attempt");
+    const terminal = attempts.find((payload) => payload.reason === "voice.no_transcript");
+    expect(terminal).toBeTruthy();
+    expect(String(terminal?.detail)).toContain("_torn1");
+    expect(attempts.some((payload) => payload.reason === "torn_end_frame")).toBe(true);
+    wrapper.unmount();
+  });
+
   // 复核补测（2026-10-14）：三类边界——在途细化不覆盖新会话 / 细化读失败回落 /
   // 非豆包不分流。第一类正是首版被 Vue ref 深代理陷阱静默拦死的那条路径。
   it("重试后的旧细化回调不覆盖新会话（会话世代作废旧回调）", async () => {
@@ -1862,7 +1936,9 @@ describe("Onboarding voice test step", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("语音链路正常");
-    expect(mocks.getRc003BridgeSnapshot).not.toHaveBeenCalled();
+    // 捕获状态轮询在第④/⑤/⑥步共用（2026-11-25），非豆包也会读一次；
+    // "不分流"的判据是文案不按捕获状态改写（不能出现"还在准备中"）。
+    expect(wrapper.text()).not.toContain("还在准备中");
     wrapper.unmount();
   });
 

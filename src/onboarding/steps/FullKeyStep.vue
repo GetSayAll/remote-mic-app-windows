@@ -22,6 +22,8 @@ const props = defineProps<{
   loading: boolean;
   /** 开关旁唯一的失败/状态文字（原文只进日志，界面只显示映射后的用户语言）。 */
   failureText: string | null;
+  /** 「开着但还没生效」的一句提示（2026-11-25）：只在开启且未生效时由父组件给出。 */
+  healthText: string | null;
 }>();
 
 const emit = defineEmits<{ toggle: [] }>();
@@ -86,6 +88,7 @@ watch(
       <!-- 开关旁只允许一句状态文案：失败原因优先，其次是本机不可用/已开启/可跳过。
            操作进行中（关闭 / 开启 / 授权）不显示任何文字，只有开关上的转圈。 -->
       <p v-if="!busy && failureText" class="onboarding-capture-failure">{{ failureText }}</p>
+      <p v-else-if="!busy && healthText" class="onboarding-capture-failure">{{ healthText }}</p>
       <p v-else-if="!busy && !available" class="onboarding-capture-note">
         {{ t("这台电脑暂不支持全按键支持，其他按键不受影响。") }}
       </p>

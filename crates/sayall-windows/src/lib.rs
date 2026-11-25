@@ -912,6 +912,35 @@ pub(crate) fn apply_shortcut_capture_suspension(
     ));
 }
 
+/// 运行时快照单次耗时的慢调用阈值（2026-11-25）。
+///
+/// 前端语音测试每 200 ms 轮询一次 `get_runtime_snapshot`；主线程被阻塞时
+/// 日志里只能看到"轮询停了"，无法定位卡在哪个子系统。超过本阈值就落一行
+/// `runtime_snapshot terminal_result=slow`，带每段耗时。
+#[cfg(windows)]
+const SLOW_RUNTIME_SNAPSHOT_MS: u128 = 1_000;
+
+/// 慢快照日志（纯函数，单测覆盖）：低于阈值返回 None；达到阈值给出各段耗时。
+#[cfg(windows)]
+fn slow_runtime_snapshot_note(
+    total_ms: u128,
+    connection_ms: u128,
+    audio_ms: u128,
+    raw_input_ms: u128,
+    send_input_ms: u128,
+    button_mapping_ms: u128,
+    voice_priority_ms: u128,
+) -> Option<String> {
+    (total_ms >= SLOW_RUNTIME_SNAPSHOT_MS).then(|| {
+        format!(
+            "runtime_snapshot phase=completed terminal_result=slow elapsed_ms={total_ms} \
+             connection_ms={connection_ms} audio_ms={audio_ms} raw_input_ms={raw_input_ms} \
+             send_input_ms={send_input_ms} button_mapping_ms={button_mapping_ms} \
+             voice_priority_ms={voice_priority_ms}"
+        )
+    })
+}
+
 impl WindowsPlatform {
     pub fn usage_counters(&self) -> Arc<UsageCounters> {
         Arc::clone(&self.usage)
@@ -1251,26 +1280,51 @@ impl WindowsPlatform {
         #[cfg(windows)]
         {
             let trace_initial = !INITIAL_RUNTIME_SNAPSHOT_LOGGED.swap(true, Ordering::Relaxed);
+            let snapshot_started = std::time::Instant::now();
             if trace_initial {
                 gatt_note("runtime_snapshot phase=requested checkpoint=connection".to_owned());
             }
             let connection = self.connection_snapshot();
+            let connection_ms = snapshot_started.elapsed().as_millis();
+            let audio_started = std::time::Instant::now();
             if trace_initial {
                 gatt_note("runtime_snapshot phase=progress checkpoint=audio".to_owned());
             }
             let audio = self.audio_snapshot();
+            let audio_ms = audio_started.elapsed().as_millis();
+            let raw_input_started = std::time::Instant::now();
             if trace_initial {
                 gatt_note("runtime_snapshot phase=progress checkpoint=raw_input".to_owned());
             }
             let raw_input = self.raw_input_snapshot();
+            let raw_input_ms = raw_input_started.elapsed().as_millis();
+            let send_input_started = std::time::Instant::now();
             if trace_initial {
                 gatt_note("runtime_snapshot phase=progress checkpoint=send_input".to_owned());
             }
             let send_input_ready = self.send_input_snapshot().available;
+            let send_input_ms = send_input_started.elapsed().as_millis();
+            let button_mapping_started = std::time::Instant::now();
             if trace_initial {
                 gatt_note("runtime_snapshot phase=progress checkpoint=button_mapping".to_owned());
             }
             let button_mapping = self.button_mapping_snapshot();
+            let button_mapping_ms = button_mapping_started.elapsed().as_millis();
+            let voice_priority_started = std::time::Instant::now();
+            let voice_priority = self.voice_priority_snapshot();
+            let voice_priority_ms = voice_priority_started.elapsed().as_millis();
+            let total_ms = snapshot_started.elapsed().as_millis();
+            if let Some(note) = slow_runtime_snapshot_note(
+                total_ms,
+                connection_ms,
+                audio_ms,
+                raw_input_ms,
+                send_input_ms,
+                button_mapping_ms,
+                voice_priority_ms,
+            ) {
+                gatt_note(note);
+            }
             if trace_initial {
                 gatt_note("runtime_snapshot phase=completed terminal_result=passed".to_owned());
             }
@@ -1295,7 +1349,7 @@ impl WindowsPlatform {
                 audio,
                 raw_input,
                 button_mapping,
-                voice_priority: self.voice_priority_snapshot(),
+                voice_priority,
             }
         }
 
@@ -2517,5 +2571,23 @@ mod tests {
             lock(&pending).is_none(),
             "恢复工具不得保留待对齐布防，否则失焦会切整个桌面"
         );
+    }
+
+    /// 2026-11-25：慢快照只在达到阈值时落一行，且每段耗时逐项可读。
+    /// 现场需要区分"主线程排队"（前端 poll 行）与"快照内部某个子系统阻塞"（本行）。
+    #[cfg(windows)]
+    #[test]
+    fn slow_runtime_snapshot_note_only_logs_at_threshold() {
+        assert!(slow_runtime_snapshot_note(999, 1, 2, 3, 4, 5, 6).is_none());
+        let note = slow_runtime_snapshot_note(1_000, 1, 2, 3, 4, 5, 6)
+            .expect("threshold must produce a note");
+        assert!(note.contains("terminal_result=slow"));
+        assert!(note.contains("elapsed_ms=1000"));
+        assert!(note.contains("connection_ms=1"));
+        assert!(note.contains("audio_ms=2"));
+        assert!(note.contains("raw_input_ms=3"));
+        assert!(note.contains("send_input_ms=4"));
+        assert!(note.contains("button_mapping_ms=5"));
+        assert!(note.contains("voice_priority_ms=6"));
     }
 }

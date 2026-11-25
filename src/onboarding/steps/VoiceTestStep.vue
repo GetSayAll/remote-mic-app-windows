@@ -18,6 +18,8 @@ const props = defineProps<{
   showImeChecklist: boolean;
   /** 输入法兜底提示（2026-10-13 现场）：非空时显示一张说明卡，空串不显示。 */
   imeHint: string;
+  /** 「支持更多输入工具」开着但没生效时的提示（2026-11-25）：非空显示一张说明卡。 */
+  captureHint: string;
 }>();
 
 const checklist = computed(() => {
@@ -109,6 +111,10 @@ defineExpose({ focusBox, clearBox, readValue });
         </li>
       </ul>
       <p>{{ t("本次设置快捷键：{hotkey}（“本次设置”）；语音设备：{audio}。", { hotkey: hotkeyText, audio: audioText }) }}</p>
+    </div>
+
+    <div v-if="captureHint" class="onboarding-card warn">
+      <p>{{ captureHint }}</p>
     </div>
 
     <div v-if="imeHint" class="onboarding-card warn">

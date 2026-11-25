@@ -14,6 +14,11 @@
  * - `step_entered` / `step_blocked` / `step_recovered` / 各步骤的领域事件
  *   （remote_observed/audio_route/tool_selected/authorization/voice_attempt…）
  *   共同构成"最后一条日志 = 当时所处环节"的证据链。
+ * - `capture`：向导第④/⑤/⑥步读取的增强捕获生效状态（`health_<状态>_reason_<原因>`）；
+ *   进入步骤时记 `reason=read`，5 s 轮询只在变化时记 `reason=changed`，读失败记
+ *   `reason=read_failed`。
+ * - `poll`：语音测试 200 ms 轮询的 IPC 往返超过 1 s 时记一条 `reason=slow_snapshot`
+ *   （`detail=rt_<毫秒>`）；具体阻塞子系统由 Rust `runtime_snapshot ... slow` 行给出。
  * - 遥控器 / 普通按键步骤每次进入、连接阶段跳变、Raw Input 阶段跳变、
  *   匹配接口数/重连次数/错误位变化都落 `remote_observed reason=remote_state`；
  *   `detail` 是 `remote-state.ts` 生成的脱敏快照（阶段 + 计数，≤64 字符），
@@ -44,6 +49,8 @@ export type OnboardingEventKind =
   | "navigation"
   | "remote_observed"
   | "voice_attempt"
+  | "capture"
+  | "poll"
   | "audio_route"
   | "tool_selected"
   | "action"
