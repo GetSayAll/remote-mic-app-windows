@@ -128,6 +128,49 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
 开关旁仍显示「已开启」，第⑥步仍让用户做一次注定失败的测试，最后给出与事实相反的
 `audio_delivery_failed` 卡片。
 
+## 2026-11-25 用户复测：保留数据升级 → 故障；清数据重装 → 恢复
+
+用户后续反馈：
+
+- 1.9.7 安装时选择**保留数据** → 豆包第⑥步仍故障；
+- 再次安装 1.9.7（这次进入卸载页），**清除应用数据** → 重装正常；但键位/设置需要重配。
+
+判断：**是“保留的授权/助手任务状态”问题，不是 `button-mappings.json` 的键位 bug。**
+
+- 1.9.7 启动加载键位成功：
+  `shortcut_settings feature=button_mapping action=load phase=completed terminal_result=passed enabled=true schema_version=5 button_count=7 … unsupported_count=0`；
+  没有 `schema_version … action=backup`、`defaults_applied` 或 unreadable 备份。键位文件读取正常，
+  排除 `Bugs/2026-11-11-button-mappings-lost-after-upgrade.md` 那类“旧构建读新 schema”问题。
+- 故障在升级前就存在：1.9.5 时段（16:31–17:16）已有
+  `auto_trigger_escalate … attempt=380`，整段 **0 次** `helper_authenticated`。升级只是把
+  `settings.json` 里的 `rc003_capture_enabled=true` 和旧的 `SayAll RC003 Helper` 计划任务
+  （设计上跨升级保留，用来承载授权）一起带了过来。
+- 1.9.7 启动后只走 `auto_trigger reason=app_startup` + `schtasks /run`；没有
+  `enable_capture` / 任务重建（重建需要 UAC）。`schtasks /run` 的 `passed` 只代表任务被受理，
+  不代表助手进程真的启动——本轮助手连一条 `[ENV]` 都没有。
+- 清数据把 `settings.json` 的 `rc003_capture_enabled` 复位为 false；用户重新开启时走
+  `enable_capture` → 提权重装任务 → 助手正常。键位/设置需要重配只是“清数据”的副作用。
+
+应用侧缺口：启动对账检查任务文件、目标**文件名**与电源策略，但不检查
+`<Command>` 的全路径是否存在、任务是否 Enabled、登录类型/`LastTaskResult`。
+任务目标文件仍是 `sayall-helper.exe` 时 `task_target_matches` 会通过；如果路径/状态已失效，
+`/run` 仍可能返回成功而助手不启动。这是“保留数据升级”能带过故障的机制。
+
+规避（不丢配置）：不要清全部数据；把「全按键支持 / 支持更多输入工具」**关掉再打开**
+（会重新弹一次 UAC）即可重建计划任务，`settings.json` 与 `button-mappings.json` 保留。
+2026-11-25 的 5 轮 `helper_not_connected` + 提示会让用户看到这一步。
+
+待确认/建议修复：
+
+- 失败状态的 `helper-task.log` 与任务 XML 已被清数据覆盖，无法确认具体是 `<Command>` 路径、
+  Enabled、登录类型还是 `LastTaskResult`；需测试机人为构造 stale task 复现。
+- 启动对账增加任务健康检查：`<Command>` 全路径存在、`<Enabled>true`、参数含
+  `--follow-app`；失败则 `CaptureRevoke` 回落开关并显示既有「重新打开一次」文案。
+- 更根治：保留数据升级时，由提权的安装器重跑 `sayall-helper --install-task` 刷新任务
+  （任务本应跨升级幸存，但要用当前路径/参数重建）；需要安装/升级生命周期测试。
+- 日志补一行启动任务摘要（只布尔/枚举：`task_installed`、`command_present`、`enabled`、
+  `power_policy`），下一次无需清数据后才能取证。
+
 ## 修复（2026-11-25，本分支）
 
 ### 1. 结束方向撕裂帧不再误判为投递失败
