@@ -72,6 +72,15 @@ impl DisconnectLoopDetector {
         self.connected_at = Some(now);
     }
 
+    /// 当前会话已持续的时长；未连接或已断开时返回 `None`。
+    ///
+    /// 只读辅助：`ble_link phase=changed` 用它记录断链时的会话时长，
+    /// 便于区分“连上几秒就掉”和“稳定一段时间后偶发掉链”。
+    pub fn session_elapsed(&self, now: Instant) -> Option<Duration> {
+        self.connected_at
+            .map(|started| now.saturating_duration_since(started))
+    }
+
     /// 一次连接结束。返回 `Some(report)` 表示**本轮循环首次**被识别。
     pub fn on_disconnected(&mut self, now: Instant, cause: DisconnectCause) -> Option<LoopReport> {
         if cause != DisconnectCause::LinkLost {
@@ -302,5 +311,22 @@ mod tests {
             None
         );
         assert_eq!(detector.short_session_count(), 0);
+    }
+
+    /// 会话时长只读辅助：连上后可读，断开后回到 None。
+    #[test]
+    fn session_elapsed_tracks_the_current_connection_only() {
+        let base = Instant::now();
+        let mut detector = DisconnectLoopDetector::new();
+        assert_eq!(detector.session_elapsed(base), None);
+
+        detector.on_connected(base);
+        assert_eq!(
+            detector.session_elapsed(at(base, 7)),
+            Some(Duration::from_secs(7))
+        );
+
+        detector.on_disconnected(at(base, 7), DisconnectCause::LinkLost);
+        assert_eq!(detector.session_elapsed(at(base, 8)), None);
     }
 }

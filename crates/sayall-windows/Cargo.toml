@@ -25,6 +25,7 @@ windows-future = "0.3"
 windows-version = "0.1.7"
 windows = { version = "0.62", features = [
     "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
     "Devices_Bluetooth_GenericAttributeProfile",
     "Devices_Enumeration",
     "Devices_Radios",

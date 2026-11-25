@@ -160,6 +160,46 @@ issue #104 的 1.9.5 日志能证明“配对记录存在、服务发现失败�
 `ble_service_path ... characteristic_probe`，不再依赖单独的
 `ble_connect_stage stage=characteristic_transmit`。
 
+### BLE 空口探测与 Raw Input 枚举统计（2026-11-25）
+
+issue #104 的 1.9.7 现场已能证明「配对记录在、GATT 不可达、HID 接口不在场」，
+但仍无法区分「遥控器不在空口」「在空口但不可连接」「在空口且可连接，失败在
+Windows 链路/ATT/配对层」。连接失败段补三类只读日志；都不改变重连、GATT 或
+按键决策：
+
+- `ble_adv phase=requested|completed ...`：连续失败第 5 次（约 60 秒）做第一次
+  被动扫描，之后每 10 次失败一次。窗口 2.5 秒，`scan_mode=passive`。
+  - `requested`：`attempt`、`window_ms`、`trigger=failure_streak`。
+  - `completed`：`reason=target_seen|target_absent|no_advertisements`、
+    `seen=yes|no`、`target_advertisements`、`total_advertisements`、
+    `connectable=yes|no|unknown`、`advertisement_type`、`rssi_dbm`、
+    `watcher_status`、`elapsed_ms`。
+  - 判读：`seen=no total_advertisements=0` = 适配器/扫描没收到任何广告；
+    `seen=no total_advertisements>0` = 无线电工作但目标没广播（休眠/没电/
+    超出范围/被其它主机占用）；`seen=yes connectable=no` = 目标在广播但不可
+    连接（通常已被另一台主机占用）；`seen=yes connectable=yes` = 目标可连接，
+    失败在 Windows 链路/ATT/配对层。
+  - **不记录**目标地址、名称、厂商数据或服务数据；只比较调用方传入的地址。
+    探测器启动/订阅/扫描模式失败落 `terminal_result=failed` 与 `error_code`；
+    watcher 被系统中止时即使已看到广告也落 `terminal_result=failed
+    error_code=watcher_aborted`，避免把中止当成“目标没广播”。整个探测在独立
+    短生命周期线程执行，外层 4 秒上限；超时落 `error_code=probe_timeout` 后
+    继续原重连流程，不让僵死的 BLE 栈把工作线程一起拖住。
+- `raw_input scan phase=completed ...`：监听器启动时记录一次，之后只在枚举
+  签名（总数/键盘数/HID 数/名称读取失败数/匹配数/目标地址是否已知）变化时
+  记录，设备稳定时不刷屏。
+  - 字段：`total_devices`、`keyboard_devices`、`hid_devices`、`name_failures`、
+    `remote_paths`、`matched_device_count`、`target_known`、
+    `reason=matched|ambiguous|no_devices|no_remote_hid|target_filtered`。
+  - 判读：`reason=no_remote_hid` = 系统有 HID 但遥控器接口不在；
+    `reason=target_filtered` = 遥控器接口在，但被“应用正在用的那支”地址过滤掉
+    （通常是连错了另一支）。**不记录**设备路径、名称、VID/PID。
+- `ble_link phase=changed ...` 追加 `session_ms`（连上到断开的毫秒数，未知写
+  `unknown`）与 `phase`（`ready|streaming|draining|...`），用于区分“连上几秒
+  就掉”和“稳定一段时间后偶发掉链”，以及掉链是否紧跟在语音结束之后。
+
+这些行只用于分流链路层原因；不能替代 `ble_service_path` 的 GATT 路径结果。
+
 ## 隐私红线
 
 不得记录语音或转写正文、用户输入、剪贴板、用户名/邮箱/手机号、完整路径、窗口标题、蓝牙 MAC/UUID/序列号、HID 路径、IP、Token/API Key/密码/私钥/证书、第三方 App 私有状态或原始音频字节。不要用敏感值的稳定哈希替代脱敏。允许记录稳定产品分类、布尔结果、错误 domain/code、采样率、帧数、耗时和脱敏计数。

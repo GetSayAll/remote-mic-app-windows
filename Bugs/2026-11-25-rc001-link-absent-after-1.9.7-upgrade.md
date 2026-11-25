@@ -95,6 +95,55 @@
 - `ble_device phase=access ... is_enabled=no` 在成功连接期间也一直是 `no`，
   不能作为设备离线的判据。
 
+## 诊断补齐（2026-11-25，本分支）
+
+现有日志只能证明“链路不在”，不能回答“为什么不在”。本轮只补只读日志，不改变
+重连/GATT/按键决策：
+
+1. **空口广告探测**：连续失败第 5 次（约 60 秒）做第一次被动扫描，之后每 10 次
+   失败一次；窗口 2.5 秒。日志 `ble_adv phase=requested|completed` 记录目标是否
+   出现、是否可连接、广告类型、RSSI、扫描到的广告总数与 watcher 状态。
+   - `seen=no total_advertisements=0`：适配器/扫描没收到任何广告；
+   - `seen=no total_advertisements>0`：无线电工作，但目标没广播（休眠/没电/
+     超出范围/被其它主机占用）；
+   - `seen=yes connectable=no`：目标在广播但不可连接（通常已被另一台主机占用）；
+   - `seen=yes connectable=yes`：目标可连接，失败在 Windows 链路/ATT/配对层。
+   只比较调用方传入的地址，不记录地址、名称、厂商/服务数据。整个探测在独立
+   短生命周期线程执行，外层 4 秒上限；超时落 `error_code=probe_timeout` 后
+   继续原重连流程。
+2. **Raw Input 枚举统计**：`raw_input scan phase=completed` 在监听器启动时记录
+   一次，之后只在设备枚举签名变化时记录；字段 `total_devices` /
+   `keyboard_devices` / `hid_devices` / `name_failures` / `remote_paths` /
+   `matched_device_count` / `target_known` / `reason=...`。用于区分
+   “系统里一个 HID 都没有”“HID 枚举正常但遥控器接口不在”
+   “遥控器接口在但被目标地址过滤掉”。不记录路径、名称、VID/PID。
+3. **断链上下文**：`ble_link phase=changed` 追加 `session_ms` 与 `phase`
+   （`ready|streaming|draining|...`），用于判断掉链发生在连上几秒、语音结束
+   之后还是长时间空闲后。
+
+实现位置：
+
+- `crates/sayall-windows/src/ble/advertisement_probe.rs`（新增）
+- `crates/sayall-windows/src/ble.rs`（触发与 `session_ms`/`phase`）
+- `crates/sayall-windows/src/disconnect_loop.rs`（`session_elapsed` 只读辅助）
+- `crates/sayall-windows/src/raw_input_windows.rs`（枚举统计与边沿日志）
+- `LOGGING.md`「BLE 空口探测与 Raw Input 枚举统计（2026-11-25）」
+
+验证：
+
+- `cargo fmt --all -- --check`：`passed`
+- `cargo test -p sayall-windows --lib`：`passed`（606 passed / 20 ignored；
+  新增 5 个广告探测、2 个触发/phase token、1 个 `session_elapsed`、3 个
+  Raw Input 枚举统计用例）
+- `cargo test --workspace`：`passed`（sayall-windows 606 / 20 ignored；
+  sayall-windows-app 226 / 2 ignored；其余 crate 与文档测试 0 failed）
+- `cargo check --workspace`：`passed`
+- `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
+- 真机探测：`deferred`（需要用户机器与遥控器在失败态复现；本机无该现场）
+
+下次报障只需一份 `sayall-diagnostic.log`，先看 `ble_adv seen/connectable`
+与 `raw_input scan reason` 两行，即可区分上述四类原因，不再靠猜。
+
 ## 下一步
 
 1. 用户侧 A/B（按顺序，先做只读项）：

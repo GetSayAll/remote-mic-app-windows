@@ -39,6 +39,7 @@ use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows_future::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
 
+mod advertisement_probe;
 mod gatt_discovery;
 
 const SERVICE_UUID: GUID = GUID::from_u128(0xab5e00015a214f05bc7daf01f617b664);
@@ -55,6 +56,10 @@ const BATTERY_LEVEL_UUID: GUID = GUID::from_u128(0x00002a1900001000800000805f9b3
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 const ADAPTER_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+/// 连续失败后的空口探测节流（2026-11-25）：第 5 次重连（约 60 秒失败）做第一次，
+/// 之后每 10 次做一次。只读探测；不改变重连/GATT 决策。
+const ADVERTISEMENT_PROBE_FIRST_ATTEMPT: u32 = 5;
+const ADVERTISEMENT_PROBE_INTERVAL: u32 = 10;
 /// WinRT 异步操作的硬上限（2026-10-21 现场）：旧的半死链路上
 /// `BluetoothLEDevice` 已经拿到、`Name()` 也能读，但随后的 GATT 查询
 /// 永不返回，工作线程被 `block_on` 永久占住——UI 一直停在「正在连接遥控器」，
@@ -1514,9 +1519,17 @@ fn worker_loop(
                 connection_generation: message_generation,
                 status,
             } => {
+                let now = Instant::now();
+                let session_ms = disconnect_loop.session_elapsed(now);
+                let phase = lock(&state).phase;
                 gatt_note(format!(
-                    "ble_link phase=changed connection_generation={message_generation} status={status:?} stale={}",
-                    message_generation != connection_generation
+                    "ble_link phase=changed connection_generation={message_generation} status={status:?} stale={} session_ms={} phase={}",
+                    message_generation != connection_generation,
+                    session_ms.map_or_else(
+                        || "unknown".to_owned(),
+                        |duration| duration.as_millis().to_string()
+                    ),
+                    connection_phase_label(phase)
                 ));
                 if message_generation == connection_generation
                     && status == BluetoothConnectionStatus::Disconnected
@@ -1525,7 +1538,7 @@ fn worker_loop(
                     // 设备侧掉链才进入循环判定（睡眠/退出走各自分支清零）。
                     // 这里只计数与落日志，不改变任何恢复行为。
                     if let Some(report) =
-                        disconnect_loop.on_disconnected(Instant::now(), DisconnectCause::LinkLost)
+                        disconnect_loop.on_disconnected(now, DisconnectCause::LinkLost)
                     {
                         note_disconnect_loop(report);
                     }
@@ -1807,6 +1820,17 @@ fn is_stream_start(bytes: &[u8]) -> bool {
     bytes.first() == Some(&0x04)
 }
 
+/// 连续失败后是否做一次空口探测（纯逻辑，单测覆盖）。
+///
+/// 第 5 次重连约在连续失败 60 秒后（2/4/8/16/30 秒退避），与向导排查卡的
+/// 60 秒门槛对齐；之后每 10 次采样一次，避免每次失败都扫无线电。
+fn should_probe_advertisement(reconnecting: bool, reconnect_attempt: u32) -> bool {
+    reconnecting
+        && (reconnect_attempt == ADVERTISEMENT_PROBE_FIRST_ATTEMPT
+            || (reconnect_attempt > ADVERTISEMENT_PROBE_FIRST_ATTEMPT
+                && reconnect_attempt % ADVERTISEMENT_PROBE_INTERVAL == 0))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn attempt_connection(
     device_id: &str,
@@ -1836,6 +1860,23 @@ fn attempt_connection(
         connection_generation,
         usage,
     )?;
+    // 连续失败达到诊断阈值时做一次被动空口扫描（2026-11-25）：只读，不改变
+    // 重连/GATT 决策；用于区分「遥控器不在空口」与「在空口但 Windows 连不上」。
+    if should_probe_advertisement(reconnecting, reconnect_attempt) {
+        if let Some(address) = bluetooth_address_from_device_id(device_id) {
+            match advertisement_probe::probe_with_timeout(reconnect_attempt, address) {
+                Ok(observation) => gatt_note(advertisement_probe::probe_note(&observation)),
+                Err(failure) => {
+                    gatt_note(advertisement_probe::probe_failure_note(
+                        reconnect_attempt,
+                        failure,
+                    ));
+                }
+            }
+        } else {
+            gatt_note(advertisement_probe::probe_skipped_note(reconnect_attempt));
+        }
+    }
     let previous = reconnecting.then(|| lock(state).clone());
     *lock(state) = ConnectionSnapshot {
         phase: if reconnecting {
@@ -1945,6 +1986,23 @@ fn link_status_token(status: Option<BluetoothConnectionStatus>) -> &'static str 
         Some(BluetoothConnectionStatus::Connected) => "connected",
         Some(BluetoothConnectionStatus::Disconnected) => "disconnected",
         _ => "unknown",
+    }
+}
+
+/// `ConnectionPhase` 的稳定日志 token（不随 Debug 格式变化）。
+fn connection_phase_label(phase: ConnectionPhase) -> &'static str {
+    match phase {
+        ConnectionPhase::Idle => "idle",
+        ConnectionPhase::Connecting => "connecting",
+        ConnectionPhase::Discovering => "discovering",
+        ConnectionPhase::AwaitingCapabilities => "awaiting_capabilities",
+        ConnectionPhase::Ready => "ready",
+        ConnectionPhase::Streaming => "streaming",
+        ConnectionPhase::Draining => "draining",
+        ConnectionPhase::Reconnecting => "reconnecting",
+        ConnectionPhase::Suspended => "suspended",
+        ConnectionPhase::Disconnected => "disconnected",
+        ConnectionPhase::Failed => "failed",
     }
 }
 
@@ -5360,6 +5418,63 @@ mod tests {
             "disconnected"
         );
         assert_eq!(link_status_token(None), "unknown");
+    }
+
+    #[test]
+    fn advertisement_probe_runs_only_after_a_failure_streak() {
+        // 初始连接不做探测；第 5 次重连（约 60 秒失败）做第一次，之后每 10 次一次。
+        assert!(!should_probe_advertisement(false, 5));
+        assert!(!should_probe_advertisement(true, 0));
+        for attempt in 1..ADVERTISEMENT_PROBE_FIRST_ATTEMPT {
+            assert!(
+                !should_probe_advertisement(true, attempt),
+                "attempt {attempt} 不该探测"
+            );
+        }
+        assert!(should_probe_advertisement(true, 5));
+        for attempt in [10, 20, 30, 40] {
+            assert!(
+                should_probe_advertisement(true, attempt),
+                "attempt {attempt} 应该探测"
+            );
+        }
+        for attempt in [6, 7, 8, 9, 11, 15, 25] {
+            assert!(
+                !should_probe_advertisement(true, attempt),
+                "attempt {attempt} 不该探测"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_phase_labels_are_stable_tokens() {
+        assert_eq!(
+            connection_phase_label(ConnectionPhase::AwaitingCapabilities),
+            "awaiting_capabilities"
+        );
+        assert_eq!(connection_phase_label(ConnectionPhase::Ready), "ready");
+        assert_eq!(
+            connection_phase_label(ConnectionPhase::Streaming),
+            "streaming"
+        );
+        for phase in [
+            ConnectionPhase::Idle,
+            ConnectionPhase::Connecting,
+            ConnectionPhase::Discovering,
+            ConnectionPhase::AwaitingCapabilities,
+            ConnectionPhase::Ready,
+            ConnectionPhase::Streaming,
+            ConnectionPhase::Draining,
+            ConnectionPhase::Reconnecting,
+            ConnectionPhase::Suspended,
+            ConnectionPhase::Disconnected,
+            ConnectionPhase::Failed,
+        ] {
+            let label = connection_phase_label(phase);
+            assert!(!label.is_empty());
+            assert_eq!(label, label.to_ascii_lowercase(), "token 必须小写：{label}");
+            assert!(!label.contains(' '), "token 不得含空格：{label}");
+        }
     }
 
     #[test]
