@@ -5,6 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::raw_input::RemoteButton;
+use crate::RemoteModel;
 
 const MAX_CHORD_KEYS: usize = 4;
 
@@ -999,6 +1000,20 @@ pub enum ButtonTrigger {
     Long,
 }
 
+/// 方向键按住：哪个槽位在一段持续按压里保持按下。
+///
+/// - `Single`：按下即按住单击动作，松开才释放；
+/// - `Long`：按住达到长按阈值后保持长按动作，快速点按仍执行单击/双击。
+///
+/// 只允许左、右两个方向键；目标动作必须是单个左/右方向键组合。见
+/// [`ButtonMappings::normalized`] 与 `button_mapping` 的按住运行时。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectionalHold {
+    Single,
+    Long,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ButtonActions {
     pub single: ButtonAction,
@@ -1008,6 +1023,10 @@ pub struct ButtonActions {
     ///
     /// 每键至多一个槽位：互斥由界面与 [`ButtonMappings::normalized`] 强制。
     pub hold_repeat: Option<ButtonTrigger>,
+    /// 方向键按住：哪个槽位在持续按压中保持按下；`None` = 关闭。
+    ///
+    /// 与 `hold_repeat` 互斥，只允许左、右两个方向键。见 [`DirectionalHold`]。
+    pub directional_hold: Option<DirectionalHold>,
     /// OK 键：用遥控器移动过光标后的 5 秒内，按 OK 直接点击光标位置
     /// （本次按压不触发单击/双击/长按）。只对 OK 键生效，默认关。
     ///
@@ -1028,6 +1047,7 @@ impl Default for ButtonActions {
             double: ButtonAction::Disabled,
             long: ButtonAction::Disabled,
             hold_repeat: None,
+            directional_hold: None,
             ok_context_click: false,
             extra: BTreeMap::new(),
             action_extras: BTreeMap::new(),
@@ -1097,6 +1117,12 @@ impl Serialize for ButtonActions {
             object.insert(
                 "holdRepeat".to_owned(),
                 serde_json::to_value(hold_repeat).map_err(S::Error::custom)?,
+            );
+        }
+        if let Some(directional_hold) = self.directional_hold {
+            object.insert(
+                "directionalHold".to_owned(),
+                serde_json::to_value(directional_hold).map_err(S::Error::custom)?,
             );
         }
         if self.ok_context_click {
@@ -1184,6 +1210,13 @@ impl<'de> Deserialize<'de> for ButtonActions {
                 serde_json::from_value::<ButtonTrigger>(value.clone()).map_err(D::Error::custom)?,
             ),
         };
+        let directional_hold = match object.get("directionalHold") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                serde_json::from_value::<DirectionalHold>(value.clone())
+                    .map_err(D::Error::custom)?,
+            ),
+        };
         let ok_context_click = match object.get("okContextClick") {
             None => false,
             Some(value) => {
@@ -1195,7 +1228,12 @@ impl<'de> Deserialize<'de> for ButtonActions {
             .filter(|(key, _)| {
                 !matches!(
                     key.as_str(),
-                    "single" | "double" | "long" | "holdRepeat" | "okContextClick"
+                    "single"
+                        | "double"
+                        | "long"
+                        | "holdRepeat"
+                        | "directionalHold"
+                        | "okContextClick"
                 )
             })
             .map(|(key, value)| (key.clone(), RawJson(value.to_string())))
@@ -1205,6 +1243,7 @@ impl<'de> Deserialize<'de> for ButtonActions {
             double,
             long,
             hold_repeat,
+            directional_hold,
             ok_context_click,
             extra,
             action_extras,
@@ -1229,6 +1268,130 @@ impl ButtonActions {
     }
 }
 
+/// 普通按键手势识别时间（毫秒），随按键映射文档一起保存。
+///
+/// 默认值 = 本功能之前硬编码的行为：双击判定 300ms、长按 550ms、按住连续
+/// 触发起始 350ms。界面只允许 50ms 步长；加载与保存前 [`Self::normalized`]
+/// 把越界/非步长的值钳到合法范围（先钳范围，再四舍五入到最近的 50ms），
+/// 而不是拒绝整份映射。非数值/非对象回落默认值，数值越界先钳到范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ButtonGestureTiming {
+    /// 双击判定窗口（第二击按下沿之间的最大间隔）。
+    pub double_click_ms: u32,
+    /// 长按阈值（按住多久触发长按）。
+    pub long_press_ms: u32,
+    /// 按住连续触发的起始延迟。
+    pub repeat_start_ms: u32,
+}
+
+impl ButtonGestureTiming {
+    /// 历史硬编码行为，即界面「恢复默认」的目标值。
+    pub const DEFAULT: Self = Self {
+        double_click_ms: 300,
+        long_press_ms: 550,
+        repeat_start_ms: 350,
+    };
+
+    /// 界面滑块步长。
+    pub const STEP_MS: u32 = 50;
+
+    pub const DOUBLE_CLICK_MS_MIN: u32 = 50;
+    pub const DOUBLE_CLICK_MS_MAX: u32 = 500;
+    pub const LONG_PRESS_MS_MIN: u32 = 300;
+    pub const LONG_PRESS_MS_MAX: u32 = 1000;
+    pub const REPEAT_START_MS_MIN: u32 = 50;
+    pub const REPEAT_START_MS_MAX: u32 = 2000;
+
+    /// 是否为默认值（序列化时与默认值相等的整段省略）。
+    pub fn is_default(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+
+    /// 归一化：先钳到允许范围，再四舍五入到最近的 50ms。
+    ///
+    /// 范围端点都是 50 的整数倍，因此取整后不会越界；仍再钳一次兜底。
+    pub fn normalized(self) -> Self {
+        Self {
+            double_click_ms: normalize_timing_ms(
+                self.double_click_ms,
+                Self::DOUBLE_CLICK_MS_MIN,
+                Self::DOUBLE_CLICK_MS_MAX,
+            ),
+            long_press_ms: normalize_timing_ms(
+                self.long_press_ms,
+                Self::LONG_PRESS_MS_MIN,
+                Self::LONG_PRESS_MS_MAX,
+            ),
+            repeat_start_ms: normalize_timing_ms(
+                self.repeat_start_ms,
+                Self::REPEAT_START_MS_MIN,
+                Self::REPEAT_START_MS_MAX,
+            ),
+        }
+    }
+
+    /// 已处于合法范围与步长（供测试与界面读回校验）。
+    pub fn is_normalized(&self) -> bool {
+        self.normalized() == *self
+    }
+
+    pub fn double_click_window(&self) -> Duration {
+        Duration::from_millis(u64::from(self.double_click_ms))
+    }
+
+    pub fn long_press_threshold(&self) -> Duration {
+        Duration::from_millis(u64::from(self.long_press_ms))
+    }
+
+    pub fn repeat_start_delay(&self) -> Duration {
+        Duration::from_millis(u64::from(self.repeat_start_ms))
+    }
+
+    /// 宽容解析：单个字段类型不对只回落到该字段默认值，不影响整份映射加载。
+    fn from_json_lenient(value: serde_json::Value) -> Self {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            double_click_ms: Option<serde_json::Value>,
+            long_press_ms: Option<serde_json::Value>,
+            repeat_start_ms: Option<serde_json::Value>,
+        }
+        let Ok(wire) = serde_json::from_value::<Wire>(value) else {
+            return Self::DEFAULT;
+        };
+        let default = Self::DEFAULT;
+        Self {
+            double_click_ms: timing_ms_or(wire.double_click_ms, default.double_click_ms),
+            long_press_ms: timing_ms_or(wire.long_press_ms, default.long_press_ms),
+            repeat_start_ms: timing_ms_or(wire.repeat_start_ms, default.repeat_start_ms),
+        }
+        .normalized()
+    }
+}
+
+impl Default for ButtonGestureTiming {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+fn timing_ms_or(value: Option<serde_json::Value>, fallback: u32) -> u32 {
+    value
+        .as_ref()
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(|value| value.round().clamp(0.0, f64::from(u32::MAX)) as u32)
+        .unwrap_or(fallback)
+}
+
+fn normalize_timing_ms(value: u32, min: u32, max: u32) -> u32 {
+    let clamped = value.clamp(min, max);
+    let step = ButtonGestureTiming::STEP_MS;
+    let rounded = min + ((clamped - min + step / 2) / step) * step;
+    rounded.clamp(min, max)
+}
+
 /// 按键映射配置结构版本：
 /// 0 = 本功能之前的旧文件（加载时按旧行为迁移），
 /// 1 = 含显式「按住连续触发」（`holdRepeat`），
@@ -1241,13 +1404,17 @@ impl ButtonActions {
 ///     旧版本读到该动作类型会整体拒载，靠版本护栏备份原文件（同 2 的约定）。
 /// 5 = 新增 APP 级滚动区域档案（`scrollRegions`）与翻页/到两端动作。尚未包含
 ///     前向兼容读取的旧版本读到新动作类型会整体拒载，靠版本护栏备份原文件。
+/// 6 = 新增方向键按住（`directionalHold`，仅左/右）。旧版本读到该字段会忽略，
+///     回写时丢失；因此按约定递增版本，让旧构建保存前先备份原文件。
+/// 7 = 新增按键手势时间：旧版单值 `gestureTiming` 与按型号分桶
+///     `gestureTimingsByModel`。旧版本会忽略这两个字段并在保存时丢掉。
 ///
 /// **任何新增持久化字段都必须递增本版本号**：更旧的构建读取同版本文件时会忽略
 /// 未知字段，并在下次保存时把它们丢掉（与 2026-10-25 统计字段丢失同类；
 /// 2026-11-11 评审）。自 2026-11-11 起，包含前向兼容读取的构建会把未知动作
 /// 保留为 `Unsupported`（不执行、不丢弃），并对未知顶层/每格字段做 round-trip；
 /// 但已发布的旧构建无法追溯获得该能力，所以仍不能只在需要迁移行为时才升版本。
-pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 5;
+pub const BUTTON_MAPPINGS_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1271,6 +1438,16 @@ pub struct ButtonMappings {
     /// 只保存 UIA 结构特征，不保存控件名称、窗口标题或内容文本。
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub scroll_regions: BTreeMap<String, crate::scroll_region::ScrollRegionTarget>,
+    /// 普通按键手势识别时间；缺省 = 历史常量（300/550/350ms）。
+    ///
+    /// 与默认值相等时整段省略，保持旧文件形状不变。这是**旧版单值**字段：
+    /// 仅在没有对应型号分桶时作为回落（见 [`Self::gesture_timing_for`]）。
+    #[serde(skip_serializing_if = "ButtonGestureTiming::is_default")]
+    pub gesture_timing: ButtonGestureTiming,
+    /// 按遥控器型号分桶的手势时间；键 = [`RemoteModel`] 的 serde token
+    /// （`rc001` / `rc003`）。空表时整段省略，并回落到旧字段 `gestureTiming`。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gesture_timings_by_model: BTreeMap<String, ButtonGestureTiming>,
     /// 更高结构版本写入、当前构建不认识的顶层字段；保存时原样保留。
     #[serde(flatten)]
     pub extra: BTreeMap<String, RawJson>,
@@ -1388,6 +1565,15 @@ pub fn clear_macro_references(mappings: &mut ButtonMappings, macro_id: &str) -> 
                 actions.hold_repeat = None;
             }
         }
+        if let Some(hold) = actions.directional_hold {
+            let slot_is_empty = match hold {
+                DirectionalHold::Single => actions.single == ButtonAction::Disabled,
+                DirectionalHold::Long => actions.long == ButtonAction::Disabled,
+            };
+            if slot_is_empty {
+                actions.directional_hold = None;
+            }
+        }
     }
     cleared
 }
@@ -1401,6 +1587,8 @@ impl Default for ButtonMappings {
             applications: Vec::new(),
             focus_profiles: BTreeMap::new(),
             scroll_regions: BTreeMap::new(),
+            gesture_timing: ButtonGestureTiming::DEFAULT,
+            gesture_timings_by_model: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -1425,6 +1613,14 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             focus_profiles: BTreeMap<String, crate::focus::AppFocusProfile>,
             #[serde(default)]
             scroll_regions: BTreeMap<String, crate::scroll_region::ScrollRegionTarget>,
+            /// 手势时间按原始 JSON 收下再宽容解析：任何字段类型不对都只回落
+            /// 该字段默认值，不能让整份映射加载失败。
+            #[serde(default)]
+            gesture_timing: Option<serde_json::Value>,
+            /// 型号分桶：同样按原始 JSON 收下，每个桶单独宽容解析；坏桶只回落
+            /// 默认值，不能让整份映射加载失败。
+            #[serde(default)]
+            gesture_timings_by_model: BTreeMap<String, serde_json::Value>,
             #[serde(flatten)]
             extra: BTreeMap<String, serde_json::Value>,
         }
@@ -1437,6 +1633,15 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
             applications: wire.applications,
             focus_profiles: wire.focus_profiles,
             scroll_regions: wire.scroll_regions,
+            gesture_timing: wire
+                .gesture_timing
+                .map(ButtonGestureTiming::from_json_lenient)
+                .unwrap_or(ButtonGestureTiming::DEFAULT),
+            gesture_timings_by_model: wire
+                .gesture_timings_by_model
+                .into_iter()
+                .map(|(model, timing)| (model, ButtonGestureTiming::from_json_lenient(timing)))
+                .collect(),
             extra: wire
                 .extra
                 .into_iter()
@@ -1447,6 +1652,26 @@ impl<'de> serde::Deserialize<'de> for ButtonMappings {
 }
 
 impl ButtonMappings {
+    /// 当前型号生效的手势时间。
+    ///
+    /// 优先级：型号分桶（`gestureTimingsByModel[<model token>]`）→ 旧版单值
+    /// `gestureTiming`（仅当还没有任何分桶时）→ 历史默认值。桶与单值都在这里归一化，
+    /// 读取方无需再处理越界/非步长数据。
+    pub fn gesture_timing_for(&self, model: RemoteModel) -> ButtonGestureTiming {
+        if let Some(timing) = self.gesture_timings_by_model.get(model.token()) {
+            return timing.normalized();
+        }
+        if !self.gesture_timings_by_model.is_empty() {
+            return ButtonGestureTiming::DEFAULT;
+        }
+        let legacy = self.gesture_timing.normalized();
+        if legacy.is_default() {
+            ButtonGestureTiming::DEFAULT
+        } else {
+            legacy
+        }
+    }
+
     /// 键位方案的私有页可能仍把预设写成一次性 Alt+Tab；覆盖层加载时把它升级为
     /// `app_switcher` 会话动作。基础映射不调用本方法，旧的一次性 Alt+Tab 绑定
     /// 继续按字面快捷键执行。
@@ -1467,6 +1692,14 @@ impl ButtonMappings {
             }
             for trigger in promoted {
                 actions.action_extras.remove(&trigger);
+                let promoted_slot = match trigger {
+                    ButtonTrigger::Single => Some(DirectionalHold::Single),
+                    ButtonTrigger::Long => Some(DirectionalHold::Long),
+                    ButtonTrigger::Double => None,
+                };
+                if promoted_slot.is_some() && actions.directional_hold == promoted_slot {
+                    actions.directional_hold = None;
+                }
             }
         }
         self
@@ -1487,6 +1720,7 @@ impl ButtonMappings {
         }
         for (button, actions) in self.actions.iter_mut() {
             if actions.hold_repeat.is_some()
+                || actions.directional_hold.is_some()
                 || !button.legacy_auto_repeat()
                 || actions.single == ButtonAction::Disabled
                 || actions.double != ButtonAction::Disabled
@@ -1526,6 +1760,11 @@ impl ButtonMappings {
         // 时原样保留；这里保留更高的版本号，旧构建保存后文件仍标记为新版本，
         // 升级回去时不会把数据当成旧格式处理。
         this.schema_version = this.schema_version.max(BUTTON_MAPPINGS_SCHEMA_VERSION);
+        // 手势时间同样在归一化阶段收敛（越界钳制、50ms 取整），不拒绝映射。
+        this.gesture_timing = this.gesture_timing.normalized();
+        for timing in this.gesture_timings_by_model.values_mut() {
+            *timing = timing.normalized();
+        }
         this.applications = crate::registered_apps::normalize_library(this.applications)
             .map_err(SendInputError::Backend)?;
         // 非法聚焦档案整条丢弃（策略与字段不自洽、超出长度/条数上限）。
@@ -1614,6 +1853,39 @@ impl ButtonMappings {
                 return Err(SendInputError::Backend(format!(
                     "按住连续触发指向的动作不支持连续执行（{trigger:?}）"
                 )));
+            }
+        }
+        for (button, actions) in this.actions.iter() {
+            let Some(hold) = actions.directional_hold else {
+                continue;
+            };
+            if actions.hold_repeat.is_some() {
+                return Err(SendInputError::Backend(
+                    "方向键按住与按住连续触发不能同时开启".to_owned(),
+                ));
+            }
+            if !matches!(button, RemoteButton::Left | RemoteButton::Right) {
+                return Err(SendInputError::Backend(
+                    "方向键按住只支持左、右两个按键".to_owned(),
+                ));
+            }
+            let target = match hold {
+                DirectionalHold::Single => &actions.single,
+                DirectionalHold::Long => &actions.long,
+            };
+            if matches!(target, ButtonAction::Unsupported(_)) {
+                // 更高版本动作当前不执行，但按住设置必须原样保留；执行期会跳过。
+                continue;
+            }
+            let ButtonAction::Shortcut { chord } = target else {
+                return Err(SendInputError::Backend(
+                    "方向键按住的目标动作必须是方向键组合".to_owned(),
+                ));
+            };
+            if chord.keys.len() != 1 || !matches!(chord.keys[0], KeyCode::Left | KeyCode::Right) {
+                return Err(SendInputError::Backend(
+                    "方向键按住的目标动作必须是单个左/右方向键".to_owned(),
+                ));
             }
         }
         Ok(this)
@@ -2617,6 +2889,8 @@ mod tests {
             applications: Vec::new(),
             focus_profiles: BTreeMap::new(),
             scroll_regions: BTreeMap::new(),
+            gesture_timing: ButtonGestureTiming::DEFAULT,
+            gesture_timings_by_model: BTreeMap::new(),
             extra: BTreeMap::new(),
         };
         assert_eq!(disabled.mapped_mask(), 0, "总开关关闭时不吞任何键");
@@ -2644,6 +2918,256 @@ mod tests {
         let encoded = serde_json::to_string(&mappings).unwrap();
         let decoded: ButtonMappings = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, mappings);
+    }
+
+    #[test]
+    fn gesture_timing_defaults_are_omitted_from_json() {
+        let mappings = ButtonMappings::default();
+        assert_eq!(
+            mappings.gesture_timing,
+            ButtonGestureTiming {
+                double_click_ms: 300,
+                long_press_ms: 550,
+                repeat_start_ms: 350,
+            }
+        );
+        let json = serde_json::to_value(&mappings).unwrap();
+        assert!(
+            json.get("gestureTiming").is_none(),
+            "默认时间不得落盘：{json}"
+        );
+        let decoded: ButtonMappings = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.gesture_timing, ButtonGestureTiming::DEFAULT);
+        assert!(decoded.extra.is_empty(), "缺省时间不得进 extra");
+    }
+
+    #[test]
+    fn gesture_timing_round_trips_with_camel_case_field_names() {
+        let mut mappings = ButtonMappings::default();
+        mappings.gesture_timing = ButtonGestureTiming {
+            double_click_ms: 450,
+            long_press_ms: 800,
+            repeat_start_ms: 100,
+        };
+        let json = serde_json::to_value(&mappings).unwrap();
+        assert_eq!(
+            json.get("gestureTiming"),
+            Some(&serde_json::json!({
+                "doubleClickMs": 450,
+                "longPressMs": 800,
+                "repeatStartMs": 100,
+            }))
+        );
+        let decoded: ButtonMappings = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(decoded.gesture_timing, mappings.gesture_timing);
+        // 再序列化（旧文件导出/导入往返）必须保留该字段。
+        let again = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(again.get("gestureTiming"), json.get("gestureTiming"));
+    }
+
+    #[test]
+    fn invalid_gesture_timing_clamps_without_rejecting_the_document() {
+        let json = serde_json::json!({
+            "schemaVersion": 6,
+            "enabled": true,
+            "actions": {},
+            "gestureTiming": {
+                "doubleClickMs": 1000,
+                "longPressMs": 123,
+                "repeatStartMs": "not-a-number"
+            }
+        });
+        let decoded: ButtonMappings = serde_json::from_value(json).unwrap();
+        // 越界钳到上限，非步长向下取整到 100，坏类型回落默认值。
+        assert_eq!(decoded.gesture_timing.double_click_ms, 500);
+        assert_eq!(decoded.gesture_timing.long_press_ms, 300);
+        assert_eq!(
+            decoded.gesture_timing.repeat_start_ms,
+            ButtonGestureTiming::DEFAULT.repeat_start_ms
+        );
+        // 整份文档仍可加载并归一化 (含 50ms 取整)。
+        let normalized = decoded.normalized().unwrap();
+        assert!(normalized.gesture_timing.is_normalized());
+
+        // 非对象（数组/字符串）同样只回落默认值，不拒载。
+        for invalid in [serde_json::json!([]), serde_json::json!("bad")] {
+            let json = serde_json::json!({
+                "enabled": true,
+                "actions": {},
+                "gestureTiming": invalid
+            });
+            let decoded: ButtonMappings = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.gesture_timing, ButtonGestureTiming::DEFAULT);
+        }
+    }
+
+    #[test]
+    fn gesture_timing_normalization_rounds_to_fifty_ms_steps() {
+        let normalized = ButtonGestureTiming {
+            double_click_ms: 324,
+            long_press_ms: 574,
+            repeat_start_ms: 2001,
+        }
+        .normalized();
+        assert_eq!(
+            normalized,
+            ButtonGestureTiming {
+                double_click_ms: 300,
+                long_press_ms: 550,
+                repeat_start_ms: 2000,
+            }
+        );
+        assert_eq!(
+            ButtonGestureTiming {
+                double_click_ms: 26,
+                long_press_ms: 275,
+                repeat_start_ms: 0,
+            }
+            .normalized(),
+            ButtonGestureTiming {
+                double_click_ms: 50,
+                long_press_ms: 300,
+                repeat_start_ms: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn gesture_timings_by_model_round_trip_and_omit_empty() {
+        let mappings = ButtonMappings::default();
+        let json = serde_json::to_value(&mappings).unwrap();
+        assert!(
+            json.get("gestureTimingsByModel").is_none(),
+            "空分桶表不得落盘：{json}"
+        );
+
+        let mut mappings = ButtonMappings::default();
+        mappings.gesture_timings_by_model.insert(
+            "rc001".to_owned(),
+            ButtonGestureTiming {
+                double_click_ms: 450,
+                long_press_ms: 900,
+                repeat_start_ms: 100,
+            },
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc003".to_owned(),
+            ButtonGestureTiming {
+                double_click_ms: 200,
+                long_press_ms: 400,
+                repeat_start_ms: 600,
+            },
+        );
+        let mut json = serde_json::to_value(&mappings).unwrap();
+        assert_eq!(
+            json.get("gestureTimingsByModel"),
+            Some(&serde_json::json!({
+                "rc001": {
+                    "doubleClickMs": 450,
+                    "longPressMs": 900,
+                    "repeatStartMs": 100,
+                },
+                "rc003": {
+                    "doubleClickMs": 200,
+                    "longPressMs": 400,
+                    "repeatStartMs": 600,
+                },
+            }))
+        );
+        // 旧文件/更高版本的未知顶层字段必须继续 round-trip（分桶字段是已知字段）。
+        json["futureTopLevel"] = serde_json::json!({ "keep": true });
+        let decoded: ButtonMappings = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            decoded.gesture_timings_by_model,
+            mappings.gesture_timings_by_model
+        );
+        assert_eq!(
+            decoded
+                .extra
+                .get("futureTopLevel")
+                .map(|value| value.0.as_str()),
+            Some("{\"keep\":true}")
+        );
+
+        let again = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(
+            again.get("gestureTimingsByModel"),
+            json.get("gestureTimingsByModel")
+        );
+    }
+
+    #[test]
+    fn gesture_timing_for_prefers_model_bucket_then_legacy_then_default() {
+        let mut mappings = ButtonMappings::default();
+        assert_eq!(
+            mappings.gesture_timing_for(RemoteModel::Rc001),
+            ButtonGestureTiming::DEFAULT
+        );
+
+        // 旧版单值：没有分桶的型号回落到它（含 Unknown）。
+        let legacy = ButtonGestureTiming {
+            double_click_ms: 400,
+            long_press_ms: 700,
+            repeat_start_ms: 200,
+        };
+        mappings.gesture_timing = legacy;
+        assert_eq!(mappings.gesture_timing_for(RemoteModel::Rc001), legacy);
+        assert_eq!(mappings.gesture_timing_for(RemoteModel::Unknown), legacy);
+
+        // 型号桶优先于单值；一旦存在分桶，其它型号回默认值，不能让旧单值
+        // 跨型号泄漏成另一个遥控器的时间。
+        let bucket = ButtonGestureTiming {
+            double_click_ms: 100,
+            long_press_ms: 350,
+            repeat_start_ms: 50,
+        };
+        mappings
+            .gesture_timings_by_model
+            .insert("rc003".to_owned(), bucket);
+        assert_eq!(mappings.gesture_timing_for(RemoteModel::Rc003), bucket);
+        assert_eq!(
+            mappings.gesture_timing_for(RemoteModel::Rc001),
+            ButtonGestureTiming::DEFAULT
+        );
+        assert_eq!(
+            mappings.gesture_timing_for(RemoteModel::Unknown),
+            ButtonGestureTiming::DEFAULT
+        );
+    }
+
+    #[test]
+    fn gesture_timings_by_model_are_normalized_and_tolerate_bad_buckets() {
+        let json = serde_json::json!({
+            "enabled": true,
+            "actions": {},
+            "gestureTimingsByModel": {
+                "rc001": {
+                    "doubleClickMs": 1000,
+                    "longPressMs": 123,
+                    "repeatStartMs": "not-a-number"
+                },
+                "rc003": "not-an-object"
+            }
+        });
+        let decoded: ButtonMappings = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            decoded.gesture_timing_for(RemoteModel::Rc001),
+            ButtonGestureTiming {
+                double_click_ms: 500,
+                long_press_ms: 300,
+                repeat_start_ms: ButtonGestureTiming::DEFAULT.repeat_start_ms,
+            }
+        );
+        assert_eq!(
+            decoded.gesture_timing_for(RemoteModel::Rc003),
+            ButtonGestureTiming::DEFAULT,
+            "坏桶只回落默认值，不拒载整份文档"
+        );
+        let normalized = decoded.normalized().unwrap();
+        assert!(normalized
+            .gesture_timings_by_model
+            .values()
+            .all(ButtonGestureTiming::is_normalized));
     }
 
     #[test]
@@ -2873,7 +3397,7 @@ mod tests {
             normalized.action_for(RemoteButton::Tv, ButtonTrigger::Single),
             ButtonAction::AppSwitcher
         );
-        assert_eq!(BUTTON_MAPPINGS_SCHEMA_VERSION, 5);
+        assert_eq!(BUTTON_MAPPINGS_SCHEMA_VERSION, 7);
     }
 
     #[test]
@@ -2905,7 +3429,7 @@ mod tests {
             "ScrollViewer"
         );
         let normalized = decoded.normalized().unwrap();
-        assert_eq!(normalized.schema_version, 5);
+        assert_eq!(normalized.schema_version, 7);
         assert_eq!(normalized.scroll_regions.len(), 1);
     }
 
@@ -3002,6 +3526,55 @@ mod tests {
         assert!(!off_json.contains("holdRepeat"), "关闭不落字段：{off_json}");
         let decoded: ButtonMappings = serde_json::from_str(&off_json).unwrap();
         assert_eq!(decoded.actions(RemoteButton::Back).hold_repeat, None);
+    }
+
+    #[test]
+    fn directional_hold_serializes_and_normalizes_only_for_arrows() {
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Left,
+            ButtonActions {
+                single: shortcut(&[KeyCode::Left]),
+                directional_hold: Some(DirectionalHold::Single),
+                ..ButtonActions::default()
+            },
+        );
+        let json = serde_json::to_string(&mappings).unwrap();
+        assert!(
+            json.contains("\"directionalHold\":\"single\""),
+            "方向键按住必须落盘：{json}"
+        );
+        let decoded: ButtonMappings = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.actions(RemoteButton::Left).directional_hold,
+            Some(DirectionalHold::Single)
+        );
+        assert_eq!(
+            decoded.normalized().unwrap(),
+            mappings.normalized().unwrap()
+        );
+
+        let mut wrong_button = ButtonMappings::default();
+        wrong_button.actions.insert(
+            RemoteButton::Up,
+            ButtonActions {
+                single: shortcut(&[KeyCode::Up]),
+                directional_hold: Some(DirectionalHold::Single),
+                ..ButtonActions::default()
+            },
+        );
+        assert!(wrong_button.normalized().is_err());
+
+        let mut wrong_action = ButtonMappings::default();
+        wrong_action.actions.insert(
+            RemoteButton::Left,
+            ButtonActions {
+                single: shortcut(&[KeyCode::Backspace]),
+                directional_hold: Some(DirectionalHold::Single),
+                ..ButtonActions::default()
+            },
+        );
+        assert!(wrong_action.normalized().is_err());
     }
 
     #[test]

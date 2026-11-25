@@ -2,8 +2,9 @@
 //! `RemoteButtonGestureRecognizer` + `HIDRemoteScheduler`，并按 Windows 产品
 //! 口径扩展（2026-10-05）：「按住连续触发」是显式开关（每键至多一个槽位）。
 //!
-//! - 双击窗口 300ms、长按阈值 550ms、连续触发起始 350ms（逐键间隔：
-//!   返回 50ms、其余按键 100ms，见 `RemoteButton::repeat_interval`）。
+//! - 双击窗口 300ms、长按阈值 550ms、连续触发起始 350ms 为**默认值**，可通过
+//!   按键映射文档的 `gestureTiming` 覆盖（逐键间隔：返回 50ms、其余按键 100ms，
+//!   见 `RemoteButton::repeat_interval`）。
 //! - 开关取值与行为（`ButtonActions::hold_repeat`）：
 //!   - 关闭 → 单击在按下沿立即触发（无双击/长按时）或经双击窗确认；按住不连续；
 //!   - 单击 → 按住连续触发单击动作：无双击时 350ms 起连拍；有双击时按住超过
@@ -22,7 +23,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::raw_input::RemoteButton;
-use crate::send_input::{ButtonAction, ButtonMappings, ButtonTrigger};
+use crate::send_input::{ButtonAction, ButtonGestureTiming, ButtonMappings, ButtonTrigger};
 
 /// 双击判定窗口（第二击按下沿之间的最大间隔），Mac 同款。
 pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
@@ -31,6 +32,15 @@ pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(550);
 /// 连发起始延迟（按住多久开始重复单击），Mac 同款。
 pub const REPEAT_START_DELAY: Duration = Duration::from_millis(350);
 
+// 默认常量必须与映射文档的默认时间一致：两处漂移会让「缺省 = 旧行为」失效。
+const _: () = {
+    assert!(
+        DOUBLE_CLICK_WINDOW.as_millis() == ButtonGestureTiming::DEFAULT.double_click_ms as u128
+    );
+    assert!(LONG_PRESS_THRESHOLD.as_millis() == ButtonGestureTiming::DEFAULT.long_press_ms as u128);
+    assert!(REPEAT_START_DELAY.as_millis() == ButtonGestureTiming::DEFAULT.repeat_start_ms as u128);
+};
+
 /// 单个按键的手势配置（由按键映射推导）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GestureConfig {
@@ -38,7 +48,7 @@ pub struct GestureConfig {
     pub single_configured: bool,
     /// 双击列已配置 → 单击等待双击窗口。
     pub double_enabled: bool,
-    /// 长按列已配置 → 按住 550ms 触发长按。
+    /// 长按列已配置 → 按住 [`Self::long_press`] 后触发长按。
     pub long_enabled: bool,
     /// 单击保持连续触发（开关=单击、动作可连续、非锁屏延迟；长按为空）。
     pub repeat_single: Option<Duration>,
@@ -47,15 +57,36 @@ pub struct GestureConfig {
     /// 会切换交互桌面的单击动作必须等本次实体按键完整释放后执行，确保
     /// 原始 DOWN/UP 先由门控成对处理，不把迟到边沿带到锁屏/解锁阶段。
     pub defer_single_until_release: bool,
+    /// 双击判定窗口（取自映射文档，默认 [`DOUBLE_CLICK_WINDOW`]）。
+    pub double_click_window: Duration,
+    /// 长按阈值（取自映射文档，默认 [`LONG_PRESS_THRESHOLD`]）。
+    pub long_press: Duration,
+    /// 按住连续触发的起始延迟（取自映射文档，默认 [`REPEAT_START_DELAY`]）。
+    pub repeat_start: Duration,
 }
 
 impl GestureConfig {
     /// 从按键映射推导某键的手势配置。未配置任何动作 → None（识别器忽略该键）。
+    ///
+    /// 引擎按型号选桶时使用 [`Self::for_button_with_timing`]；本方法保留单值
+    /// 语义供测试与诊断。
+    #[allow(dead_code)]
     pub fn for_button(mappings: &ButtonMappings, button: RemoteButton) -> Option<Self> {
+        Self::for_button_with_timing(mappings, button, mappings.gesture_timing.normalized())
+    }
+
+    /// 同 [`Self::for_button`]，但显式指定手势时间（引擎按当前遥控器型号选择
+    /// `gestureTimingsByModel` 桶，见 `ButtonMappings::gesture_timing_for`）。
+    pub fn for_button_with_timing(
+        mappings: &ButtonMappings,
+        button: RemoteButton,
+        timing: ButtonGestureTiming,
+    ) -> Option<Self> {
         let actions = mappings.actions(button);
         if !mappings.enabled || !actions.any_configured() {
             return None;
         }
+        let timing = timing.normalized();
         let single_configured = actions.single != ButtonAction::Disabled;
         let double_enabled = actions.double != ButtonAction::Disabled;
         let long_enabled = actions.long != ButtonAction::Disabled;
@@ -87,6 +118,9 @@ impl GestureConfig {
             repeat_single,
             repeat_long,
             defer_single_until_release,
+            double_click_window: timing.double_click_window(),
+            long_press: timing.long_press_threshold(),
+            repeat_start: timing.repeat_start_delay(),
         })
     }
 
@@ -133,10 +167,23 @@ impl GestureRecognizer {
 
     /// 按当前映射重建配置。配置变化会重置全部手势状态（进行中的双击窗口、
     /// 长按计时与连发一并取消，不触发任何动作）。
+    ///
+    /// 引擎使用 [`Self::configure_with_timing`]（按型号选桶）；本方法保留单值
+    /// `gestureTiming` 语义供测试与诊断。
+    #[allow(dead_code)]
     pub fn configure(&mut self, mappings: &ButtonMappings) {
+        self.configure_with_timing(mappings, mappings.gesture_timing.normalized());
+    }
+
+    /// 按当前映射 + 指定时间重建配置（引擎按当前遥控器型号选桶后调用）。
+    pub fn configure_with_timing(
+        &mut self,
+        mappings: &ButtonMappings,
+        timing: ButtonGestureTiming,
+    ) {
         self.buttons.clear();
         for button in crate::raw_input::ALL_BUTTONS {
-            if let Some(config) = GestureConfig::for_button(mappings, button) {
+            if let Some(config) = GestureConfig::for_button_with_timing(mappings, button, timing) {
                 self.buttons
                     .insert(button, (config, ButtonGestureState::default()));
             }
@@ -167,19 +214,19 @@ impl GestureRecognizer {
         state.pressed = true;
         state.hold_concluded = false;
         if config.long_enabled {
-            state.long_deadline = Some(now + LONG_PRESS_THRESHOLD);
+            state.long_deadline = Some(now + config.long_press);
         }
         if config.raw_path() {
-            // 原始单击路径：按下沿立即触发单击；开关=单击时 350ms 起连续触发。
+            // 原始单击路径：按下沿立即触发单击；开关=单击时按住到起拍延迟后连续触发。
             if config.repeat_single.is_some() {
-                state.repeat_deadline = Some(now + REPEAT_START_DELAY);
+                state.repeat_deadline = Some(now + config.repeat_start);
             }
             return vec![ButtonTrigger::Single];
         }
         if config.double_enabled && config.repeat_single.is_some() {
             // 开关=单击 + 双击：按住超过双击窗即确认为单击（不补发第一击）。
-            state.single_conclude_deadline = Some(now + DOUBLE_CLICK_WINDOW);
-            state.repeat_deadline = Some(now + REPEAT_START_DELAY);
+            state.single_conclude_deadline = Some(now + config.double_click_window);
+            state.repeat_deadline = Some(now + config.repeat_start);
         }
         Vec::new()
     }
@@ -217,7 +264,7 @@ impl GestureRecognizer {
         }
         if config.double_enabled {
             state.waiting_for_second = true;
-            state.double_deadline = Some(now + DOUBLE_CLICK_WINDOW);
+            state.double_deadline = Some(now + config.double_click_window);
             return Vec::new();
         }
         if config.raw_path() {
@@ -368,7 +415,7 @@ impl GestureRecognizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::send_input::{ButtonAction, ButtonActions, KeyChord, KeyCode};
+    use crate::send_input::{ButtonAction, ButtonActions, ButtonGestureTiming, KeyChord, KeyCode};
 
     fn mappings_with(
         button: RemoteButton,
@@ -1221,5 +1268,260 @@ mod tests {
             recognizer.advance(t1 + LONG_PRESS_THRESHOLD),
             vec![(RemoteButton::Ok, ButtonTrigger::Long)]
         );
+    }
+
+    /// 覆盖默认手势时间：映射文档里的 `gestureTiming` 必须真正驱动计时。
+    fn with_gesture_timing(
+        mut mappings: ButtonMappings,
+        timing: ButtonGestureTiming,
+    ) -> ButtonMappings {
+        mappings.gesture_timing = timing;
+        mappings
+    }
+
+    #[test]
+    fn custom_double_click_window_is_honored() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&with_gesture_timing(
+            mappings_with(
+                RemoteButton::Up,
+                Some(KeyCode::Up),
+                Some(KeyCode::Down),
+                None,
+            ),
+            ButtonGestureTiming {
+                double_click_ms: 500,
+                ..ButtonGestureTiming::DEFAULT
+            },
+        ));
+
+        assert!(recognizer.press(RemoteButton::Up, t0).is_empty());
+        let released = t0 + Duration::from_millis(40);
+        assert!(recognizer.release(RemoteButton::Up, released).is_empty());
+        // 默认 300ms 已过、配置的 500ms 未到：不得补发单击。
+        assert_eq!(
+            recognizer.advance(released + Duration::from_millis(499)),
+            vec![]
+        );
+        assert_eq!(
+            recognizer.advance(released + Duration::from_millis(500)),
+            vec![(RemoteButton::Up, ButtonTrigger::Single)]
+        );
+    }
+
+    #[test]
+    fn custom_double_click_window_drives_single_conclude_when_repeating() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&with_gesture_timing(
+            mappings_with_repeat(
+                RemoteButton::Up,
+                Some(KeyCode::Up),
+                Some(KeyCode::Down),
+                None,
+                Some(ButtonTrigger::Single),
+            ),
+            ButtonGestureTiming {
+                double_click_ms: 500,
+                ..ButtonGestureTiming::DEFAULT
+            },
+        ));
+
+        // 双击共存下的按住确认计时器 = 配置的双击窗（上限 500ms）。
+        assert!(recognizer.press(RemoteButton::Up, t0).is_empty());
+        assert_eq!(recognizer.advance(t0 + Duration::from_millis(499)), vec![]);
+        assert_eq!(
+            recognizer.advance(t0 + Duration::from_millis(500)),
+            vec![(RemoteButton::Up, ButtonTrigger::Single)]
+        );
+    }
+
+    #[test]
+    fn custom_long_press_threshold_is_honored() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&with_gesture_timing(
+            mappings_with(
+                RemoteButton::Ok,
+                Some(KeyCode::Enter),
+                None,
+                Some(KeyCode::Escape),
+            ),
+            ButtonGestureTiming {
+                long_press_ms: 1000,
+                ..ButtonGestureTiming::DEFAULT
+            },
+        ));
+
+        assert!(recognizer.press(RemoteButton::Ok, t0).is_empty());
+        assert_eq!(recognizer.advance(t0 + Duration::from_millis(999)), vec![]);
+        assert_eq!(
+            recognizer.advance(t0 + Duration::from_millis(1000)),
+            vec![(RemoteButton::Ok, ButtonTrigger::Long)]
+        );
+        assert!(recognizer
+            .release(RemoteButton::Ok, t0 + Duration::from_millis(1200))
+            .is_empty());
+    }
+
+    #[test]
+    fn custom_repeat_start_delay_is_honored() {
+        let t0 = Instant::now();
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure(&with_gesture_timing(
+            mappings_with_repeat(
+                RemoteButton::Up,
+                Some(KeyCode::Up),
+                None,
+                None,
+                Some(ButtonTrigger::Single),
+            ),
+            ButtonGestureTiming {
+                repeat_start_ms: 800,
+                ..ButtonGestureTiming::DEFAULT
+            },
+        ));
+
+        assert_eq!(
+            recognizer.press(RemoteButton::Up, t0),
+            vec![ButtonTrigger::Single]
+        );
+        assert_eq!(recognizer.advance(t0 + Duration::from_millis(799)), vec![]);
+        assert_eq!(
+            recognizer.advance(t0 + Duration::from_millis(800)),
+            vec![(RemoteButton::Up, ButtonTrigger::Single)]
+        );
+    }
+
+    /// 同一份映射里的两个型号桶必须产生不同的双击/长按行为。
+    #[test]
+    fn per_model_buckets_change_double_and_long_behavior() {
+        let mut mappings = mappings_with(
+            RemoteButton::Ok,
+            Some(KeyCode::Enter),
+            Some(KeyCode::Space),
+            Some(KeyCode::Escape),
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc001".to_owned(),
+            ButtonGestureTiming {
+                double_click_ms: 500,
+                long_press_ms: 1000,
+                repeat_start_ms: 350,
+            },
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc003".to_owned(),
+            ButtonGestureTiming {
+                double_click_ms: 100,
+                long_press_ms: 350,
+                repeat_start_ms: 350,
+            },
+        );
+
+        let rc001 = mappings.gesture_timing_for(crate::RemoteModel::Rc001);
+        let rc003 = mappings.gesture_timing_for(crate::RemoteModel::Rc003);
+        assert_ne!(rc001, rc003, "两个桶必须读出不同时间");
+
+        // 双击窗口：快速点按后 300ms 时，rc001 仍在窗口内，rc003 已经补发单击。
+        let t0 = Instant::now();
+        let released = t0 + Duration::from_millis(40);
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure_with_timing(&mappings, rc001);
+        assert!(recognizer.press(RemoteButton::Ok, t0).is_empty());
+        assert!(recognizer.release(RemoteButton::Ok, released).is_empty());
+        assert_eq!(
+            recognizer.advance(released + Duration::from_millis(300)),
+            vec![],
+            "rc001 的 500ms 双击窗不得提前补发单击"
+        );
+        assert_eq!(
+            recognizer.advance(released + Duration::from_millis(500)),
+            vec![(RemoteButton::Ok, ButtonTrigger::Single)]
+        );
+
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure_with_timing(&mappings, rc003);
+        assert!(recognizer.press(RemoteButton::Ok, t0).is_empty());
+        assert!(recognizer.release(RemoteButton::Ok, released).is_empty());
+        assert_eq!(
+            recognizer.advance(released + Duration::from_millis(100)),
+            vec![(RemoteButton::Ok, ButtonTrigger::Single)],
+            "rc003 的 100ms 双击窗应已补发单击"
+        );
+
+        // 长按阈值：按住 500ms 时 rc003 已触发长按，rc001 还没有。
+        let t1 = t0 + Duration::from_secs(2);
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure_with_timing(&mappings, rc001);
+        assert!(recognizer.press(RemoteButton::Ok, t1).is_empty());
+        assert_eq!(recognizer.advance(t1 + Duration::from_millis(500)), vec![]);
+
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure_with_timing(&mappings, rc003);
+        assert!(recognizer.press(RemoteButton::Ok, t1).is_empty());
+        assert_eq!(
+            recognizer.advance(t1 + Duration::from_millis(500)),
+            vec![(RemoteButton::Ok, ButtonTrigger::Long)]
+        );
+    }
+
+    /// 切换“当前型号”只重配时间，不改写映射；同一识别器换桶后立即改变行为。
+    #[test]
+    fn switching_active_model_reconfigures_without_rewriting_mappings() {
+        let mut mappings = mappings_with(
+            RemoteButton::Up,
+            Some(KeyCode::Up),
+            Some(KeyCode::Down),
+            None,
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc001".to_owned(),
+            ButtonGestureTiming {
+                double_click_ms: 500,
+                ..ButtonGestureTiming::DEFAULT
+            },
+        );
+        mappings.gesture_timings_by_model.insert(
+            "rc003".to_owned(),
+            ButtonGestureTiming {
+                double_click_ms: 100,
+                ..ButtonGestureTiming::DEFAULT
+            },
+        );
+        let snapshot = mappings.clone();
+
+        let t0 = Instant::now();
+        let released = t0 + Duration::from_millis(40);
+        let mut recognizer = GestureRecognizer::new();
+        recognizer.configure_with_timing(
+            &mappings,
+            mappings.gesture_timing_for(crate::RemoteModel::Rc001),
+        );
+        assert!(recognizer.press(RemoteButton::Up, t0).is_empty());
+        assert!(recognizer.release(RemoteButton::Up, released).is_empty());
+        assert_eq!(
+            recognizer.advance(released + Duration::from_millis(300)),
+            vec![],
+            "rc001 桶下 300ms 仍在双击窗内"
+        );
+
+        // 模拟 set_active_model(Rc003)：重建配置，映射内容不变。
+        recognizer.configure_with_timing(
+            &mappings,
+            mappings.gesture_timing_for(crate::RemoteModel::Rc003),
+        );
+        let t1 = t0 + Duration::from_secs(2);
+        assert!(recognizer.press(RemoteButton::Up, t1).is_empty());
+        assert!(recognizer
+            .release(RemoteButton::Up, t1 + Duration::from_millis(40))
+            .is_empty());
+        assert_eq!(
+            recognizer.advance(t1 + Duration::from_millis(140)),
+            vec![(RemoteButton::Up, ButtonTrigger::Single)],
+            "rc003 桶下 100ms 双击窗已过"
+        );
+        assert_eq!(mappings, snapshot, "切换型号不得改写映射");
     }
 }
