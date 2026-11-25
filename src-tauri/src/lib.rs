@@ -2231,10 +2231,12 @@ fn helper_startup_failing(streak: u32) -> bool {
 ///
 /// 与 `HELPER_STARTUP_FAILURE_ACCEPTS` 互补：后者要求"握手成功过一瞬"；
 /// 2026-11-25 现场是助手连一次都没连上（accepts 恒为 0、日志里除一次升级清理外
-/// 没有任何 `[ENV]`/`[APP-BRIDGE]`），只能看触发轮数。10 轮覆盖快速期与两次
-/// `/end`+`/run` 兜底，约 60–90 s；此时界面必须从 `starting`（不显示文案）
-/// 进入 `inactive`，否则用户只看到"开关开着、豆包没反应、没有任何提示"。
-const HELPER_NOT_CONNECTED_INACTIVE_ROUNDS: u32 = 10;
+/// 没有任何 `[ENV]`/`[APP-BRIDGE]`），只能看触发轮数。5 轮 = 第一次
+/// `/end`+`/run` 兜底（`AUTO_TRIGGER_ESCALATE_ATTEMPT`），约 25–30 s；
+/// 再晚（10 轮约 2.5 分钟）用户可能已经走完向导第⑥步，提示就失去意义。
+/// 此时界面必须从 `starting`（不显示文案）进入 `inactive`，否则用户只看到
+/// "开关开着、豆包没反应、没有任何提示"。
+const HELPER_NOT_CONNECTED_INACTIVE_ROUNDS: u32 = 5;
 
 fn helper_not_connected_failing(consecutive: u32) -> bool {
     consecutive >= HELPER_NOT_CONNECTED_INACTIVE_ROUNDS
@@ -7472,7 +7474,7 @@ mod tests {
         assert!(helper_not_connected_failing(
             HELPER_NOT_CONNECTED_INACTIVE_ROUNDS + 1
         ));
-        assert_eq!(HELPER_NOT_CONNECTED_INACTIVE_ROUNDS, 10);
+        assert_eq!(HELPER_NOT_CONNECTED_INACTIVE_ROUNDS, 5);
     }
 
     /// 启动失败只压「没有所有权」的轮次（issue #291）。

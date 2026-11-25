@@ -149,7 +149,8 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
   `captureHealth=inactive` 且已选豆包时显示 `captureInactiveText`（复用既有文案）。
   第④步替换「已开启」句、第⑤步开关旁、第⑥步输入框上方各一张提示卡。
   `available` 仍只表示架构可用，不再被当成“已生效”。
-- 后端 `rc003_auto_trigger_reconcile` 新增“桥在监听、连续 10 轮没有助手连接”判据，
+- 后端 `rc003_auto_trigger_reconcile` 新增“桥在监听、连续 5 轮没有助手连接”判据
+  （第一次 `/end`+`/run` 兜底轮，约 25–30 s；10 轮约 2.5 分钟，向导会等不到），
   与既有 accepts 判据并列；发布 `capture_unavailable=startup_failing` 与 `inactive`，
   日志 `reason=helper_not_connected accepts=0 rounds=…`（accepts>0 仍为
   `helper_startup_failing`）。这正覆盖本机“助手一次 [ENV] 都没有”的形态。

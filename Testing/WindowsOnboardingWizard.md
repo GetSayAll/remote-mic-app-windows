@@ -269,7 +269,7 @@
      说明修的是结束方向撕裂帧，不是音频真的没送到。
    - 语音测试轮询 IPC 往返 ≥1 s：`phase=poll result=unknown reason=slow_snapshot detail=rt_<ms>`；
      Rust 侧对应 `runtime_snapshot phase=completed terminal_result=slow elapsed_ms=… connection_ms=… audio_ms=… raw_input_ms=… send_input_ms=… button_mapping_ms=… voice_priority_ms=…`。
-   - 助手从未连上时，`auto_trigger` 第 10 轮后应出现
+   - 助手从未连上时，`auto_trigger` 第 5 轮（第一次 `/end`+`/run` 兜底，约 25–30 s）后应出现
      `action=capture_unavailable reason=helper_not_connected rounds=<N>`，界面由 starting 转 inactive；
      `accepts>0` 的形态仍走 `reason=helper_startup_failing`，两者不要混为一谈。
 
