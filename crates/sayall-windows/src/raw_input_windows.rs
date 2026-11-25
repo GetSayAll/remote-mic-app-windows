@@ -274,6 +274,7 @@ struct ListenerContext {
     /// 只用于报告流诊断：设备节点在位不代表报告还在到。`None` = 监听器启动后
     /// 还没收到过报告；间隔 ≥ `REPORT_FLOW_LOG_GAP` 时落一行。
     last_report_at: Option<Instant>,
+    last_scan: Option<RawInputScanSignature>,
 }
 
 fn voice_f5_wake_edge(was_pressed: bool, is_pressed: bool) -> bool {
@@ -333,7 +334,8 @@ fn run_listener(
     // 先枚举当前在位设备，但**不**以“找不到”作为失败退出：设备缺失时仍要建窗 +
     // 注册 RIDEV_DEVNOTIFY，从而能收到 WM_INPUT_DEVICE_CHANGE（GIDC_ARRIVAL），
     // 待系统 HOGP 接口恢复时立即重绑，而非靠上层 10s 轮询重启。
-    let paths = enumerate_matching_device_paths()?;
+    let scan = scan_raw_input_devices()?;
+    let paths = &scan.paths;
     {
         let mut snapshot = snapshot.lock().unwrap();
         snapshot.matched_device_count = paths.len() as u32;
@@ -412,7 +414,7 @@ fn run_listener(
     // 这 10 秒 | 更长窗口内按键完全不可用，而且失败与用户看到的现象毫无关联。候选只决定
     // "从哪一路开始听"；真正的归属由「应用正在用的那支」（`remote_target`）在枚举过滤
     // （`filter_paths_for_target`）、绑定审计与报文接受（同地址的其他实例路径也接受）三处收窄。
-    let selected_path = match select_single_device_path(&paths) {
+    let selected_path = match select_single_device_path(paths) {
         Ok(path) => normalize_device_path(&path),
         Err(DevicePathError::Missing) => String::new(),
         Err(DevicePathError::Ambiguous(count)) => {
@@ -434,6 +436,7 @@ fn run_listener(
             // 启动时就绑定成功 = 设备此刻在位；空路径是 Awaiting，等接口出现。
             binding_present: !selected_path.is_empty(),
             last_report_at: None,
+            last_scan: Some(scan.signature()),
         });
     });
     // 每次监听器启动重置"目标兜底路径"的日志标记（2026-10-13）。
@@ -452,6 +455,7 @@ fn run_listener(
     // 启动时的绑定结论要留痕：后续所有 binding_audit 记录都以此为基准，
     // 没有这一条就无法判断"是从未绑上"还是"绑上后掉了"（2026-09-18）。
     // 只记数量与相位；路径含设备实例身份，按 LOGGING.md 不落盘。
+    crate::ble::gatt_note(raw_input_scan_note(&scan));
     crate::ble::gatt_note(format!(
         "raw_input binding_initial matched_device_count={} phase={}",
         paths.len(),
@@ -634,15 +638,24 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
             Some(context) => context,
             None => return,
         };
+        // 非遥控器设备的插拔也会改变“系统里到底有没有 HID”这个事实；
+        // 只在枚举签名变化时落一行，设备稳定时不刷屏。
+        if !is_remote {
+            if let Ok(scan) = scan_raw_input_devices() {
+                let _ = log_scan_if_changed(context, &scan);
+            }
+        }
         if event == GIDC_ARRIVAL {
             // 遥控器 HID 接口恢复（或首次出现）：重新枚举并绑定，无需重启监听器。
             if is_remote || context.selected_path.is_empty() {
                 let was_unbound = context.selected_path.is_empty();
-                let paths = match enumerate_matching_device_paths() {
-                    Ok(paths) => paths,
+                let scan = match scan_raw_input_devices() {
+                    Ok(scan) => scan,
                     Err(_) => return,
                 };
-                if let Ok(found) = select_single_device_path(&paths) {
+                let _ = log_scan_if_changed(context, &scan);
+                let paths = &scan.paths;
+                if let Ok(found) = select_single_device_path(paths) {
                     context.selected_path = normalize_device_path(&found);
                     let mut state = context.snapshot.lock().unwrap();
                     state.phase = RawInputPhase::Ready;
@@ -660,7 +673,7 @@ fn handle_device_change(handle: HRAWINPUT, event: u32) {
                     // 遥控器 HID 接口已回到无线电上：通知 ble 立即重试，
                     // 不必等退避到期（只提前，不延后/不门控）。
                     // 只在确实绑定到遥控器时发出——`paths` 已由
-                    // `enumerate_matching_device_paths` 过滤为匹配设备。
+                    // `scan_raw_input_devices` 过滤为匹配设备。
                     notify_device_arrived();
                 } else if was_unbound && is_remote {
                     // 此前未绑定、遥控器接口已出现但暂未选出唯一路径：保持等待。
@@ -707,8 +720,8 @@ fn audit_binding() {
             Some(context) => context,
             None => return,
         };
-        let paths = match enumerate_matching_device_paths() {
-            Ok(paths) => paths,
+        let scan = match scan_raw_input_devices() {
+            Ok(scan) => scan,
             Err(error) => {
                 // 枚举本身失败（系统级错误）：保留现有绑定，只在边沿记录一次，
                 // 不用一次探测失败去推翻一个可能仍然有效的绑定。
@@ -721,6 +734,8 @@ fn audit_binding() {
                 return;
             }
         };
+        let _ = log_scan_if_changed(context, &scan);
+        let paths = &scan.paths;
         let still_bound = !context.selected_path.is_empty()
             && paths
                 .iter()
@@ -981,7 +996,97 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
     })
 }
 
-fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawInputScanSignature {
+    total_devices: usize,
+    keyboard_devices: usize,
+    hid_devices: usize,
+    name_failures: usize,
+    remote_paths: usize,
+    matched_paths: usize,
+    target_known: bool,
+}
+
+/// 一次 Raw Input 设备枚举的只读统计（2026-11-25，issue #104）。
+///
+/// `matched_device_count=0` 只说明“没有匹配到遥控器 HID”。本统计补上
+/// `total_devices` / `hid_devices` / `name_failures` / `remote_paths`，用于区分
+/// “系统里一个 HID 都没有”“HID 枚举正常但遥控器接口不在”“遥控器接口在但被
+/// 目标地址过滤掉”三种完全不同的现场。只记录数量，不记录路径、名称、VID/PID。
+#[derive(Debug)]
+struct RawInputDeviceScan {
+    total_devices: usize,
+    keyboard_devices: usize,
+    hid_devices: usize,
+    name_failures: usize,
+    remote_paths: usize,
+    target_known: bool,
+    paths: Vec<String>,
+}
+
+impl RawInputDeviceScan {
+    fn empty() -> Self {
+        Self {
+            total_devices: 0,
+            keyboard_devices: 0,
+            hid_devices: 0,
+            name_failures: 0,
+            remote_paths: 0,
+            target_known: crate::remote_target::get().is_some(),
+            paths: Vec::new(),
+        }
+    }
+
+    fn signature(&self) -> RawInputScanSignature {
+        RawInputScanSignature {
+            total_devices: self.total_devices,
+            keyboard_devices: self.keyboard_devices,
+            hid_devices: self.hid_devices,
+            name_failures: self.name_failures,
+            remote_paths: self.remote_paths,
+            matched_paths: self.paths.len(),
+            target_known: self.target_known,
+        }
+    }
+}
+
+fn raw_input_scan_note(scan: &RawInputDeviceScan) -> String {
+    let reason = if scan.total_devices == 0 {
+        "no_devices"
+    } else if scan.remote_paths == 0 {
+        "no_remote_hid"
+    } else if scan.paths.is_empty() && scan.target_known {
+        "target_filtered"
+    } else if scan.paths.len() > 1 {
+        "ambiguous"
+    } else {
+        "matched"
+    };
+    format!(
+        "raw_input scan phase=completed total_devices={} keyboard_devices={} hid_devices={} \
+         name_failures={} remote_paths={} matched_device_count={} target_known={} reason={reason}",
+        scan.total_devices,
+        scan.keyboard_devices,
+        scan.hid_devices,
+        scan.name_failures,
+        scan.remote_paths,
+        scan.paths.len(),
+        if scan.target_known { "yes" } else { "no" }
+    )
+}
+
+/// 只在枚举签名变化时落一行，避免 10 秒一次的审计刷屏（LOGGING.md）。
+fn log_scan_if_changed(context: &mut ListenerContext, scan: &RawInputDeviceScan) -> bool {
+    let signature = scan.signature();
+    if context.last_scan == Some(signature) {
+        return false;
+    }
+    context.last_scan = Some(signature);
+    crate::ble::gatt_note(raw_input_scan_note(scan));
+    true
+}
+
+fn scan_raw_input_devices() -> Result<RawInputDeviceScan, String> {
     let mut count = 0u32;
     let list_size = size_of::<RAWINPUTDEVICELIST>() as u32;
     let first = unsafe { GetRawInputDeviceList(None, &mut count, list_size) };
@@ -989,7 +1094,7 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
         return Err("GetRawInputDeviceList size query failed".to_owned());
     }
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok(RawInputDeviceScan::empty());
     }
     let mut devices = vec![RAWINPUTDEVICELIST::default(); count as usize];
     let written =
@@ -998,23 +1103,44 @@ fn enumerate_matching_device_paths() -> Result<Vec<String>, String> {
         return Err("GetRawInputDeviceList enumeration failed".to_owned());
     }
 
-    let mut paths = Vec::new();
+    let mut total_devices = 0usize;
+    let mut keyboard_devices = 0usize;
+    let mut hid_devices = 0usize;
+    let mut name_failures = 0usize;
+    let mut remote_paths = Vec::new();
     for device in devices.into_iter().take(written as usize) {
-        if device.dwType != RIM_TYPEKEYBOARD && device.dwType != RIM_TYPEHID {
+        total_devices += 1;
+        if device.dwType == RIM_TYPEKEYBOARD {
+            keyboard_devices += 1;
+        } else if device.dwType == RIM_TYPEHID {
+            hid_devices += 1;
+        } else {
             continue;
         }
-        if let Ok(path) = get_device_name(device.hDevice) {
-            if crate::raw_input::device_path_matches_xiaomi_remote(&path) {
-                paths.push(path);
+        match get_device_name(device.hDevice) {
+            Ok(path) => {
+                if crate::raw_input::device_path_matches_xiaomi_remote(&path) {
+                    remote_paths.push(path);
+                }
             }
+            Err(_) => name_failures += 1,
         }
     }
     // 两台同型号遥控器同时在线时按「应用正在用的那支」收窄候选（2026-10-13）：
     // 地址未知时这一行是恒等变换（行为与过去完全一致）。
-    Ok(crate::raw_input::filter_paths_for_target(
-        &paths,
-        crate::remote_target::get(),
-    ))
+    let target = crate::remote_target::get();
+    let target_known = target.is_some();
+    let paths = crate::raw_input::filter_paths_for_target(&remote_paths, target);
+    let remote_paths = remote_paths.len();
+    Ok(RawInputDeviceScan {
+        total_devices,
+        keyboard_devices,
+        hid_devices,
+        name_failures,
+        remote_paths,
+        target_known,
+        paths,
+    })
 }
 
 fn get_device_name(device: windows::Win32::Foundation::HANDLE) -> Result<String, String> {
@@ -1051,7 +1177,64 @@ fn record_failure(snapshot: &Arc<Mutex<RawInputSnapshot>>, error: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::voice_f5_wake_edge;
+    use super::{raw_input_scan_note, voice_f5_wake_edge, RawInputDeviceScan};
+
+    fn scan(
+        total_devices: usize,
+        keyboard_devices: usize,
+        hid_devices: usize,
+        name_failures: usize,
+        remote_paths: usize,
+        matched_paths: usize,
+        target_known: bool,
+    ) -> RawInputDeviceScan {
+        RawInputDeviceScan {
+            total_devices,
+            keyboard_devices,
+            hid_devices,
+            name_failures,
+            remote_paths,
+            target_known,
+            paths: vec!["private-device-path".to_owned(); matched_paths],
+        }
+    }
+
+    #[test]
+    fn scan_note_distinguishes_absent_hid_from_filtered_target() {
+        let no_hid = raw_input_scan_note(&scan(4, 2, 1, 0, 0, 0, false));
+        assert!(
+            no_hid.starts_with("raw_input scan phase=completed"),
+            "{no_hid}"
+        );
+        assert!(no_hid.contains("total_devices=4"), "{no_hid}");
+        assert!(no_hid.contains("keyboard_devices=2"), "{no_hid}");
+        assert!(no_hid.contains("hid_devices=1"), "{no_hid}");
+        assert!(no_hid.contains("remote_paths=0"), "{no_hid}");
+        assert!(no_hid.contains("matched_device_count=0"), "{no_hid}");
+        assert!(no_hid.contains("target_known=no"), "{no_hid}");
+        assert!(no_hid.contains("reason=no_remote_hid"), "{no_hid}");
+
+        let filtered = raw_input_scan_note(&scan(4, 1, 2, 0, 1, 0, true));
+        assert!(filtered.contains("target_known=yes"), "{filtered}");
+        assert!(filtered.contains("reason=target_filtered"), "{filtered}");
+
+        let empty = raw_input_scan_note(&scan(0, 0, 0, 0, 0, 0, false));
+        assert!(empty.contains("reason=no_devices"), "{empty}");
+
+        let matched = raw_input_scan_note(&scan(3, 1, 2, 0, 1, 1, true));
+        assert!(matched.contains("reason=matched"), "{matched}");
+
+        let ambiguous = raw_input_scan_note(&scan(3, 1, 2, 0, 2, 2, true));
+        assert!(ambiguous.contains("reason=ambiguous"), "{ambiguous}");
+    }
+
+    #[test]
+    fn scan_note_never_leaks_device_paths() {
+        let note = raw_input_scan_note(&scan(2, 1, 1, 1, 1, 1, true));
+        assert!(!note.contains("private-device-path"), "{note}");
+        assert!(!note.contains("vid_"), "{note}");
+        assert!(!note.contains("pid_"), "{note}");
+    }
 
     #[test]
     fn voice_f5_wakes_reconnect_once_per_physical_hold() {
