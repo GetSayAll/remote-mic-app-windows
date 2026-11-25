@@ -160,15 +160,19 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
 （会重新弹一次 UAC）即可重建计划任务，`settings.json` 与 `button-mappings.json` 保留。
 2026-11-25 的 5 轮 `helper_not_connected` + 提示会让用户看到这一步。
 
-待确认/建议修复：
+待确认/修复决定：
 
 - 失败状态的 `helper-task.log` 与任务 XML 已被清数据覆盖，无法确认具体是 `<Command>` 路径、
   Enabled、登录类型还是 `LastTaskResult`；需测试机人为构造 stale task 复现。
-- 启动对账增加任务健康检查：`<Command>` 全路径存在、`<Enabled>true`、参数含
-  `--follow-app`；失败则 `CaptureRevoke` 回落开关并显示既有「重新打开一次」文案。
-- 更根治：保留数据升级时，由提权的安装器重跑 `sayall-helper --install-task` 刷新任务
-  （任务本应跨升级幸存，但要用当前路径/参数重建）；需要安装/升级生命周期测试。
-- 日志补一行启动任务摘要（只布尔/枚举：`task_installed`、`command_present`、`enabled`、
+- **启动对账增加任务健康检查（本轮实现）**：读 `<Command>` 全路径是否存在、是否指向当前
+  助手，任务是否 `Enabled`，登录类型/运行级别是否仍是助手注册时的形态；失败则
+  `CaptureRevoke` 回落开关并显示既有「重新打开一次」文案。
+- **安装器直接刷新任务不可行（2026-11-25 修正）**：安装器是 `installMode=currentUser`，
+  没有管理员权限；`--install-task` 需要提权。无条件 `ExecShell runas` 会让每次升级都多弹
+  一次 UAC，违背「升级保留授权」。条件式修复（只在读取到任务不健康时才弹 UAC）可作为
+  后续产品决策，本轮不做；先由启动对账把问题从“静默失败”变成“明确提示 + 拨一次开关”。
+- 日志补一行启动任务摘要（只布尔/枚举：`task_installed`、`command_present`、
+  `command_exists`、`command_matches`、`task_enabled`、`logon_type`、`run_level`、
   `power_policy`），下一次无需清数据后才能取证。
 
 ## 修复（2026-11-25，本分支）
@@ -208,13 +212,36 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
 - 规则见 `LOGGING.md`「向导语音测试慢轮询与撕裂结束帧（2026-11-25）」。
 - `get_runtime_snapshot` 仍为同步命令；本轮只加取证，未在没有证据时改线程模型。
 
+### 4. 启动对账识别“任务存在但助手起不来”
+
+- `src-tauri/src/rc003_task.rs` 新增 `TaskSnapshot` / `TaskIssue`：
+  - `<Command>` 完整路径是否为空、是否存在、是否等于当前 `locate_helper_exe()` 指向的助手
+    （Windows 路径大小写/正斜杠/`\\?\` 前缀规范化，XML 实体反转义）；
+  - 任务级 `<Settings><Enabled>`（**不能**读触发器的 `<Enabled>`）；
+  - `<LogonType>` 为 `Password` / `S4U` / `ServiceAccount` 时判不可用；
+  - `<RunLevel>` 不是 `HighestAvailable`/`Highest` 时判不可用；
+  - 电池策略沿用既有判据。
+- `lib.rs` 启动对账先落一行任务摘要（无路径、无身份），再按
+  `target_file_matches` → `TaskIssue` → `power_policy` → `reauth/task_missing` 的顺序回落。
+  新 token `task_unusable` 只用于界面“系统授权需要重新确认”的通用文案；具体原因
+  （`task_command_missing` / `task_command_invalid` / `task_disabled` /
+  `task_logon_type_mismatch` / `task_run_level_mismatch`）只进日志。
+- 这覆盖 2026-11-25 现场：任务在、目标文件名也对，`/run` 被受理，但 `<Command>` 指向的旧
+  路径已不存在；旧对账只比文件名，于是静默空转。新对账会在启动时把开关回落并提示用户
+  拨一次开关重建（重建仍然需要 UAC，符合“每次开启都重新授权”）。
+- 回归用例：健康任务、旧路径不存在、`<Command>` 缺失、任务停用、密码/非最高权限、
+  触发器 `<Enabled>false>` 与任务级 `<Enabled>true>` 并存、`<Enabled>` 缺失不猜、
+  XML 实体路径反转义。**安装器未改**：它是 `currentUser` 非提权安装，不能直接刷新任务。
+
 ### 仍需机器侧
 
-**机器侧先恢复报告层**：重新授权「全按键支持」（每次开启都会走 UAC）或修复计划任务，
-确认日志出现 `helper_authenticated` 且按下时 `path=report_layer`、`synth_confirmed=true`；
-在报告层恢复前，豆包无法通过向导第⑥步。需要客户机提供
+**机器侧先恢复报告层**：更新到含本轮修复的构建后，启动对账会识别不可用任务并把
+「全按键支持」回落为关闭，界面显示「系统授权需要重新确认，重新打开一次就能继续使用」；
+用户拨一次开关（UAC）即可重建任务。确认日志出现 `helper_authenticated` 且按下时
+`path=report_layer`、`synth_confirmed=true`；在报告层恢复前，豆包无法通过向导第⑥步。
+若要确认旧任务的具体失效字段，需要客户机提供升级前的
 `%ProgramData%\SayAll\rc003-helper\helper-task.log` 与
-`schtasks /query /tn "SayAll RC003 Helper" /xml` 才能定位助手为何没有日志。
+`schtasks /query /tn "SayAll RC003 Helper" /xml`；清数据后这两份已经不存在。
 
 ## 验证
 
@@ -222,17 +249,25 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
   （`vue-tsc --noEmit` + `vite build`）通过。
 - Rust：`cargo fmt --all -- --check`、`cargo check --workspace` 通过；
   `cargo test --workspace` 在 `ci-preflight.ps1` 中全绿（`sayall-windows` 597 passed /
-  20 ignored，`sayall-windows-app` 227 passed / 2 ignored，含新增用例）。
+  20 ignored，`sayall-windows-app` 233 passed / 2 ignored，含新增用例）。
 - `cargo check -p sayall-windows-app --features runtime-simulation` 通过；
   `scripts/ci-preflight.ps1` **7/7 PASS**。
 - 说明：一次手动 `cargo test --workspace` 并行跑到 3 个 `agent_access::tests`
   `local_component_missing` 失败；同批用例 `--test-threads=1` 19/19 passed，
-  随后的 preflight 全量重跑 227/227 passed，确认是已知的并发临时目录抖动，与本改动无关。
+  随后的 preflight 全量重跑 233/233 passed，确认是已知的并发临时目录抖动，与本改动无关。
 - 新增/更新用例：撕裂结束帧、真未排空对照、侧栏音频行、第⑥步进入提示 + capture 日志、
   `helper_not_connected_failing`、慢快照阈值。
+- **本轮追加（任务健康检查，2026-11-25）**：`rc003_task` 21 passed（含 6 个
+  `TaskSnapshot` 用例：健康、旧路径不存在、`<Command>` 缺失、停用、密码/非最高权限、
+  触发器/任务级 `<Enabled>` 区分、缺失 Enabled 不猜、XML 实体反转义）；前端
+  `pnpm test` **48 files / 734 passed / 10 skipped**、`pnpm build` passed；
+  `task_unusable` 的 Rust → bridge → normalize/显示链路已加测试。
 - **deferred（真机）**：客户机恢复报告层后，豆包第⑥步出现语音条/文字；以及现场
   `torn_end_frame` / `slow_snapshot` / `helper_not_connected` 三行的实际出现。
 - **deferred（机器侧）**：助手启动失败原因；需客户机的 `helper-task.log` 与任务 XML。
+- **deferred（本轮新增边界）**：未做真实的旧任务升级端到端（需要一台已有 stale task 的
+  Windows 主机安装本地测试包，观察 `rc003 ... action=reconcile` 摘要与 `reason=task_*`）；
+  安装器未改（`currentUser` 非提权，直接刷新任务会多弹 UAC）；RC001/RC003 真机未执行。
 
 ## 隐私检查
 

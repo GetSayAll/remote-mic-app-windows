@@ -2334,6 +2334,10 @@ enum CaptureRevoke {
     TaskPowerPolicyMismatch = 4,
     /// 本机原生架构没有对应载荷（界面走"本机不可用"，不显示重新开启的提示）。
     Unsupported = 5,
+    /// 任务存在但不能真正拉起助手：命令路径缺失/指向别的助手、任务被停用，
+    /// 或登录类型/运行级别已不是助手注册时的形态（2026-11-25 保留数据升级现场）。
+    /// 具体原因只进日志（`TaskIssue::as_str`），界面统一显示"重新打开一次"。
+    TaskUnusable = 6,
 }
 
 impl CaptureRevoke {
@@ -2350,6 +2354,7 @@ impl CaptureRevoke {
             3 => Self::TaskTargetMismatch,
             4 => Self::TaskPowerPolicyMismatch,
             5 => Self::Unsupported,
+            6 => Self::TaskUnusable,
             _ => Self::None,
         }
     }
@@ -2363,6 +2368,7 @@ impl CaptureRevoke {
             Self::TaskTargetMismatch => "task_target_mismatch",
             Self::TaskPowerPolicyMismatch => "task_power_policy_mismatch",
             Self::Unsupported => "unsupported",
+            Self::TaskUnusable => "task_unusable",
         }
     }
 }
@@ -6214,6 +6220,35 @@ pub fn run() {
                 // 连不上（Issue #206：x64 助手对 ARM64 宿主）。先回落为关闭并落一条可分流
                 // 的日志，不做任何重试——界面据 get_capture_support 说明原因。
                 let support = rc003_task::capture_support();
+                // 任务摘要：即使不回落也要落一行，否则"任务存在但助手不启动"的
+                // 现场只能靠反复试；字段只输出布尔/枚举，不输出路径或设备身份。
+                let helper_path = rc003_task::locate_helper_exe();
+                let task_snapshot = helper_path.as_deref().and_then(|helper| {
+                    rc003_task::task_snapshot(helper, &support.helper_expected, task_installed)
+                });
+                let bool_text = |value: Option<bool>| match value {
+                    Some(true) => "true",
+                    Some(false) => "false",
+                    None => "unknown",
+                };
+                sayall_windows::gatt_note(format!(
+                    "rc003 feature=enhanced-capture action=reconcile task_installed={task_installed} helper_path_known={} task_command_present={} task_command_exists={} task_command_matches={} task_file_matches={} task_enabled={} task_logon_type={} task_run_level={} task_power_policy={}",
+                    helper_path.is_some(),
+                    bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_present)),
+                    bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_exists)),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.command_matches)),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.target_file_matches)),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.enabled)),
+                    task_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.logon_type.as_deref())
+                        .unwrap_or("unknown"),
+                    task_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.run_level.as_deref())
+                        .unwrap_or("unknown"),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.power_policy)),
+                ));
                 if !support.available {
                     sayall_windows::gatt_note(format!(
                         "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} native_arch={} helper_expected={}",
@@ -6223,7 +6258,11 @@ pub fn run() {
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     CaptureRevoke::Unsupported.publish(&capture_revoked);
-                } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
+                } else if task_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.target_file_matches)
+                    == Some(false)
+                {
                     // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
                     // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
                     // 但界面要空转约 25 秒才失败。这里回落开关，等用户拨一次开关重建任务——
@@ -6234,7 +6273,35 @@ pub fn run() {
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     CaptureRevoke::TaskTargetMismatch.publish(&capture_revoked);
-                } else if rc003_task::task_power_policy_matches() == Some(false) {
+                } else if let Some(issue) = task_snapshot.as_ref().and_then(|snapshot| snapshot.issue())
+                {
+                    // 任务存在、目标文件名也对，但命令路径已失效 / 任务被停用 /
+                    // 登录类型或运行级别不再是助手注册时的形态（2026-11-25 保留数据
+                    // 升级现场）。`schtasks /run` 仍可能返回成功，助手却不会出现；
+                    // 回落开关并让用户拨一次重建，不能继续静默空转。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} command_present={} command_exists={} command_matches={} task_enabled={} logon_type={} run_level={}",
+                        issue.as_str(),
+                        bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_present)),
+                        bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_exists)),
+                        bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.command_matches)),
+                        bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.enabled)),
+                        task_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.logon_type.as_deref())
+                            .unwrap_or("unknown"),
+                        task_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.run_level.as_deref())
+                            .unwrap_or("unknown"),
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    CaptureRevoke::TaskUnusable.publish(&capture_revoked);
+                } else if task_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.power_policy)
+                    == Some(false)
+                {
                     // 旧版任务带电池策略（`schtasks /create` 命令行形态固定写 true，
                     // 2026-10-13 issue #206 第三轮报障人对照实验定位）：电池供电时
                     // 调度器静默拦截任务动作，助手永远起不来。新版本用 XML 注册并显式
@@ -7356,6 +7423,7 @@ mod tests {
             CaptureRevoke::TaskTargetMismatch,
             CaptureRevoke::TaskPowerPolicyMismatch,
             CaptureRevoke::Unsupported,
+            CaptureRevoke::TaskUnusable,
         ] {
             revoke.publish(&slot);
             assert_eq!(CaptureRevoke::current(&slot), revoke);

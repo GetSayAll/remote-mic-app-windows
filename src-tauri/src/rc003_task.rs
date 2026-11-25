@@ -481,18 +481,53 @@ fn extract_task_date(xml: &str) -> Option<String> {
     Some(xml[start..end].to_string())
 }
 
-/// 任务注册的可执行文件名（`<Exec><Command>` 的最后一段路径）。
-/// **只取文件名**：完整路径是个人路径，不进日志。
-fn extract_task_command(xml: &str) -> Option<String> {
+/// 任务注册的完整命令路径（`<Exec><Command>`）。
+///
+/// 完整路径只用于**本机判据**（文件是否存在、是否指向当前助手），
+/// **不进日志**：日志只记录布尔结果。
+fn extract_task_command_path(xml: &str) -> Option<String> {
     let start = xml.find("<Command>")? + "<Command>".len();
     let end = xml[start..].find("</Command>")? + start;
-    let raw = xml[start..end].trim().trim_matches('"');
-    let name = raw.rsplit(|c| c == '\\' || c == '/').next()?.trim();
+    // 先反转义再剥引号：`&quot;C:\...\helper.exe&quot;` 也是合法写法。
+    let raw = unescape_xml_text(xml[start..end].trim());
+    let raw = raw.trim().trim_matches('"').trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+/// 任务注册的可执行文件名（`<Command>` 的最后一段路径）。
+/// **只取文件名**：完整路径是个人路径，不进日志。
+fn extract_task_command(xml: &str) -> Option<String> {
+    let path = extract_task_command_path(xml)?;
+    let name = path.rsplit(|c| c == '\\' || c == '/').next()?.trim();
     if name.is_empty() {
         None
     } else {
         Some(name.to_string())
     }
+}
+
+/// 反转义任务 XML 里的文本实体（助手写任务时用 `xml_escape` 转义过路径）。
+fn unescape_xml_text(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Windows 路径比较的规范化：引号、正斜杠、大小写、`\\?\` 前缀与尾随分隔符。
+fn normalize_task_path(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('"').trim();
+    let without_prefix = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    without_prefix
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
 }
 
 /// 计划任务指向的助手是不是**本架构**那一份（纯函数，便于单测）。
@@ -501,34 +536,39 @@ pub(crate) fn task_target_verdict(command: Option<&str>, expected: &str) -> Opti
     Some(command?.trim().eq_ignore_ascii_case(expected))
 }
 
-/// 计划任务当前指向的助手是否与本机架构相符。
-///
-/// **为什么需要**（2026-10-07 报障人 ARM64 实测发现）：覆盖安装会保留旧版注册的计划任务，
-/// 任务目标写的是**当时那个助手**的路径。从"只有 x64"的版本升到带 arm64 载荷的版本后，
-/// ARM64 机器上的任务仍指向 `sayall-helper.exe`：启动自动拉起会去跑 x64 助手，架构闸门
-/// 会拦下它（文案清楚），但界面要等约 25 秒重试完才失败，用户会以为功能坏了。
-/// 所以启动对账先比一次：不一致就回落开关，等用户拨一次开关重建任务——重装任务要提权，
-/// 不在启动时擅自弹 UAC（与"每次开启都重新授权"的既有语义一致）。
-pub fn task_target_matches(helper_file_name: &str) -> Option<bool> {
-    // 任务不存在时 `task_installed()` 那条判据已经会处理，这里不重复表态。
-    if !task_installed() {
-        return None;
-    }
-    let xml = task_xml()?;
-    task_target_verdict(extract_task_command(&xml).as_deref(), helper_file_name)
-}
-
-/// 读取任务 XML 里的布尔设置项（纯函数）。`None` = 元素缺失或不是 true/false。
-fn extract_task_bool(xml: &str, tag: &str) -> Option<bool> {
+/// 读取任务 XML 里的文本元素（纯函数）。`None` = 元素缺失或值为空。
+fn extract_task_text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)? + start;
-    match xml[start..end].trim().to_ascii_lowercase().as_str() {
+    let value = xml[start..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// 读取任务 XML 里的布尔设置项（纯函数）。`None` = 元素缺失或不是 true/false。
+fn extract_task_bool(xml: &str, tag: &str) -> Option<bool> {
+    match extract_task_text(xml, tag)?.to_ascii_lowercase().as_str() {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
     }
+}
+
+/// 任务级 `<Settings>` 片段。不能直接在整份 XML 里找 `<Enabled>`：
+/// 触发器的 `<Enabled>` 可能先出现，读错一个就会把正常任务误判为停用。
+fn task_settings(xml: &str) -> Option<&str> {
+    let start = xml.find("<Settings>")? + "<Settings>".len();
+    let end = xml[start..].find("</Settings>")? + start;
+    Some(&xml[start..end])
+}
+
+fn task_enabled_verdict(xml: &str) -> Option<bool> {
+    extract_task_bool(task_settings(xml)?, "Enabled")
 }
 
 /// 任务电源策略判据（纯函数）：`DisallowStartIfOnBatteries` 与
@@ -548,13 +588,120 @@ pub(crate) fn task_power_policy_verdict(xml: &str) -> Option<bool> {
     Some(!disallow && !stop)
 }
 
-/// 计划任务当前的电源策略是否与本版本注册的形态一致（供启动对账）。
-/// 任务缺失/读不到 → `None`（由 `task_installed` 那条判据处理，这里不重复表态）。
-pub fn task_power_policy_matches() -> Option<bool> {
-    if !task_installed() {
+/// 计划任务形态的完整快照（2026-11-25）。
+///
+/// 为什么需要：`schtasks /run` 只证明"调度器受理了"，不证明助手会启动。
+/// 用户现场（保留数据升级）里任务存在、目标文件名也对，但 `<Command>` 指向
+/// 一个已经不存在的旧安装路径；旧判据只比文件名，于是启动照常触发，助手
+/// 连 `[ENV]` 都没有。快照把**能解释"为什么起不来"的字段**一次读齐：
+/// 完整命令路径是否存在、是否指向当前助手、任务是否 Enabled、登录类型与
+/// 运行级别是否仍是助手注册时的形态、电池策略是否通过。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSnapshot {
+    pub command_present: bool,
+    pub command_exists: bool,
+    pub command_matches: Option<bool>,
+    pub target_file_matches: Option<bool>,
+    pub enabled: Option<bool>,
+    pub logon_type: Option<String>,
+    pub run_level: Option<String>,
+    pub power_policy: Option<bool>,
+}
+
+/// 任务不可用的具体原因（只进日志；界面统一显示"系统授权需要重新确认"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskIssue {
+    CommandMissing,
+    CommandInvalid,
+    Disabled,
+    LogonTypeMismatch,
+    RunLevelMismatch,
+}
+
+impl TaskIssue {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CommandMissing => "task_command_missing",
+            Self::CommandInvalid => "task_command_invalid",
+            Self::Disabled => "task_disabled",
+            Self::LogonTypeMismatch => "task_logon_type_mismatch",
+            Self::RunLevelMismatch => "task_run_level_mismatch",
+        }
+    }
+}
+
+impl TaskSnapshot {
+    /// 返回第一个**明确**会让助手起不来的原因；`None` = 现有字段都正常
+    /// （或字段缺失、不足以表态——缺失时不贸然回落）。
+    pub fn issue(&self) -> Option<TaskIssue> {
+        if !self.command_present {
+            return Some(TaskIssue::CommandMissing);
+        }
+        if !self.command_exists || self.command_matches == Some(false) {
+            return Some(TaskIssue::CommandInvalid);
+        }
+        if self.enabled == Some(false) {
+            return Some(TaskIssue::Disabled);
+        }
+        if self.logon_type.as_deref().map_or(false, |value| {
+            let value = value.trim().to_ascii_lowercase();
+            value != "interactivetoken" && value != "interactivetokenorpassword"
+        }) {
+            return Some(TaskIssue::LogonTypeMismatch);
+        }
+        if self.run_level.as_deref().map_or(false, |value| {
+            let value = value.trim().to_ascii_lowercase();
+            value != "highestavailable" && value != "highest"
+        }) {
+            return Some(TaskIssue::RunLevelMismatch);
+        }
+        None
+    }
+}
+
+pub(crate) fn task_snapshot_from_xml(
+    xml: &str,
+    expected_helper: &std::path::Path,
+    helper_file_name: &str,
+) -> TaskSnapshot {
+    let command_path = extract_task_command_path(xml);
+    let command_present = command_path.is_some();
+    let command_exists = command_path
+        .as_deref()
+        .map_or(false, |path| std::path::Path::new(path).is_file());
+    let expected = normalize_task_path(&expected_helper.display().to_string());
+    let command_matches = command_path
+        .as_deref()
+        .map(|path| normalize_task_path(path) == expected);
+    let target_file_matches =
+        task_target_verdict(extract_task_command(xml).as_deref(), helper_file_name);
+    TaskSnapshot {
+        command_present,
+        command_exists,
+        command_matches,
+        target_file_matches,
+        enabled: task_enabled_verdict(xml),
+        logon_type: extract_task_text(xml, "LogonType"),
+        run_level: extract_task_text(xml, "RunLevel"),
+        power_policy: task_power_policy_verdict(xml),
+    }
+}
+
+/// 读取当前任务快照。任务不存在/任务 XML 读不到 → `None`（由
+/// `task_installed` / `reauth_required` 那条判据处理，这里不重复表态）。
+pub fn task_snapshot(
+    expected_helper: &std::path::Path,
+    helper_file_name: &str,
+    installed: bool,
+) -> Option<TaskSnapshot> {
+    if !installed {
         return None;
     }
-    task_power_policy_verdict(&task_xml()?)
+    Some(task_snapshot_from_xml(
+        &task_xml()?,
+        expected_helper,
+        helper_file_name,
+    ))
 }
 
 /// `enabled` 来自持久化的用户意图（AppSettings.rc003_capture_enabled），
@@ -765,6 +912,163 @@ mod tests {
                 "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
             ),
             None
+        );
+    }
+
+    fn task_xml_with(command: &str, enabled: &str, logon_type: &str, run_level: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?><Task>
+              <Principals><Principal id="Author">
+                <LogonType>{logon_type}</LogonType>
+                <RunLevel>{run_level}</RunLevel>
+              </Principal></Principals>
+              <Settings>
+                <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+                <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+                {enabled}
+              </Settings>
+              <Actions Context="Author"><Exec>
+                <Command>{command}</Command>
+                <Arguments>--follow-app</Arguments>
+              </Exec></Actions>
+            </Task>"#
+        )
+    }
+
+    fn current_exe_and_name() -> (std::path::PathBuf, String) {
+        let exe = std::env::current_exe().expect("取当前测试程序路径");
+        let name = exe
+            .file_name()
+            .expect("测试程序有文件名")
+            .to_string_lossy()
+            .to_string();
+        (exe, name)
+    }
+
+    #[test]
+    fn task_snapshot_accepts_a_healthy_task() {
+        // 2026-11-25 现场：任务存在、文件名也对，但 <Command> 指向的旧路径
+        // 已不存在；旧检查只比文件名，于是启动照常 /run，助手永远起不来。
+        // 快照必须把完整路径、Enabled、登录类型与运行级别一起读出来。
+        let (exe, name) = current_exe_and_name();
+        let command = exe.display().to_string().replace('&', "&amp;");
+        let xml = task_xml_with(
+            &command,
+            "<Enabled>true</Enabled>",
+            "InteractiveToken",
+            "HighestAvailable",
+        );
+        let snapshot = task_snapshot_from_xml(&xml, &exe, &name);
+        assert!(snapshot.command_present);
+        assert!(snapshot.command_exists);
+        assert_eq!(snapshot.command_matches, Some(true));
+        assert_eq!(snapshot.target_file_matches, Some(true));
+        assert_eq!(snapshot.enabled, Some(true));
+        assert_eq!(snapshot.power_policy, Some(true));
+        assert_eq!(snapshot.issue(), None);
+    }
+
+    #[test]
+    fn task_snapshot_flags_stale_missing_or_disabled_tasks() {
+        let (exe, name) = current_exe_and_name();
+
+        let stale = task_xml_with(
+            r"C:\Definitely-Missing-SayAll\sayall-helper.exe",
+            "<Enabled>true</Enabled>",
+            "InteractiveToken",
+            "HighestAvailable",
+        );
+        let snapshot = task_snapshot_from_xml(&stale, &exe, &name);
+        assert!(!snapshot.command_exists);
+        assert_eq!(snapshot.command_matches, Some(false));
+        assert_eq!(snapshot.issue(), Some(TaskIssue::CommandInvalid));
+
+        let missing = task_xml_with(
+            "",
+            "<Enabled>true</Enabled>",
+            "InteractiveToken",
+            "HighestAvailable",
+        );
+        assert_eq!(
+            task_snapshot_from_xml(&missing, &exe, &name).issue(),
+            Some(TaskIssue::CommandMissing)
+        );
+
+        let command = exe.display().to_string().replace('&', "&amp;");
+        let disabled = task_xml_with(
+            &command,
+            "<Enabled>false</Enabled>",
+            "InteractiveToken",
+            "HighestAvailable",
+        );
+        assert_eq!(
+            task_snapshot_from_xml(&disabled, &exe, &name).issue(),
+            Some(TaskIssue::Disabled)
+        );
+    }
+
+    #[test]
+    fn task_snapshot_flags_principal_and_run_level_drift() {
+        let (exe, name) = current_exe_and_name();
+        let command = exe.display().to_string().replace('&', "&amp;");
+
+        let password = task_xml_with(
+            &command,
+            "<Enabled>true</Enabled>",
+            "Password",
+            "HighestAvailable",
+        );
+        assert_eq!(
+            task_snapshot_from_xml(&password, &exe, &name).issue(),
+            Some(TaskIssue::LogonTypeMismatch)
+        );
+
+        let least = task_xml_with(
+            &command,
+            "<Enabled>true</Enabled>",
+            "InteractiveToken",
+            "LeastPrivilege",
+        );
+        assert_eq!(
+            task_snapshot_from_xml(&least, &exe, &name).issue(),
+            Some(TaskIssue::RunLevelMismatch)
+        );
+    }
+
+    #[test]
+    fn task_snapshot_reads_the_task_level_enabled_flag() {
+        // <Enabled> 也出现在触发器里；读错一个就会把正常任务误判为停用。
+        let (exe, name) = current_exe_and_name();
+        let command = exe.display().to_string().replace('&', "&amp;");
+        let xml = format!(
+            r#"<Task><Triggers><Trigger><Enabled>false</Enabled></Trigger></Triggers>
+               <Settings><Enabled>true</Enabled></Settings>
+               <Actions><Exec><Command>{command}</Command></Exec></Actions></Task>"#
+        );
+        let snapshot = task_snapshot_from_xml(&xml, &exe, &name);
+        assert_eq!(snapshot.enabled, Some(true));
+        assert_eq!(snapshot.issue(), None);
+    }
+
+    #[test]
+    fn task_snapshot_does_not_guess_missing_enabled_flag() {
+        // 旧任务可能没有 <Enabled>；缺失时不表态，避免启动时误回落。
+        let (exe, name) = current_exe_and_name();
+        let command = exe.display().to_string().replace('&', "&amp;");
+        let xml = task_xml_with(&command, "", "InteractiveToken", "HighestAvailable");
+        let snapshot = task_snapshot_from_xml(&xml, &exe, &name);
+        assert_eq!(snapshot.enabled, None);
+        assert_eq!(snapshot.issue(), None);
+    }
+
+    #[test]
+    fn task_command_path_is_unescaped_before_comparison() {
+        let xml = r#"<Task><Actions><Exec>
+            <Command>"C:\a&amp;b\sayall-helper.exe"</Command>
+        </Exec></Actions></Task>"#;
+        assert_eq!(
+            extract_task_command_path(xml).as_deref(),
+            Some(r"C:\a&b\sayall-helper.exe")
         );
     }
 

@@ -224,7 +224,8 @@ export type Rc003CaptureRevoked =
   | "reauth_marker_present"
   | "task_target_mismatch"
   | "task_power_policy_mismatch"
-  | "unsupported";
+  | "unsupported"
+  | "task_unusable";
 
 /** `stopped` = 该平台没有这个机制（非 Windows），或桥接未启用。 */
 export type Rc003BridgePhase = "stopped" | "listening" | "connected" | "failed";

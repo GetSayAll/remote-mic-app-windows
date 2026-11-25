@@ -169,7 +169,7 @@ export function shouldShowCaptureRevoked(input: {
 }
 
 /**
- * 回落原因的载荷规范化（2026-10-15）：只认六个稳定 token（与 Rust
+ * 回落原因的载荷规范化（2026-10-15）：只认七个稳定 token（与 Rust
  * `CaptureRevoke::as_str` 逐字对应）；缺失 / 未知值回落 `unknown`——界面按
  * "读不到"处理，不猜测原因、不显示文案。
  */
@@ -181,7 +181,8 @@ export function normalizeCaptureRevoked(
     raw === "reauth_marker_present" ||
     raw === "task_target_mismatch" ||
     raw === "task_power_policy_mismatch" ||
-    raw === "unsupported"
+    raw === "unsupported" ||
+    raw === "task_unusable"
     ? raw
     : "unknown";
 }
