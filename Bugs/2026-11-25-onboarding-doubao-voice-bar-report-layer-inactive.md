@@ -262,6 +262,15 @@ LL 钩子宿主活着（2026-10-04 的「钩子在主进程」形态已排除）
   触发器/任务级 `<Enabled>` 区分、缺失 Enabled 不猜、XML 实体反转义）；前端
   `pnpm test` **48 files / 734 passed / 10 skipped**、`pnpm build` passed；
   `task_unusable` 的 Rust → bridge → normalize/显示链路已加测试。
+- **本地测试包（2026-11-25，`a29a097` + 工作树并行未提交修改）**：
+  `target\release\bundle\nsis\无线麦 SayAll_1.9.8_x64-setup.exe`，SHA-256
+  `CC0EED21650979D78C40D7BBC7C33AE76BF021A67AE45336F5D4EE87CB4DC627`，本机测试密钥签名
+  （**不可发布**）。前端嵌入 **18/18 passed**；静默安装、helper/gadget/sayall-mcp 哈希、
+  app exe 差 3 字节、内嵌修订号 `a29a0977` passed；安装后 `settings.json` 的
+  `rc003_capture_enabled=true` 保留，任务 XML 为 `InteractiveToken` / `HighestAvailable` /
+  `Enabled=true` / 当前安装目录助手；安装版二进制含 `task_unusable` /
+  `task_command_invalid` 等新标记。**未启动安装版**（沙箱禁止代启，需用户双击）；
+  包内含并行未提交的 `ble.rs`/注释修改，**不是纯净提交包**。
 - **deferred（真机）**：客户机恢复报告层后，豆包第⑥步出现语音条/文字；以及现场
   `torn_end_frame` / `slow_snapshot` / `helper_not_connected` 三行的实际出现。
 - **deferred（机器侧）**：助手启动失败原因；需客户机的 `helper-task.log` 与任务 XML。
