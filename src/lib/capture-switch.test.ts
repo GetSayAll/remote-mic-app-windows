@@ -176,6 +176,7 @@ describe("「被应用自己关掉了」提示（2026-10-15，issue #264 附加�
       shouldShowCaptureRevoked({ switchState: "off", revoked: "task_power_policy_mismatch" }),
     ).toBe(true);
     expect(shouldShowCaptureRevoked({ switchState: "off", revoked: "task_missing" })).toBe(true);
+    expect(shouldShowCaptureRevoked({ switchState: "off", revoked: "task_unusable" })).toBe(true);
     // 开关已经开着：原因已被重新开启消解，不再讲历史。
     expect(shouldShowCaptureRevoked({ switchState: "on", revoked: "task_missing" })).toBe(false);
     // 正在操作 / 本机不可用：都不是"重新打开一次"能解决的。
@@ -208,7 +209,7 @@ describe("「被应用自己关掉了」提示（2026-10-15，issue #264 附加�
     }
   });
 
-  it("载荷规范化：只认六个稳定 token，其余一律 unknown（不猜原因）", () => {
+  it("载荷规范化：只认七个稳定 token，其余一律 unknown（不猜原因）", () => {
     for (const token of [
       "none",
       "task_missing",
@@ -216,6 +217,7 @@ describe("「被应用自己关掉了」提示（2026-10-15，issue #264 附加�
       "task_target_mismatch",
       "task_power_policy_mismatch",
       "unsupported",
+      "task_unusable",
     ] as const) {
       expect(normalizeCaptureRevoked(token)).toBe(token);
     }

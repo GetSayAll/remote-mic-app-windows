@@ -2227,6 +2227,21 @@ fn helper_startup_failing(streak: u32) -> bool {
     streak >= HELPER_STARTUP_FAILURE_ACCEPTS
 }
 
+/// 桥在监听、但连续多少轮都等不到助手连接 ⇒ 判定"助手根本没启动"。
+///
+/// 与 `HELPER_STARTUP_FAILURE_ACCEPTS` 互补：后者要求"握手成功过一瞬"；
+/// 2026-11-25 现场是助手连一次都没连上（accepts 恒为 0、日志里除一次升级清理外
+/// 没有任何 `[ENV]`/`[APP-BRIDGE]`），只能看触发轮数。5 轮 = 第一次
+/// `/end`+`/run` 兜底（`AUTO_TRIGGER_ESCALATE_ATTEMPT`），约 25–30 s；
+/// 再晚（10 轮约 2.5 分钟）用户可能已经走完向导第⑥步，提示就失去意义。
+/// 此时界面必须从 `starting`（不显示文案）进入 `inactive`，否则用户只看到
+/// "开关开着、豆包没反应、没有任何提示"。
+const HELPER_NOT_CONNECTED_INACTIVE_ROUNDS: u32 = 5;
+
+fn helper_not_connected_failing(consecutive: u32) -> bool {
+    consecutive >= HELPER_NOT_CONNECTED_INACTIVE_ROUNDS
+}
+
 /// 把"助手反复启动失败"叠到本轮生效状态上（纯函数，单测覆盖）。
 ///
 /// 只在**没有所有权**时生效：一旦真的接管，界面必须立刻回到 `active`——
@@ -2319,6 +2334,10 @@ enum CaptureRevoke {
     TaskPowerPolicyMismatch = 4,
     /// 本机原生架构没有对应载荷（界面走"本机不可用"，不显示重新开启的提示）。
     Unsupported = 5,
+    /// 任务存在但不能真正拉起助手：命令路径缺失/指向别的助手、任务被停用，
+    /// 或登录类型/运行级别已不是助手注册时的形态（2026-11-25 保留数据升级现场）。
+    /// 具体原因只进日志（`TaskIssue::as_str`），界面统一显示"重新打开一次"。
+    TaskUnusable = 6,
 }
 
 impl CaptureRevoke {
@@ -2335,6 +2354,7 @@ impl CaptureRevoke {
             3 => Self::TaskTargetMismatch,
             4 => Self::TaskPowerPolicyMismatch,
             5 => Self::Unsupported,
+            6 => Self::TaskUnusable,
             _ => Self::None,
         }
     }
@@ -2348,6 +2368,7 @@ impl CaptureRevoke {
             Self::TaskTargetMismatch => "task_target_mismatch",
             Self::TaskPowerPolicyMismatch => "task_power_policy_mismatch",
             Self::Unsupported => "unsupported",
+            Self::TaskUnusable => "task_unusable",
         }
     }
 }
@@ -2628,17 +2649,25 @@ fn rc003_auto_trigger_reconcile(
             );
             helper_accept_streak = next_streak;
             helper_accepts_seen = next_seen;
-            let failing = helper_startup_failing(helper_accept_streak);
+            let accept_failing = helper_startup_failing(helper_accept_streak);
+            let not_connected_failing = helper_not_connected_failing(consecutive);
+            let failing = accept_failing || not_connected_failing;
+            let failure_reason = if accept_failing {
+                "helper_startup_failing"
+            } else {
+                "helper_not_connected"
+            };
             // 原因与 health 同轮发布：界面只在 `inactive` 时读它，但两者必须一致，
             // 否则会出现"提示说启动失败、状态却是 active"的错位。
             CaptureUnavailable::from_startup_failing(failing).publish(&capture_unavailable);
             if failing && !startup_failing_logged {
                 // hint 说**下一步动作**：这条断在 PC 内部的环境冲突上（端口被系统保留 /
                 // 被别的进程占住），继续按遥控器或重开开关都可能无效，先看环境。
+                // `rounds=` 让"一次都没连上"（accepts=0）与"连上就断"（accepts>0）可区分。
                 sayall_windows::gatt_note(format!(
                     "rc003 feature=enhanced-capture action=capture_unavailable phase=completed \
-                     terminal_result=failed reason=helper_startup_failing accepts={helper_accept_streak} \
-                     owned_usages=0 retryable=true hint=check_environment_conflict {}",
+                     terminal_result=failed reason={failure_reason} accepts={helper_accept_streak} \
+                     rounds={consecutive} owned_usages=0 retryable=true hint=check_environment_conflict {}",
                     bridge_health_summary(&snapshot)
                 ));
                 startup_failing_logged = true;
@@ -6191,6 +6220,35 @@ pub fn run() {
                 // 连不上（Issue #206：x64 助手对 ARM64 宿主）。先回落为关闭并落一条可分流
                 // 的日志，不做任何重试——界面据 get_capture_support 说明原因。
                 let support = rc003_task::capture_support();
+                // 任务摘要：即使不回落也要落一行，否则"任务存在但助手不启动"的
+                // 现场只能靠反复试；字段只输出布尔/枚举，不输出路径或设备身份。
+                let helper_path = rc003_task::locate_helper_exe();
+                let task_snapshot = helper_path.as_deref().and_then(|helper| {
+                    rc003_task::task_snapshot(helper, &support.helper_expected, task_installed)
+                });
+                let bool_text = |value: Option<bool>| match value {
+                    Some(true) => "true",
+                    Some(false) => "false",
+                    None => "unknown",
+                };
+                sayall_windows::gatt_note(format!(
+                    "rc003 feature=enhanced-capture action=reconcile task_installed={task_installed} helper_path_known={} task_command_present={} task_command_exists={} task_command_matches={} task_file_matches={} task_enabled={} task_logon_type={} task_run_level={} task_power_policy={}",
+                    helper_path.is_some(),
+                    bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_present)),
+                    bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_exists)),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.command_matches)),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.target_file_matches)),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.enabled)),
+                    task_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.logon_type.as_deref())
+                        .unwrap_or("unknown"),
+                    task_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.run_level.as_deref())
+                        .unwrap_or("unknown"),
+                    bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.power_policy)),
+                ));
                 if !support.available {
                     sayall_windows::gatt_note(format!(
                         "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} native_arch={} helper_expected={}",
@@ -6200,7 +6258,11 @@ pub fn run() {
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     CaptureRevoke::Unsupported.publish(&capture_revoked);
-                } else if rc003_task::task_target_matches(&support.helper_expected) == Some(false) {
+                } else if task_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.target_file_matches)
+                    == Some(false)
+                {
                     // 计划任务指向的是**另一个架构**的助手（覆盖安装保留了旧版注册的任务，
                     // 2026-10-07 报障人 ARM64 实测）：启动自动拉起会去跑它，架构闸门会拦下，
                     // 但界面要空转约 25 秒才失败。这里回落开关，等用户拨一次开关重建任务——
@@ -6211,7 +6273,35 @@ pub fn run() {
                     ));
                     let _ = settings.save_rc003_capture_enabled(false);
                     CaptureRevoke::TaskTargetMismatch.publish(&capture_revoked);
-                } else if rc003_task::task_power_policy_matches() == Some(false) {
+                } else if let Some(issue) = task_snapshot.as_ref().and_then(|snapshot| snapshot.issue())
+                {
+                    // 任务存在、目标文件名也对，但命令路径已失效 / 任务被停用 /
+                    // 登录类型或运行级别不再是助手注册时的形态（2026-11-25 保留数据
+                    // 升级现场）。`schtasks /run` 仍可能返回成功，助手却不会出现；
+                    // 回落开关并让用户拨一次重建，不能继续静默空转。
+                    sayall_windows::gatt_note(format!(
+                        "rc003 feature=enhanced-capture action=reconcile phase=completed terminal_result=revoked reason={} command_present={} command_exists={} command_matches={} task_enabled={} logon_type={} run_level={}",
+                        issue.as_str(),
+                        bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_present)),
+                        bool_text(task_snapshot.as_ref().map(|snapshot| snapshot.command_exists)),
+                        bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.command_matches)),
+                        bool_text(task_snapshot.as_ref().and_then(|snapshot| snapshot.enabled)),
+                        task_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.logon_type.as_deref())
+                            .unwrap_or("unknown"),
+                        task_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.run_level.as_deref())
+                            .unwrap_or("unknown"),
+                    ));
+                    let _ = settings.save_rc003_capture_enabled(false);
+                    CaptureRevoke::TaskUnusable.publish(&capture_revoked);
+                } else if task_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.power_policy)
+                    == Some(false)
+                {
                     // 旧版任务带电池策略（`schtasks /create` 命令行形态固定写 true，
                     // 2026-10-13 issue #206 第三轮报障人对照实验定位）：电池供电时
                     // 调度器静默拦截任务动作，助手永远起不来。新版本用 XML 注册并显式
@@ -7333,6 +7423,7 @@ mod tests {
             CaptureRevoke::TaskTargetMismatch,
             CaptureRevoke::TaskPowerPolicyMismatch,
             CaptureRevoke::Unsupported,
+            CaptureRevoke::TaskUnusable,
         ] {
             revoke.publish(&slot);
             assert_eq!(CaptureRevoke::current(&slot), revoke);
@@ -7434,6 +7525,24 @@ mod tests {
         assert_eq!(advance_helper_accept_streak(2, 9, 4, 0), (2, 4));
         // 同一个累计值重复观察不重复计数（对账每轮都会读同一个快照）。
         assert_eq!(advance_helper_accept_streak(1, 5, 5, 0), (1, 5));
+    }
+
+    /// 2026-11-25：助手一次都没连上（accepted_total 恒 0、没有任何 [ENV]/[APP-BRIDGE]）
+    /// 时，接受次数判据永远不触发；必须看连续触发轮数，否则界面永远停在 starting
+    /// （不显示文案），用户只看到"开关开着、豆包没反应"。
+    #[test]
+    fn helper_not_connected_failing_starts_after_planned_rounds() {
+        assert!(!helper_not_connected_failing(0));
+        assert!(!helper_not_connected_failing(
+            HELPER_NOT_CONNECTED_INACTIVE_ROUNDS - 1
+        ));
+        assert!(helper_not_connected_failing(
+            HELPER_NOT_CONNECTED_INACTIVE_ROUNDS
+        ));
+        assert!(helper_not_connected_failing(
+            HELPER_NOT_CONNECTED_INACTIVE_ROUNDS + 1
+        ));
+        assert_eq!(HELPER_NOT_CONNECTED_INACTIVE_ROUNDS, 5);
     }
 
     /// 启动失败只压「没有所有权」的轮次（issue #291）。

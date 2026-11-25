@@ -41,6 +41,7 @@ import {
   type KeyCode,
   type PairedRemote,
   type Rc003CaptureHealth,
+  type Rc003CaptureUnavailable,
   type Rc003TaskStatus,
   type RemoteButton,
   type RuntimeSnapshot,
@@ -48,7 +49,14 @@ import {
   type VoiceInputTool,
   type VokieInstallation,
 } from "../lib/bridge";
-import { captureFailureText, normalizeCaptureHealth } from "../lib/capture-switch";
+import {
+  captureFailureText,
+  captureInactiveText,
+  captureSwitchState,
+  normalizeCaptureHealth,
+  normalizeCaptureUnavailable,
+  shouldShowCaptureInactive,
+} from "../lib/capture-switch";
 import { t } from "../lib/i18n";
 import { reportOnboardingEvent } from "../onboarding/diagnostics";
 import { voiceFailureText } from "../onboarding/voice-failure-text";
@@ -76,6 +84,7 @@ import { layoutLogDetail, measureOnboardingLayout } from "../onboarding/layout-s
 import StepSide from "../components/onboarding/StepSide.vue";
 import {
   createVoiceAttemptTracker,
+  isTornVoiceEndFrame,
   type VoiceAttemptInput,
   type VoiceAttemptState,
   type VoiceAttemptTerminal,
@@ -323,13 +332,129 @@ const captureLoadFailed = ref(false);
 /** 迟到回调保护：每次进入第④步都换一代，旧读取结果不得覆盖新状态。 */
 let fullKeyLoadGeneration = 0;
 const CAPTURE_FAILURE_NAME = "全按键支持";
-const captureUnavailable = computed(() => captureSupport.value?.available === false);
+const captureSupportUnavailable = computed(() => captureSupport.value?.available === false);
 /** 第④步开关旁唯一允许出现的文字：操作失败优先，其次读取失败。 */
 const fullKeyFailure = computed(() => {
   if (captureLoadFailed.value) {
     return t("读取全按键支持状态失败；可以重新进入这一步，或先继续。");
   }
   return captureFailureText(captureHint.value, CAPTURE_FAILURE_NAME);
+});
+
+/**
+ * 「全按键支持 / 支持更多输入工具」的**实际生效状态**（2026-11-25）。
+ *
+ * 与连接页、按键页同一来源（`get_rc003_bridge_snapshot` 的 `captureHealth`）。
+ * 向导以前只看 `enabled`（用户意图）与本机架构，助手根本没连上时仍显示「已开启」，
+ * 第⑥步必然失败且卡片写错原因。这里 5 s 轮询一次，开着但没生效时在开关旁/测试页
+ * 明确说一句（文案复用 `captureInactiveText`，不新增措辞）。
+ */
+const captureHealth = ref<Rc003CaptureHealth | "unknown">("unknown");
+const captureHealthReason = ref<Rc003CaptureUnavailable | "unknown">("unknown");
+let captureHealthTimer: number | null = null;
+let captureHealthSerial = 0;
+let lastCaptureHealthLog = "";
+
+const CAPTURE_HEALTH_POLL_MS = 5_000;
+
+function captureHealthDetail(): string {
+  return `health_${captureHealth.value}_reason_${captureHealthReason.value}`;
+}
+
+async function refreshCaptureHealth(forceReadLog = false): Promise<void> {
+  const serial = ++captureHealthSerial;
+  try {
+    const snapshot = await getRc003BridgeSnapshot();
+    if (serial !== captureHealthSerial) return;
+    captureHealth.value = normalizeCaptureHealth(snapshot?.captureHealth);
+    captureHealthReason.value = normalizeCaptureUnavailable(snapshot?.captureUnavailable);
+    const token = captureHealthDetail();
+    if (forceReadLog || lastCaptureHealthLog !== token) {
+      lastCaptureHealthLog = token;
+      reportOnboardingEvent({
+        kind: "capture",
+        result: "passed",
+        reason: forceReadLog ? "read" : "changed",
+        step: step.value,
+        detail: token,
+      });
+    }
+  } catch {
+    if (serial !== captureHealthSerial) return;
+    captureHealth.value = "unknown";
+    captureHealthReason.value = "unknown";
+    // 读不到只留一次：5 s 轮询失败不能把日志刷满；下一次成功会重置。
+    if (lastCaptureHealthLog !== "read_failed") {
+      lastCaptureHealthLog = "read_failed";
+      reportOnboardingEvent({
+        kind: "capture",
+        result: "failed",
+        reason: "read_failed",
+        step: step.value,
+      });
+    }
+  }
+}
+
+/** 第④/⑤/⑥步需要看捕获是否真的生效；进入时立即读一次，之后 5 s 复查。 */
+function startCaptureHealthPolling(): void {
+  stopCaptureHealthPolling();
+  lastCaptureHealthLog = "";
+  void refreshCaptureHealth(true);
+  captureHealthTimer = window.setInterval(
+    () => void refreshCaptureHealth(false),
+    CAPTURE_HEALTH_POLL_MS,
+  );
+}
+
+function stopCaptureHealthPolling(): void {
+  // 离开步骤时让在途读取失效：迟到的捕获状态不得写进下一步或新会话。
+  captureHealthSerial += 1;
+  if (captureHealthTimer !== null) {
+    window.clearInterval(captureHealthTimer);
+    captureHealthTimer = null;
+  }
+}
+
+/** 第④步开关旁的「开着但没生效」提示；其余状态沿用原「已开启 / 可继续」。 */
+const fullKeyHealthText = computed<string | null>(() => {
+  const health = captureHealth.value;
+  if (health === "unknown") return null;
+  const visible = shouldShowCaptureInactive({
+    switchState: captureSwitchState({
+      enabled: rc003Status.value?.enabled === true,
+      busy: captureBusy.value,
+      unsupported: captureSupportUnavailable.value,
+    }),
+    health,
+    linkReady: CONNECTED_PHASES.includes(
+      props.runtime?.platform.connection.phase ?? "idle",
+    ),
+  });
+  return visible
+    ? captureInactiveText(t(CAPTURE_FAILURE_NAME), captureHealthReason.value)
+    : null;
+});
+
+/** 第⑤/⑥步（已选豆包）的同一句提示：豆包语音键依赖报告层，没生效时先说明原因。 */
+const voiceCaptureHint = computed<string | null>(() => {
+  if (stagedTool.value !== "doubao") return null;
+  const health = captureHealth.value;
+  if (health === "unknown") return null;
+  const visible = shouldShowCaptureInactive({
+    switchState: captureSwitchState({
+      enabled: rc003Status.value?.enabled === true,
+      busy: captureBusy.value,
+      unsupported: captureSupportUnavailable.value,
+    }),
+    health,
+    linkReady: CONNECTED_PHASES.includes(
+      props.runtime?.platform.connection.phase ?? "idle",
+    ),
+  });
+  return visible
+    ? captureInactiveText(t("支持更多输入工具"), captureHealthReason.value)
+    : null;
 });
 const vokie = ref<VokieInstallation | null>(null);
 const vokieBusy = ref(false);
@@ -545,6 +670,11 @@ watch(
       }
       void startVoiceTestSession();
     }
+    if (current === "full_key" || current === "voice_tool" || current === "voice_test") {
+      startCaptureHealthPolling();
+    } else {
+      stopCaptureHealthPolling();
+    }
     if (observingButtons) {
       void setMappingSuspensionState(true);
     }
@@ -610,6 +740,7 @@ onUnmounted(() => {
   }
   stopButtonObservation();
   stopVoiceTestSession();
+  stopCaptureHealthPolling();
   // 安全网：向导卸载（完成/退出）时恢复映射执行；进程退出后内存态自然复位。
   if (mappingSuspended.value) {
     void setMappingSuspension(false);
@@ -1347,7 +1478,7 @@ function captureLogTarget(): { step: OnboardingStep; detail: string } {
 function requestCaptureToggle(): void {
   if (captureBusy.value) return;
   // 本机不可用（ARM64）：开关已置灰，合成事件也绕不过。
-  if (captureUnavailable.value) return;
+  if (captureSupportUnavailable.value) return;
   // 每次开启都先弹确认（2026-10-03 定稿）；关闭方向直接执行。
   if (rc003Status.value?.enabled !== true) {
     showCaptureConfirm.value = true;
@@ -1407,6 +1538,8 @@ async function applyCaptureToggle(): Promise<void> {
     });
   } finally {
     captureBusy.value = false;
+    // 开关动作即改变"开着但没生效"的判断，立刻读一次；失败时也读，避免沿用旧值。
+    void refreshCaptureHealth(false);
   }
 }
 
@@ -1699,6 +1832,13 @@ let voiceObservationId = 0;
 let voiceAttemptSerial = 0;
 let voiceAttemptCount = 0;
 let voiceSnapshotErrorLogged = false;
+/** 一次 attempt 只记一条撕裂结束帧，避免 200 ms 轮询重复刷同一行。 */
+let voiceTornEndLogged = false;
+/**
+ * 语音测试轮询的 IPC 慢调用阈值：主线程被阻塞时 200 ms 轮询会排队，
+ * 超过 1 s 必须留痕（2026-11-25 现场 15–23 s 无任何日志可定位）。
+ */
+const VOICE_SNAPSHOT_SLOW_MS = 1_000;
 /** 终态时刻（迟到延迟毫秒的证据起点）。 */
 let voiceTerminalAt = 0;
 /** 迟到文字被物理键计数否掉后不再翻案（同一 attempt 只裁决一次）。 */
@@ -1827,6 +1967,7 @@ async function startVoiceTestSession(): Promise<void> {
   voiceFailureMessage.value = "";
   voicePhase.value = "waiting_start";
   voiceSnapshotErrorLogged = false;
+  voiceTornEndLogged = false;
   if (!stagedTool.value) {
     // 应用重启后直接落在第⑥步：读一次正式配置，供核对卡与排除集使用。
     await prepareVoiceToolStep();
@@ -1996,13 +2137,42 @@ async function pollVoiceTest(): Promise<void> {
       }
       return;
     }
+    const snapshotStartedAt = performance.now();
     const snapshot = await getRuntimeSnapshot();
+    const snapshotMs = Math.round(performance.now() - snapshotStartedAt);
+    if (snapshotMs >= VOICE_SNAPSHOT_SLOW_MS) {
+      // 2026-11-25 现场：主线程被阻塞时 200 ms 轮询会排队，日志里看不出"轮询停了"。
+      // 只记一次往返耗时；具体卡在快照哪个子系统由 Rust `runtime_snapshot … slow` 给。
+      reportOnboardingEvent({
+        kind: "poll",
+        result: "unknown",
+        reason: "slow_snapshot",
+        step: "voice_test",
+        detail: `rt_${snapshotMs}`,
+      });
+    }
     if (serial !== voiceAttemptSerial || voiceTracker !== tracker || step.value !== "voice_test") {
       return;
     }
     const frame = voiceAttemptInput(snapshot);
     const now = Date.now();
     const stateNow = tracker.state();
+    if (
+      (stateNow === "streaming" || stateNow === "waiting_end") &&
+      !voiceTornEndLogged &&
+      isTornVoiceEndFrame(frame)
+    ) {
+      // 结束方向撕裂帧：上一会话 idle + 下一会话 audio 忙。记原始字段，
+      // 下一次不必再从 `s23280_q0_drain0` 反推帧形态。
+      voiceTornEndLogged = true;
+      reportOnboardingEvent({
+        kind: "voice_attempt",
+        result: "unknown",
+        reason: "torn_end_frame",
+        step: "voice_test",
+        detail: `vs_${frame.voiceState}_ap_${frame.audioPhase}_s${frame.submittedSamples}_q${frame.queuedSamples}_d${frame.decodedSamples}`,
+      });
+    }
     if (stateNow !== "terminal") {
       if (
         stateNow !== "waiting_start" &&
@@ -2162,7 +2332,7 @@ function onVoiceTerminal(terminal: VoiceAttemptTerminal): void {
     result: terminal.result,
     reason: terminal.code ?? "passed",
     step: "voice_test",
-    detail: `d${terminal.evidence.decodedSamples}_s${terminal.evidence.submittedSamples}_q${terminal.evidence.queuedEnd}_drain${terminal.evidence.drainObserved ? 1 : 0}`,
+    detail: `d${terminal.evidence.decodedSamples}_s${terminal.evidence.submittedSamples}_q${terminal.evidence.queuedEnd}_drain${terminal.evidence.drainObserved ? 1 : 0}${terminal.evidence.endFrameTorn ? "_torn1" : ""}`,
     elapsedMs: terminal.elapsedMs,
   });
   if (terminal.code === "voice.no_transcript") {
@@ -2264,6 +2434,7 @@ async function retryVoiceTest(): Promise<void> {
     step: "voice_test",
   });
   voiceTestRef.value?.clearBox();
+  void refreshCaptureHealth(false);
   await startVoiceTestSession();
 }
 </script>
@@ -2336,10 +2507,11 @@ async function retryVoiceTest(): Promise<void> {
           <FullKeyStep
             v-else-if="step === 'full_key'"
             :enabled="rc003Status?.enabled === true"
-            :available="!captureUnavailable"
+            :available="!captureSupportUnavailable"
             :busy="captureBusy"
             :loading="captureStatusLoading"
             :failure-text="fullKeyFailure"
+            :health-text="fullKeyHealthText"
             @toggle="requestCaptureToggle"
           />
           <AudioStep
@@ -2362,6 +2534,7 @@ async function retryVoiceTest(): Promise<void> {
             :capture-enabled="rc003Status?.enabled === true"
             :capture-busy="captureBusy"
             :capture-hint="captureHint"
+            :capture-health-hint="voiceCaptureHint ?? ''"
             :conflict="stagedTool === 'doubao' && vokie?.running === true"
             :vokie="vokie"
             :vokie-busy="vokieBusy"
@@ -2386,6 +2559,7 @@ async function retryVoiceTest(): Promise<void> {
             :audio-text="voiceAudioText"
             :show-ime-checklist="voiceToolNeedsIme"
             :ime-hint="imeHint"
+            :capture-hint="voiceCaptureHint ?? ''"
             @input="onVoiceInput"
             @focus="onVoiceBoxFocus"
             @blur="onVoiceBoxBlur"

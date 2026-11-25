@@ -66,6 +66,26 @@ export interface VoiceAttemptEvidence {
   queuedEnd: number;
   /** 是否观测到"回到 idle 且队列已排空"的结束形态。 */
   drainObserved: boolean;
+  /** 结束帧是否为"上一会话 idle + 下一会话 audio streaming"的撕裂快照。 */
+  endFrameTorn: boolean;
+}
+
+/**
+ * 结束方向的撕裂帧（2026-11-25 现场）：`connection` 已回到上一会话的 idle，
+ * `audio` 已经进入下一会话的 Streaming（`BeginSession` 把 submittedSamples 归零），
+ * 两者被同一次快照按子系统依次读到。它不是"结束但未排空"，而是"新会话已开始"。
+ *
+ * 判据只取各子系统的不可能组合：正常结束时后端先让 audio 回到 ready、再让
+ * voiceState 回到 idle；因此 `idle + streaming|draining` 只在撕裂时出现。
+ * 队列非空仍按真实的未排空处理（不放过投递失败）。
+ */
+export function isTornVoiceEndFrame(input: VoiceAttemptInput): boolean {
+  return (
+    input.voiceState === "idle" &&
+    (input.audioPhase === "streaming" || input.audioPhase === "draining") &&
+    input.audioLastError === null &&
+    input.queuedSamples === 0
+  );
 }
 
 export interface VoiceAttemptTerminal {
@@ -120,6 +140,7 @@ export function createVoiceAttemptTracker(
   let sessionEndAt: number | null = null;
   let drainingSince: number | null = null;
   let terminal: VoiceAttemptTerminal | null = null;
+  let endFrameTorn = false;
 
   function evidence(drainObserved: boolean): VoiceAttemptEvidence {
     return {
@@ -129,6 +150,7 @@ export function createVoiceAttemptTracker(
       submittedSamples: maxSubmitted,
       queuedEnd,
       drainObserved,
+      endFrameTorn,
     };
   }
 
@@ -163,6 +185,7 @@ export function createVoiceAttemptTracker(
     sessionEndAt = null;
     drainingSince = null;
     terminal = null;
+    endFrameTorn = false;
   }
 
   function observe(input: VoiceAttemptInput, now: number): VoiceAttemptTerminal | null {
@@ -217,7 +240,16 @@ export function createVoiceAttemptTracker(
       // 会话结束：按设计稿 §5.5 的优先级分类。
       queuedEnd = input.queuedSamples;
       sessionEndAt = now;
-      const drainObserved = input.audioLastError === null && input.audioPhase === "ready" && input.queuedSamples === 0;
+      const drainObserved =
+        input.audioLastError === null &&
+        input.audioPhase === "ready" &&
+        input.queuedSamples === 0;
+      // 2026-11-25 现场：上一会话结束、下一会话刚开始时，一次快照可能读到
+      // {voiceState:idle, audioPhase:streaming, submittedSamples:0}。它不是上一会话
+      // "未排空"，而是新会话已开始；按 maxSubmitted > 0 + 队列为空认作已投递，
+      // 否则会把满速音频误报成 voice.audio_delivery_failed。
+      endFrameTorn = maxSubmitted > 0 && isTornVoiceEndFrame(input);
+      const deliveryObserved = drainObserved || endFrameTorn;
       const decodedDelta = Math.max(0, maxDecoded - decodedBaseline);
 
       if (input.audioLastError !== null || input.audioPhase === "failed") {
@@ -226,8 +258,8 @@ export function createVoiceAttemptTracker(
       if (decodedDelta === 0 && maxSubmitted === 0) {
         return finish("failed", "voice.no_samples", false, now);
       }
-      if (maxSubmitted === 0 || !drainObserved) {
-        return finish("failed", "voice.audio_delivery_failed", drainObserved, now);
+      if (maxSubmitted === 0 || !deliveryObserved) {
+        return finish("failed", "voice.audio_delivery_failed", deliveryObserved, now);
       }
       if (manualInputSeen) {
         return finish("failed", "voice.manual_input", drainObserved, now);
