@@ -245,6 +245,28 @@
   语音链路（`voice_sessions=0`）仍为 `deferred`。详见
   [2026-11-24-ble-cached-service-false-positive.md](2026-11-24-ble-cached-service-false-positive.md)。
 
+### 2026-11-25 第五份用户日志（1.9.7：短暂可用后链路长期不在）
+
+另一份 1.9.7 用户日志（`98fd2a24`、Windows 10.0.26300 x64、RC001，日志覆盖
+2026-11-19T00:47Z–2026-11-25T06:51Z）呈现另一种形态：
+
+- 升级后 10:12–10:16（本地）有 7 次可用连接，服务发现与 transmit 探测均通过，
+  电量 82–83%，两次语音键采集到 20,400 / 4,800 samples；1.9.6 的 cached
+  假阳性修复在 2 条 cached 路径上实际生效。
+- 10:17 后链路不再建立：4.5 小时内 467 次尝试、459 次失败；其中 454 次
+  `ble_connect_link` 在 service_discovery 阶段且 `link_status=disconnected`，
+  2 次超时（`link_status=connected`），3 次在后续特征阶段断开；0 次
+  `gatt_access_denied`；HID 接口只在 10:15、10:17、10:53 短暂出现。
+- 10:29 的完整重启（`boot_type=full`）没有恢复；10:53 遥控器短暂出现 10 s 后
+  再次消失。同一台机器的 1.9.3 从 11-19 至 11-25 另有 5,013 次
+  `device_from_address` 空对象失败（S_OK + null）与 335 次 `gatt_unreachable`，
+  说明这是长期存在的机器/遥控器侧不稳定，不是 1.9.7 新引入的路径选择回归。
+- 结论边界：这次是“链路根本不在”，五路径 fallback 不会凭空建立链路；应用侧
+  没有新的 GATT 路径缺陷证据。下一步是用户侧 A/B（普通键唤醒、关闭手机/电视
+  蓝牙、删除后重配对、另一台电脑）与 Windows 蓝牙事件取证。
+
+详见 [2026-11-25-rc001-link-absent-after-1.9.7-upgrade.md](2026-11-25-rc001-link-absent-after-1.9.7-upgrade.md)。
+
 ## 验证
 
 - `cargo fmt --all -- --check`：`passed`
