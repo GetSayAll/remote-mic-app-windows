@@ -148,8 +148,57 @@
 - 安装/升级与真机复现：`deferred`（需要用户机器与遥控器；包未在本机安装覆盖）。
 - 真机探测：`deferred`（需要用户机器与遥控器在失败态复现；本机无该现场）
 
-下次报障只需一份 `sayall-diagnostic.log`，先看 `ble_adv seen/connectable`
-与 `raw_input scan reason` 两行，即可区分上述四类原因，不再靠猜。
+下次报障只需一份 `sayall-diagnostic.log`，加一份
+`scripts/collect-bluetooth-adapter.ps1` 的输出。先看 `ble_adv seen/connectable`、
+`raw_input scan reason`、`ble_adapter bus_type/power_state`，再看脚本的
+`adapter_count`/`selective_suspend`/`bluetooth_event`/`pnp_event` 计数，即可区分
+空口、链路/ATT、适配器电源/驱动和系统电源事件，不再靠猜。
+
+## 适配器侧诊断补齐（2026-11-25，本分支）
+
+两份现场日志都来自「台式机 + USB 蓝牙适配器」环境。应用日志能证明链路不在，但看不到
+适配器总线类型、最近电源状态、驱动版本、蓝牙/USB 事件和系统电源事件。样本只有两份，
+不能把「台式机+适配器」直接认定为根因（选择偏差、USB 3 干扰、选择性挂起、旧驱动、
+快速启动都可能是放大器），但需要把这些事实变成可回传的证据。
+
+改动（只读，不改变重连/GATT/按键决策）：
+
+1. `ble_adapter` 在 `trigger=startup` 和 `trigger=failure_streak`（第 5 次及之后
+   每 10 次失败）追加 `attempt`、`bus_type`、`power_state`；`attempt` 与同次
+   `ble_adv` 对齐。`bus_type` 来自 PnP 枚举器名（`usb|internal|bth_stack|sdio|unknown`）；
+   `power_state` 来自 `DEVPKEY_Device_PowerData.PD_MostRecentPowerState`
+   （`d0|d1|d2|d3|unknown`，最近一次状态，不是实时瞬态）。`BluetoothAdapter.DeviceId`
+   是设备接口路径，应用只在本地转换成 PnP 实例 ID 后查询，不落盘。
+2. 新增 `scripts/collect-bluetooth-adapter.ps1`：普通权限采集物理适配器
+   （USB/PCI/ACPI/SDIO 枚举器）、`MSPower_DeviceEnable`、驱动版本、蓝牙服务状态、
+   System 日志中的 BTH/Bluetooth 事件计数、Kernel-Power（睡眠/恢复/非正常关机）
+   和 Kernel-PnP（411/219）计数。不输出设备名称、实例 ID、蓝牙地址、驱动路径、
+   用户路径或事件原文。
+3. 验证：
+   - `cargo fmt --all -- --check`：`passed`
+   - `cargo test -p sayall-windows --lib adapter`：`passed`（新增接口路径→实例 ID
+     解析、bus/power token、备注格式用例）
+   - `cargo test -p sayall-windows --lib real_adapter_pnp_facts_are_readable -- --ignored`：
+     `passed`，本机 MediaTek USB 适配器读回 `bus_type=usb power_state=d2`
+   - 脚本在本机普通权限运行：`passed`，`adapter_count=1 bus=usb status=OK
+     service=BTHUSB driver_version=1.1044.0.556 selective_suspend=true`，System
+     与电源事件均有计数输出；无设备身份信息。
+   - `cargo test --workspace`：`passed`（sayall-windows 633 passed / 21 ignored；
+     sayall-windows-app 233 passed / 2 ignored；其余 crate 与文档测试 0 failed）
+   - `cargo check --workspace`：`passed`
+   - `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
+   - `scripts/ci-preflight.ps1`：`passed`（见本记录末尾）
+   - RC001/RC003 真机复现：`deferred`（需要用户机器与遥控器在失败态）。
+
+判读边界：
+
+- `bus_type=usb` + 反复 `power_state=d2/d3` + `pnp_event`/`bluetooth_event` 计数上升，
+  支持「USB 选择性挂起/重置」方向；但这些事件计数是**系统级**的，不是适配器专属，
+  必须与 `sayall-diagnostic.log` 时间戳对齐。
+- `bus_type=bth_stack` 只说明 WinRT 返回 BTH 栈节点，不能区分内置/外置。
+- `selective_suspend=true` 是允许挂起，不是已经挂起；`wake_armed` 常为 `unknown`，
+  不作为判据。
+- 不覆盖 USB Hub 供电、2.4 GHz 干扰和厂商驱动内部状态；这些仍是 `deferred`。
 
 ## 下一步
 
@@ -162,14 +211,15 @@
      不作为常规解法。
    - 换一个 USB 口/另一台电脑测试同一只遥控器；另一台正常则重点查本机适配器
      与 Windows BLE 栈，仍失败则重点查遥控器。
-2. 应用侧（待产品决策，本次未改）：
+2. 应用侧（未改动，待产品决策）：
    - 把 `reconnect-guidance` 卡复用到连接页（连续 60 s 或 ≥5 次重连、且 HID
      仍 `awaiting` 时显示）。
    - `BleSession::connect` 结束前复查 `ConnectionStatus`，不在已断开时写
      `passed`。
-3. 机器侧取证（下次报障）：Windows `Microsoft-Windows-Bluetooth-BthLEEnum`
-   Operational 事件、`Get-PnpDevice -Class Bluetooth` 状态、适配器总线类型
-   （内置/USB）。应用日志只能证明链路不在，不能区分上述候选。
+3. 机器侧取证（下次报障）：运行 `scripts/collect-bluetooth-adapter.ps1`，并对照
+   Windows `Microsoft-Windows-Bluetooth-BthLEEnum` Operational 事件；脚本已覆盖
+   物理适配器、选择性挂起、驱动版本、蓝牙/PnP/电源事件计数。应用日志现在也会
+   给出 `bus_type`/`power_state`。应用日志只能证明链路不在，不能区分上述候选。
 
 ## 验证
 
@@ -177,7 +227,16 @@
   `link_status=disconnected` / 0 次 access denied / 0 次 suspend；统计命令与
   输出在本记录第 2 节。结论 `passed`（实际观察到）。
 - 真机 A/B：`deferred`（需要用户机器与遥控器）。
-- 代码改动：无；本文不声称修复。
+- 代码改动：`410cba9d860b6257eee1aa4adacf67aabe02c5cb`
+  （`diag(ble): 补适配器 PnP 总线与电源诊断`）；只读诊断，不改变重连/GATT/按键。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.7_x64-setup.exe`
+  （13,607,146 字节，SHA-256
+  `66ab2cd7bf6e964e0cc906694ad14d6f0ab53216b60498a7a017d2fcd64bd14d`）；
+  裸 exe 内嵌 `source_revision=410cba9d860b6257eee1aa4adacf67aabe02c5cb`，
+  `verify-frontend-embedded.ps1` 18/18 `passed`。本地测试签名与 CI updater
+  pubkey 不匹配，属预期；该包与 `.sig` 不可发布。
+- 安装/升级/启动：`deferred`（未在本机覆盖安装；需用户机器验证）。
+- RC001/RC003 真机复现：`deferred`（需要用户机器与遥控器在失败态）。
 
 ## 隐私检查
 

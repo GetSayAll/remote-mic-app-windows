@@ -149,9 +149,15 @@ issue #104 的 1.9.5 日志能证明“配对记录存在、服务发现失败�
 “Windows 在尝试期间是否曾经连上过”。连接路径补充三类只读日志（这三类日志
 本身不改变重连或 GATT 决策；后续的服务路径验证见本节末尾）：
 
-- `ble_adapter phase=observed low_energy=... central_role=... peripheral_role=... classic=... radio_state=...`：
-  进程启动后由独立短生命周期线程查询 `BluetoothAdapter`，只记录能力布尔和 Radio
-  状态；查询失败写 `terminal_result=unavailable`，不记录适配器名称、地址或设备 ID。
+- `ble_adapter phase=observed trigger=startup|failure_streak attempt=none|N low_energy=... central_role=... peripheral_role=... classic=... radio_state=... bus_type=... power_state=...`：
+  进程启动时，以及连续失败第 5 次（约 60 秒）之后每 10 次失败，由独立短生命周期
+  线程查询 `BluetoothAdapter` 能力、Radio 状态和适配器 PnP 事实。`trigger=startup`
+  时 `attempt=none`；`trigger=failure_streak` 时 `attempt=N` 与同次 `ble_adv` 的
+  `attempt` 一致。`bus_type=usb|internal|bth_stack|sdio|unknown` 来自
+  `DEVPKEY_Device_EnumeratorName`；`power_state=d0|d1|d2|d3|unknown` 来自
+  `DEVPKEY_Device_PowerData.PD_MostRecentPowerState`（最近一次电源状态，不是实时
+  瞬态）。查询失败写 `terminal_result=unavailable ... reason=adapter_unavailable`，
+  也带 `trigger`/`attempt`。不记录适配器名称、地址、设备实例 ID、驱动路径。
 - `ble_device phase=access ... access_status=... is_paired=... is_present=... is_connected=... is_enabled=...`：
   每次连接尝试在创建设备对象后、服务发现前记录访问/配对/在场快照；只写稳定 token。
   `is_present`/`is_connected` 来自 AEP 属性，读不到时写 `unknown`。
@@ -222,6 +228,33 @@ Windows 链路/ATT/配对层」。连接失败段补三类只读日志；都不�
   就掉”和“稳定一段时间后偶发掉链”，以及掉链是否紧跟在语音结束之后。
 
 这些行只用于分流链路层原因；不能替代 `ble_service_path` 的 GATT 路径结果。
+
+### BLE 适配器 PnP 事实与采集脚本（2026-11-25）
+
+两份 1.9.7 现场日志都来自「台式机 + USB 蓝牙适配器」环境；应用日志能证明链路不在，
+但看不到适配器总线类型、最近电源状态、驱动版本、蓝牙事件和系统电源事件。为此：
+
+- `ble_adapter` 追加 `bus_type` 与 `power_state`：`DeviceId` 是设备接口路径，应用只在
+  本地把它转换成 PnP 实例 ID 后查询 `DEVPKEY_Device_EnumeratorName` 与
+  `DEVPKEY_Device_PowerData`；原始路径和实例 ID 不落日志。`CM_Get_DevNode_PropertyW`
+  第一次返回 `CR_BUFFER_SMALL`（26）是正常的两段查询路径，不是失败。
+- `scripts/collect-bluetooth-adapter.ps1`：普通用户权限运行，采集物理适配器
+  （USB/PCI/ACPI/SDIO 枚举器）、`MSPower_DeviceEnable`（USB 选择性挂起设置）、
+  驱动版本、蓝牙服务状态，以及 System 日志中 BTH/Bluetooth 事件和 Kernel-Power/
+  Kernel-PnP 事件的**按 provider/id 计数**。不读取/输出设备名称、实例 ID、蓝牙地址、
+  驱动路径、用户路径或事件原文。
+  - 用法：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/collect-bluetooth-adapter.ps1`
+    （可加 `-OutFile adapter-facts.txt`、`-EventWindowDays 14`）。
+  - 判读：`adapter_count=0` = 没有枚举到物理适配器；`selective_suspend=true` = 允许
+    Windows 挂起该 USB 设备（不等于已经挂起）；`power_state=d2/d3` 配合
+    `bluetooth_event`/`pnp_event` 计数，才支持「适配器被挂起/重置」的方向；
+    `driver_version` 用于识别旧驱动；`bth_stack` 表示 WinRT 返回的是 BTH 栈节点，
+    不能据此推断内置或外置。
+  - **`bluetooth_event`/`pnp_event`/`power_event` 是系统级计数，不是适配器专属**；
+    必须与 `sayall-diagnostic.log` 的时间戳对齐，不能单独归因到蓝牙适配器。
+  - 不覆盖：USB Hub/端口的供电与链路训练、2.4 GHz 干扰、xHCI 控制器内部状态、
+    厂商驱动内部日志。需要这些证据时走 Windows 事件日志、USBView 或厂商工具，
+    并仍然只保留分类与计数。
 
 ## 隐私红线
 
