@@ -56,7 +56,7 @@ export default {
   "沿用默认 · {summary}": "Default · {summary}",
   "沿用默认": "Use default",
   "不执行操作": "Do nothing",
-  "不执行": "Off",
+  "不执行": "No action",
   "不可用": "Unavailable",
   "不可用：{reason}": "Unavailable: {reason}",
   "已设置": "Set",

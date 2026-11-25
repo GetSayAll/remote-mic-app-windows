@@ -230,6 +230,19 @@ pub enum RemoteModel {
     Unknown,
 }
 
+impl RemoteModel {
+    /// serde 的 snake_case token：按键映射 `gestureTimingsByModel` 的键。
+    ///
+    /// 与 `#[serde(rename_all = "snake_case")]` 必须保持一致（有单测）。
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Rc001 => "rc001",
+            Self::Rc003 => "rc003",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioEndpoint {
@@ -1285,6 +1298,10 @@ impl WindowsPlatform {
                 gatt_note("runtime_snapshot phase=requested checkpoint=connection".to_owned());
             }
             let connection = self.connection_snapshot();
+            // 型号可能已变（换了遥控器/首次连上）：让引擎立即切到对应时间桶。
+            // 只读连接快照，不嵌套持锁。
+            self.button_mapping
+                .set_active_model(connection.remote_model);
             let connection_ms = snapshot_started.elapsed().as_millis();
             let audio_started = std::time::Instant::now();
             if trace_initial {
@@ -1399,6 +1416,8 @@ impl WindowsPlatform {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *mirror = profiles;
         }
+        self.button_mapping
+            .set_active_model(self.connection_snapshot().remote_model);
         self.button_mapping.set_mappings(mappings);
         #[cfg(windows)]
         self.rc003_bridge.set_capture_targets(
@@ -2114,6 +2133,18 @@ mod tests {
             Some(RemoteModel::Rc003)
         );
         assert_eq!(remote_model_from_model_number("RC002"), None);
+    }
+
+    #[test]
+    fn remote_model_token_matches_serde_snake_case() {
+        for model in [RemoteModel::Rc001, RemoteModel::Rc003, RemoteModel::Unknown] {
+            assert_eq!(
+                serde_json::to_value(model).unwrap(),
+                serde_json::Value::String(model.token().to_owned())
+            );
+        }
+        assert_eq!(RemoteModel::Rc001.token(), "rc001");
+        assert_eq!(RemoteModel::Rc003.token(), "rc003");
     }
 
     #[test]
