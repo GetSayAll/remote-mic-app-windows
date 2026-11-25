@@ -38,6 +38,15 @@
     "category": "Productivity",
     "shortDescription": "把 RC001/RC003 遥控器的语音和按键桥接到 Windows",
     "longDescription": "无线麦 SayAll Windows 版通过公开 Windows API 接收 RC001 和 RC003 遥控器的语音和普通按键。",
+    "fileAssociations": [
+      {
+        "ext": ["sayall"],
+        "name": "SayAll 键位方案",
+        "description": "无线麦 SayAll 键位方案",
+        "role": "Editor",
+        "mimeType": "application/json"
+      }
+    ],
     "icon": [
       "icons/app-icons/faceted-duck-256.png",
       "icons/app-icons/faceted-duck.ico"

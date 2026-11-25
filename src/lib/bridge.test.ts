@@ -6,6 +6,7 @@ import {
   activateAppForLearning,
   APP_ICON_CHANGED_EVENT,
   audioPhaseLabel,
+  BUTTON_PROFILES_MARKET_URL,
   chordLabel,
   connectionPhaseLabel,
   formatDiagnosticReport,
@@ -19,6 +20,7 @@ import {
   latestMacroDefinitions,
   OFFICIAL_WEBSITE_URL,
   openAppLabel,
+  openButtonProfilesMarket,
   openGitHubRepository,
   openLogDirectory,
   openOfficialWebsite,
@@ -455,6 +457,16 @@ describe("设置页外部入口（官网 / GitHub）", () => {
       OFFICIAL_WEBSITE_URL,
       GITHUB_REPOSITORY_URL,
     ]);
+  });
+
+  it("键位方案市场交给 opener，地址与 capability 白名单逐字一致", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    vi.mocked(openUrl).mockResolvedValue(undefined);
+
+    await openButtonProfilesMarket();
+
+    expect(vi.mocked(openUrl)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(openUrl)).toHaveBeenCalledWith(BUTTON_PROFILES_MARKET_URL);
   });
 });
 

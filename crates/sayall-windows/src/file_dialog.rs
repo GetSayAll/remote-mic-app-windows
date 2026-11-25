@@ -6,37 +6,60 @@ use std::path::PathBuf;
 /// 初始化或调用失败会保留为错误，供上层写入去标识化日志。
 #[cfg(windows)]
 pub fn pick_button_mapping_import_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Open, DialogFlavor::Mapping)
+    pick_dialog(DialogKind::Open, DialogFlavor::Mapping, None)
 }
 
 /// 选择按键映射 JSON 的导出位置。
 #[cfg(windows)]
 pub fn pick_button_mapping_export_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Save, DialogFlavor::Mapping)
+    pick_dialog(DialogKind::Save, DialogFlavor::Mapping, None)
 }
 
 /// 选择 `.sayall` 键位方案的导入文件（私有组件使用；公开构建不调用）。
 #[cfg(windows)]
 pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Open, DialogFlavor::ButtonProfile)
+    pick_dialog(DialogKind::Open, DialogFlavor::ButtonProfile, None)
 }
 
-/// 选择 Windows 键位方案备份的导出位置（私有组件使用；公开构建不调用）。
+/// 选择键位方案 `.sayall` 的导出位置（私有组件使用；公开构建不调用）。
 #[cfg(windows)]
-pub fn pick_button_profile_export_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Save, DialogFlavor::ButtonProfileExport)
+pub fn pick_button_profile_export_path(
+    suggested_name: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
+    pick_dialog(
+        DialogKind::Save,
+        DialogFlavor::ButtonProfileExport,
+        suggested_name.map(str::to_owned),
+    )
+}
+
+fn mac_button_profile_file_name(profile_name: &str) -> String {
+    let safe: String = profile_name
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => character,
+        })
+        .collect();
+    let safe = safe.trim_matches(|character: char| character == '.' || character == ' ');
+    if safe.is_empty() {
+        "SayAll-button-profile.sayall".to_owned()
+    } else {
+        format!("{safe}-button-profile.sayall")
+    }
 }
 
 /// 选择组合动作 `.sayall` 的导入文件（macOS `sayall-transfer 1.0`）。
 #[cfg(windows)]
 pub fn pick_combined_actions_import_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Open, DialogFlavor::Sayall)
+    pick_dialog(DialogKind::Open, DialogFlavor::Sayall, None)
 }
 
 /// 选择组合动作 `.sayall` 的导出位置。
 #[cfg(windows)]
 pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Save, DialogFlavor::Sayall)
+    pick_dialog(DialogKind::Save, DialogFlavor::Sayall, None)
 }
 
 #[cfg(not(windows))]
@@ -55,7 +78,9 @@ pub fn pick_button_profile_import_path() -> Result<Option<PathBuf>, String> {
 }
 
 #[cfg(not(windows))]
-pub fn pick_button_profile_export_path() -> Result<Option<PathBuf>, String> {
+pub fn pick_button_profile_export_path(
+    _suggested_name: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
     Err("文件选择器仅在 Windows 上可用".to_owned())
 }
 
@@ -72,7 +97,7 @@ pub fn pick_combined_actions_export_path() -> Result<Option<PathBuf>, String> {
 /// 选择回眸原始录音的导出位置。
 #[cfg(windows)]
 pub fn pick_audio_export_path() -> Result<Option<PathBuf>, String> {
-    pick_dialog(DialogKind::Save, DialogFlavor::Audio)
+    pick_dialog(DialogKind::Save, DialogFlavor::Audio, None)
 }
 
 #[cfg(not(windows))]
@@ -98,17 +123,25 @@ enum DialogFlavor {
 }
 
 #[cfg(windows)]
-fn pick_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>, String> {
+fn pick_dialog(
+    kind: DialogKind,
+    flavor: DialogFlavor,
+    suggested_name: Option<String>,
+) -> Result<Option<PathBuf>, String> {
     std::thread::Builder::new()
         .name("sayall-file-dialog".to_owned())
-        .spawn(move || run_dialog(kind, flavor))
+        .spawn(move || run_dialog(kind, flavor, suggested_name.as_deref()))
         .map_err(|_| "启动文件选择器线程失败".to_owned())?
         .join()
         .map_err(|_| "文件选择器线程异常退出".to_owned())?
 }
 
 #[cfg(windows)]
-fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>, String> {
+fn run_dialog(
+    kind: DialogKind,
+    flavor: DialogFlavor,
+    suggested_name: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
     use windows::core::{Interface, HRESULT, PCWSTR};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -175,11 +208,11 @@ fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>,
                     "sayall",
                 ),
                 DialogFlavor::ButtonProfileExport => (
-                    "导出键位方案备份",
-                    "SayAll 键位方案备份 (*.json)",
-                    "*.json",
-                    "SayAll-键位方案备份.json",
-                    "json",
+                    "导出键位方案",
+                    "SayAll 键位方案 (*.sayall)",
+                    "*.sayall",
+                    "SayAll-键位方案.sayall",
+                    "sayall",
                 ),
                 DialogFlavor::Audio => (
                     "导出原始录音",
@@ -189,10 +222,17 @@ fn run_dialog(kind: DialogKind, flavor: DialogFlavor) -> Result<Option<PathBuf>,
                     "wav",
                 ),
             };
+        let default_name_text = if matches!(flavor, DialogFlavor::ButtonProfileExport) {
+            suggested_name
+                .map(mac_button_profile_file_name)
+                .unwrap_or_else(|| default_name_text.to_owned())
+        } else {
+            default_name_text.to_owned()
+        };
         let title = wide(title_text);
         let filter_name = wide(filter_name_text);
         let filter_spec = wide(filter_spec_text);
-        let default_name = wide(default_name_text);
+        let default_name = wide(&default_name_text);
         let extension = wide(extension_text);
         let filters = [COMDLG_FILTERSPEC {
             pszName: PCWSTR(filter_name.as_ptr()),
@@ -257,6 +297,8 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use super::mac_button_profile_file_name;
+
     #[test]
     #[cfg(windows)]
     fn open_and_save_dialog_com_classes_are_available() {
@@ -297,5 +339,17 @@ mod tests {
             .join()
             .expect("dialog probe panicked");
         assert!(available, "IFileOpenDialog/IFileSaveDialog COM 类应可用");
+    }
+
+    #[test]
+    fn mac_button_profile_default_name_matches_mac_export() {
+        assert_eq!(
+            mac_button_profile_file_name("网易云音乐 10键"),
+            "网易云音乐 10键-button-profile.sayall"
+        );
+        assert_eq!(
+            mac_button_profile_file_name("a/b"),
+            "a_b-button-profile.sayall"
+        );
     }
 }

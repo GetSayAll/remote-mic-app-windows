@@ -122,9 +122,20 @@ pub fn button_profiles_pick_import_file() -> Result<Option<String>, String> {
 
 /// 选择键位方案备份的导出位置（取消返回 `null`）。
 #[tauri::command]
-pub fn button_profiles_pick_export_file() -> Result<Option<String>, String> {
-    sayall_windows::file_dialog::pick_button_profile_export_path()
+pub fn button_profiles_pick_export_file(
+    suggested_name: Option<String>,
+) -> Result<Option<String>, String> {
+    sayall_windows::file_dialog::pick_button_profile_export_path(suggested_name.as_deref())
         .map(|path| path.map(|path| path.to_string_lossy().into_owned()))
+}
+
+/// 取走双击 `.sayall` 时排队等待导入的路径（只取一次）。
+#[tauri::command]
+pub fn button_profiles_take_open_file() -> Option<String> {
+    if !current_button_profile_host().is_available() {
+        return None;
+    }
+    sayall_windows::button_profile_open::take().map(|path| path.to_string_lossy().into_owned())
 }
 
 /// 页面命令分发（命令名与 payload 均由私有组件定义）。
