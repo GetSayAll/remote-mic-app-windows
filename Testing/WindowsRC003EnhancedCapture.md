@@ -597,3 +597,24 @@ grep -nF -e '[CANARY]' -e '[CONFIG]' -e '[SUMMARY]' "$LOG" | tail -20
 | `[EDGE]` 有、但主程序里三键映射不触发 | 清空与转发是两件事：第 ② 段（桥接）没通 | 看 `[SUMMARY] app_bridge=`：`connects=0` → 启动主程序并确认 `%LOCALAPPDATA%\SayAll\rc003-bridge.ini` 存在；据 `app_bridge_last_error` 定位（`descriptor_missing` / `rejected(DENY…)` / `version_mismatch`）。判据见 §7.5 |
 | 语音能出字但**内容对不上**（`voice_attempt` / `voice_effect` 全绿） | 输入法的麦克风选了「自动检测」，跟随系统默认录音设备——本机默认可能落到内置麦克风阵列或「立体声混音」，录到的不是 `CABLE Output` 这一路 | 看同一段的 `voice_capture_input default=<名> is_cable_output=false`；把输入法麦克风改成 `CABLE Output` 即可（2026-10-27 现场验证，改完立刻恢复）。再用 `voice_level peak_dbfs=… rms_dbfs=… clipped=…` 区分"声音太小 / 削波 / 音频没进来"。记录见 `Bugs/2026-10-27-voice-accuracy-input-device-auto-detect.md` |
 | 哨兵键不恢复 | fail-open 失效——**这是真问题** | 立刻按 Ctrl+C / 关窗；仍不恢复就断开重配对 RC003；把日志留档 |
+
+---
+
+## 11. 共享宿主 + 键盘类 HID 的条件收缩（2026-11-25）
+
+- 触发：宿主 `members > 1`，且其它非遥控器成员的子 HID `HardwareIds` 包含
+  `HID_DEVICE_SYSTEM_KEYBOARD` 或 `HID_DEVICE_UP:0001_U:0006`（查询失败按未知处理，
+  保守收紧）。
+- 效果：方向 `0x004F`–`0x0052` 与 OK/Enter `0x0028` 不进入报告层，回落到旧
+  Raw Input + `key_gate`；返回 / 音量±、Home / TV / Menu 等保持原策略。
+- 两型号统一：RC001 / RC003 共用 BLE HID 硬件串，按同一策略处理；型号只在
+  `ble_model` / 日志 `model=` 里区分。
+- 日志判据：
+  - helper `[EXCLUSIVE] … other_keyboard=1|0|unknown host_policy=restrict_high_freq|full`
+  - helper `[APP-BRIDGE] event=hello_config …`
+  - app `enhanced_capture event=host_policy … restrict_high_freq=1 … model=Rc001|Rc003`
+  - app `enhanced_capture event=targets_changed … usages=… reason=hello`
+  - app `enhanced_capture event=remote_model model=… previous=…`
+- 验收：RC001 / RC003 各一次，共享宿主 + 物理键盘；按方向 / OK / 回车确认物理键盘
+  原生行为、遥控器映射仍生效；独占宿主下目标集保持全键。当前 **deferred**：
+  开发机为独占宿主，需客户机或构造共享宿主。

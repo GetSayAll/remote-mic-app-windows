@@ -3800,6 +3800,7 @@ impl BleSession {
             snapshot.remote_token = Some(crate::device_token(device_id));
             snapshot.last_error = None;
         }
+        crate::rc003_bridge::set_remote_model(model);
         let service_result =
             connect_stage(reconnecting, reconnect_attempt, "service_discovery", || {
                 gatt_discovery::discover_atvv_service(
@@ -3945,6 +3946,7 @@ impl BleSession {
                 Some(model) => {
                     connected.model = model;
                     lock(state).remote_model = model;
+                    crate::rc003_bridge::set_remote_model(model);
                     gatt_note(format!(
                         "ble_model phase=completed terminal_result=passed source=gatt_2a24 model={model:?} connection_generation={connection_generation}"
                     ));
