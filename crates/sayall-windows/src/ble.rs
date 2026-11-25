@@ -22,7 +22,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use windows::core::{Interface, GUID, HSTRING};
+use windows::core::{Interface, GUID, HSTRING, PCWSTR};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
     GattCharacteristic, GattCharacteristicProperties,
     GattClientCharacteristicConfigurationDescriptorValue, GattCommunicationStatus,
@@ -36,6 +36,16 @@ use windows::Devices::Enumeration::{DeviceAccessStatus, DeviceInformation};
 use windows::Devices::Radios::RadioState;
 use windows::Foundation::{IPropertyValue, TypedEventHandler};
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    CM_Get_DevNode_PropertyW, CM_Locate_DevNodeW, CM_LOCATE_DEVNODE_NORMAL, CR_BUFFER_SMALL,
+    CR_SUCCESS,
+};
+use windows::Win32::Devices::Properties::{
+    DEVPKEY_Device_EnumeratorName, DEVPKEY_Device_PowerData, DEVPROPTYPE, DEVPROP_TYPE_BINARY,
+    DEVPROP_TYPE_STRING,
+};
+use windows::Win32::Foundation::DEVPROPKEY;
+use windows::Win32::System::Power::CM_POWER_DATA;
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows_future::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
 
@@ -925,7 +935,7 @@ fn worker_loop(
         return;
     }
     let _apartment = WinRtApartment;
-    spawn_adapter_capability_probe();
+    spawn_adapter_capability_probe(AdapterProbeTrigger::Startup);
     let mut session: Option<BleSession> = None;
     let mut pipeline = AtvvVoicePipeline::default();
     let mut active_voice_samples = 0_u64;
@@ -1863,6 +1873,9 @@ fn attempt_connection(
     // 连续失败达到诊断阈值时做一次被动空口扫描（2026-11-25）：只读，不改变
     // 重连/GATT 决策；用于区分「遥控器不在空口」与「在空口但 Windows 连不上」。
     if should_probe_advertisement(reconnecting, reconnect_attempt) {
+        spawn_adapter_capability_probe(AdapterProbeTrigger::FailureStreak {
+            attempt: reconnect_attempt,
+        });
         if let Some(address) = bluetooth_address_from_device_id(device_id) {
             match advertisement_probe::probe_with_timeout(reconnect_attempt, address) {
                 Ok(observation) => gatt_note(advertisement_probe::probe_note(&observation)),
@@ -2027,21 +2040,190 @@ fn radio_state_token(state: Option<RadioState>) -> &'static str {
 
 /// 适配器能力行。只记录 BLE/角色能力与 Radio 状态；不含适配器名称、地址、
 /// 设备 ID 或驱动路径（LOGGING.md 隐私红线）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdapterProbeTrigger {
+    Startup,
+    FailureStreak { attempt: u32 },
+}
+
+impl AdapterProbeTrigger {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::FailureStreak { .. } => "failure_streak",
+        }
+    }
+
+    fn attempt(self) -> Option<u32> {
+        match self {
+            Self::Startup => None,
+            Self::FailureStreak { attempt } => Some(attempt),
+        }
+    }
+}
+
 fn adapter_capability_note(
+    trigger: AdapterProbeTrigger,
     low_energy: Option<bool>,
     central_role: Option<bool>,
     peripheral_role: Option<bool>,
     classic: Option<bool>,
     radio_state: Option<RadioState>,
+    bus_type: &str,
+    power_state: &str,
 ) -> String {
+    let attempt = trigger
+        .attempt()
+        .map_or_else(|| "none".to_owned(), |attempt| attempt.to_string());
     format!(
-        "ble_adapter phase=observed low_energy={} central_role={} peripheral_role={} classic={} radio_state={}",
+        "ble_adapter phase=observed trigger={} attempt={} low_energy={} central_role={} \
+         peripheral_role={} classic={} radio_state={} bus_type={bus_type} \
+         power_state={power_state}",
+        trigger.label(),
+        attempt,
         capability_token(low_energy),
         capability_token(central_role),
         capability_token(peripheral_role),
         capability_token(classic),
         radio_state_token(radio_state)
     )
+}
+
+/// 适配器 PnP 事实：只用枚举器名与最近电源状态，不读取/记录设备实例 ID、
+/// 名称、地址或驱动路径。`BluetoothAdapter.DeviceId` 只在本函数内用于定位
+/// 设备节点，查询失败一律 `unknown`。
+fn adapter_pnp_facts(adapter: &BluetoothAdapter) -> (String, String) {
+    let Ok(device_id) = adapter.DeviceId() else {
+        return ("unknown".to_owned(), "unknown".to_owned());
+    };
+    let Some(devinst) = devnode_from_interface_path(&device_id.to_string()) else {
+        return ("unknown".to_owned(), "unknown".to_owned());
+    };
+    let bus_type = pnp_string_property(devinst, &DEVPKEY_Device_EnumeratorName)
+        .map(|value| bus_type_token(&value).to_owned())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let power_state = pnp_power_state(devinst).unwrap_or_else(|| "unknown".to_owned());
+    (bus_type, power_state)
+}
+
+/// `BluetoothAdapter.DeviceId` 是设备接口路径（`\\?\USB#VID_...#...#{GUID}`），
+/// `CM_Locate_DevNodeW` 需要实例 ID（`USB\VID_...#...`）。这里只在本地做格式
+/// 转换，不记录原始路径；解析失败返回 `None`。
+fn devnode_from_interface_path(interface_path: &str) -> Option<u32> {
+    let stripped = interface_path
+        .strip_prefix(r"\\?\")
+        .unwrap_or(interface_path);
+    let instance_id = adapter_instance_id(interface_path);
+    for candidate in instance_id
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(stripped))
+    {
+        let mut wide: Vec<u16> = candidate.encode_utf16().collect();
+        wide.push(0);
+        let mut devinst = 0u32;
+        let status = unsafe {
+            CM_Locate_DevNodeW(
+                &mut devinst,
+                PCWSTR(wide.as_ptr()),
+                CM_LOCATE_DEVNODE_NORMAL,
+            )
+        };
+        if status.0 == CR_SUCCESS.0 {
+            return Some(devinst);
+        }
+    }
+    None
+}
+
+fn adapter_instance_id(interface_path: &str) -> Option<String> {
+    let stripped = interface_path
+        .strip_prefix(r"\\?\")
+        .unwrap_or(interface_path);
+    let normalized = stripped.replace('#', "\\");
+    let components: Vec<&str> = normalized
+        .split('\\')
+        .filter(|part| !part.is_empty())
+        .collect();
+    (components.len() >= 2).then(|| {
+        components
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\\")
+    })
+}
+
+fn pnp_property(devinst: u32, key: &DEVPROPKEY) -> Option<(DEVPROPTYPE, Vec<u8>)> {
+    let mut property_type = DEVPROPTYPE(0);
+    let mut size = 0u32;
+    let status =
+        unsafe { CM_Get_DevNode_PropertyW(devinst, key, &mut property_type, None, &mut size, 0) };
+    if (status.0 != CR_SUCCESS.0 && status.0 != CR_BUFFER_SMALL.0) || size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size as usize];
+    let status = unsafe {
+        CM_Get_DevNode_PropertyW(
+            devinst,
+            key,
+            &mut property_type,
+            Some(buffer.as_mut_ptr()),
+            &mut size,
+            0,
+        )
+    };
+    if status.0 != CR_SUCCESS.0 {
+        return None;
+    }
+    buffer.truncate(size as usize);
+    Some((property_type, buffer))
+}
+
+fn pnp_string_property(devinst: u32, key: &DEVPROPKEY) -> Option<String> {
+    let (property_type, bytes) = pnp_property(devinst, key)?;
+    if property_type.0 != DEVPROP_TYPE_STRING.0 {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    let length = units
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units.len());
+    Some(String::from_utf16_lossy(&units[..length]))
+}
+
+fn pnp_power_state(devinst: u32) -> Option<String> {
+    let (property_type, bytes) = pnp_property(devinst, &DEVPKEY_Device_PowerData)?;
+    if property_type.0 != DEVPROP_TYPE_BINARY.0 || bytes.len() < size_of::<CM_POWER_DATA>() {
+        return None;
+    }
+    let data = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<CM_POWER_DATA>()) };
+    Some(power_state_token(Some(data.PD_MostRecentPowerState.0)).to_owned())
+}
+
+fn bus_type_token(enumerator: &str) -> &'static str {
+    match enumerator.trim().to_ascii_lowercase().as_str() {
+        "usb" => "usb",
+        "pci" | "acpi" => "internal",
+        "bth" => "bth_stack",
+        "sdio" => "sdio",
+        _ => "unknown",
+    }
+}
+
+fn power_state_token(value: Option<i32>) -> &'static str {
+    match value {
+        Some(1) => "d0",
+        Some(2) => "d1",
+        Some(3) => "d2",
+        Some(4) => "d3",
+        _ => "unknown",
+    }
 }
 
 /// 设备访问状态的稳定 token。
@@ -2105,7 +2287,7 @@ fn link_observed_note(
 /// issue #104 的 1.9.5 日志只能看到“配对成功但服务发现失败”，无法判断 USB
 /// 适配器是否具备 BLE 主机角色。这里只记录能力布尔与 Radio 状态；查询失败
 /// 写 `unknown`，不把原始错误或适配器身份写进日志。
-fn log_adapter_capabilities() {
+fn log_adapter_capabilities(trigger: AdapterProbeTrigger) {
     let observation = (|| -> Result<_, PlatformError> {
         let operation = BluetoothAdapter::GetDefaultAsync().map_err(windows_error)?;
         let adapter = wait_async(
@@ -2120,26 +2302,45 @@ fn log_adapter_capabilities() {
                 wait_async(operation, ADAPTER_QUERY_TIMEOUT, "bluetooth_adapter_radio").ok()
             })
             .and_then(|radio| radio.State().ok());
+        let (bus_type, power_state) = adapter_pnp_facts(&adapter);
         Ok((
             adapter.IsLowEnergySupported().ok(),
             adapter.IsCentralRoleSupported().ok(),
             adapter.IsPeripheralRoleSupported().ok(),
             adapter.IsClassicSupported().ok(),
             radio_state,
+            bus_type,
+            power_state,
         ))
     })();
     match observation {
-        Ok((low_energy, central_role, peripheral_role, classic, radio_state)) => {
+        Ok((
+            low_energy,
+            central_role,
+            peripheral_role,
+            classic,
+            radio_state,
+            bus_type,
+            power_state,
+        )) => {
             gatt_note(adapter_capability_note(
+                trigger,
                 low_energy,
                 central_role,
                 peripheral_role,
                 classic,
                 radio_state,
+                &bus_type,
+                &power_state,
             ));
         }
         Err(error) => gatt_note(format!(
-            "ble_adapter phase=observed terminal_result=unavailable error_domain=bluetooth error_code={} reason=adapter_unavailable",
+            "ble_adapter phase=observed trigger={} attempt={} terminal_result=unavailable \
+             error_domain=bluetooth error_code={} reason=adapter_unavailable",
+            trigger.label(),
+            trigger
+                .attempt()
+                .map_or_else(|| "none".to_owned(), |attempt| attempt.to_string()),
             ble_error_code(&error)
         )),
     }
@@ -2147,26 +2348,34 @@ fn log_adapter_capabilities() {
 
 /// 适配器能力查询放到独立短生命周期线程，避免 WinRT 卡住时拖慢 BLE
 /// 工作线程的首个连接尝试。查询失败只落一条 unavailable，不影响主路径。
-fn spawn_adapter_capability_probe() {
+fn spawn_adapter_capability_probe(trigger: AdapterProbeTrigger) {
     let spawned = thread::Builder::new()
         .name("sayall-ble-adapter-log".to_owned())
-        .spawn(|| {
+        .spawn(move || {
             let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
             if initialized {
-                log_adapter_capabilities();
+                log_adapter_capabilities(trigger);
                 unsafe { RoUninitialize() };
             } else {
-                gatt_note(
-                    "ble_adapter phase=observed terminal_result=unavailable reason=winrt_init_failed"
-                        .to_owned(),
-                );
+                gatt_note(format!(
+                    "ble_adapter phase=observed trigger={} attempt={} terminal_result=unavailable \
+                     reason=winrt_init_failed",
+                    trigger.label(),
+                    trigger
+                        .attempt()
+                        .map_or_else(|| "none".to_owned(), |attempt| attempt.to_string())
+                ));
             }
         });
     if spawned.is_err() {
-        gatt_note(
-            "ble_adapter phase=observed terminal_result=unavailable reason=probe_thread_failed"
-                .to_owned(),
-        );
+        gatt_note(format!(
+            "ble_adapter phase=observed trigger={} attempt={} terminal_result=unavailable \
+             reason=probe_thread_failed",
+            trigger.label(),
+            trigger
+                .attempt()
+                .map_or_else(|| "none".to_owned(), |attempt| attempt.to_string())
+        ));
     }
 }
 
@@ -5482,23 +5691,98 @@ mod tests {
     #[test]
     fn adapter_capability_note_is_stable_and_identity_free() {
         let note = adapter_capability_note(
+            AdapterProbeTrigger::Startup,
             Some(true),
             Some(true),
             Some(false),
             Some(true),
             Some(RadioState::On),
+            "usb",
+            "d0",
         );
         assert_eq!(
             note,
-            "ble_adapter phase=observed low_energy=yes central_role=yes peripheral_role=no classic=yes radio_state=on"
+            "ble_adapter phase=observed trigger=startup attempt=none low_energy=yes \
+             central_role=yes peripheral_role=no classic=yes radio_state=on bus_type=usb \
+             power_state=d0"
         );
         assert!(!note.contains("地址"), "{note}");
         assert!(!note.contains("BluetoothAdapter"), "{note}");
 
-        let unknown = adapter_capability_note(None, None, None, None, Some(RadioState(99)));
-        assert!(unknown.contains("low_energy=unknown"), "{unknown}");
-        assert!(unknown.contains("central_role=unknown"), "{unknown}");
-        assert!(unknown.contains("radio_state=unknown"), "{unknown}");
+        let failure = adapter_capability_note(
+            AdapterProbeTrigger::FailureStreak { attempt: 5 },
+            None,
+            None,
+            None,
+            None,
+            Some(RadioState(99)),
+            "unknown",
+            "unknown",
+        );
+        assert!(failure.contains("trigger=failure_streak"), "{failure}");
+        assert!(failure.contains("attempt=5"), "{failure}");
+        assert!(failure.contains("low_energy=unknown"), "{failure}");
+        assert!(failure.contains("central_role=unknown"), "{failure}");
+        assert!(failure.contains("radio_state=unknown"), "{failure}");
+        assert!(failure.contains("bus_type=unknown"), "{failure}");
+        assert!(failure.contains("power_state=unknown"), "{failure}");
+    }
+
+    #[test]
+    fn adapter_bus_and_power_tokens_are_stable_and_identity_free() {
+        assert_eq!(bus_type_token("USB"), "usb");
+        assert_eq!(bus_type_token(" usb "), "usb");
+        assert_eq!(bus_type_token("PCI"), "internal");
+        assert_eq!(bus_type_token("ACPI"), "internal");
+        assert_eq!(bus_type_token("BTH"), "bth_stack");
+        assert_eq!(bus_type_token("SDIO"), "sdio");
+        assert_eq!(bus_type_token("SCSI"), "unknown");
+        assert_eq!(bus_type_token(""), "unknown");
+
+        assert_eq!(power_state_token(Some(1)), "d0");
+        assert_eq!(power_state_token(Some(2)), "d1");
+        assert_eq!(power_state_token(Some(3)), "d2");
+        assert_eq!(power_state_token(Some(4)), "d3");
+        assert_eq!(power_state_token(Some(0)), "unknown");
+        assert_eq!(power_state_token(None), "unknown");
+    }
+
+    #[test]
+    fn adapter_instance_id_is_derived_from_interface_path() {
+        assert_eq!(
+            adapter_instance_id(r"\\?\USB#FAKE#INSTANCE#{00000000-0000-0000-0000-000000000000}")
+                .as_deref(),
+            Some(r"USB\FAKE\INSTANCE")
+        );
+        assert_eq!(
+            adapter_instance_id(r"\\?\BTH\MS_BTHBRB\FAKE").as_deref(),
+            Some(r"BTH\MS_BTHBRB\FAKE")
+        );
+        assert_eq!(
+            adapter_instance_id(r"USB\FAKE\INSTANCE").as_deref(),
+            Some(r"USB\FAKE\INSTANCE")
+        );
+        assert_eq!(adapter_instance_id("FAKE"), None);
+        assert_eq!(adapter_instance_id(""), None);
+    }
+
+    #[test]
+    #[ignore = "真机：读取默认蓝牙适配器的 PnP bus/power 事实"]
+    fn real_adapter_pnp_facts_are_readable() {
+        let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+        if initialized {
+            let operation = BluetoothAdapter::GetDefaultAsync().expect("adapter operation");
+            let adapter = wait_async(operation, ADAPTER_QUERY_TIMEOUT, "test_adapter")
+                .expect("default adapter");
+            let (bus_type, power_state) = adapter_pnp_facts(&adapter);
+            println!("bus_type={bus_type} power_state={power_state}");
+            unsafe { RoUninitialize() };
+            assert_ne!(bus_type, "unknown", "默认适配器应至少给出 bus type");
+            assert!(
+                matches!(power_state.as_str(), "d0" | "d1" | "d2" | "d3" | "unknown"),
+                "{power_state}"
+            );
+        }
     }
 
     #[test]

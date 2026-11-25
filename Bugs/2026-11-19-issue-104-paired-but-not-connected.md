@@ -264,6 +264,10 @@
 - 结论边界：这次是“链路根本不在”，五路径 fallback 不会凭空建立链路；应用侧
   没有新的 GATT 路径缺陷证据。下一步是用户侧 A/B（普通键唤醒、关闭手机/电视
   蓝牙、删除后重配对、另一台电脑）与 Windows 蓝牙事件取证。
+- 两份现场日志都来自「台式机 + USB 蓝牙适配器」，但样本只有两份，不能据此
+  认定根因。2026-11-25 后续已补适配器侧只读诊断：`ble_adapter bus_type/power_state`
+  与 `scripts/collect-bluetooth-adapter.ps1`（无管理员权限，采集物理适配器、
+  选择性挂起、驱动版本和 BTH/PnP/电源事件计数）。详见 2026-11-25 记录。
 
 详见 [2026-11-25-rc001-link-absent-after-1.9.7-upgrade.md](2026-11-25-rc001-link-absent-after-1.9.7-upgrade.md)。
 
