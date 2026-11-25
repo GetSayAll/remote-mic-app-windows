@@ -452,10 +452,22 @@ export interface ButtonActions {
    */
   holdRepeat?: "single" | "long";
   /**
+   * 方向键按住：`single` = 按下即按住单击动作；`long` = 达到长按阈值后按住
+   * 长按动作。只允许左右，缺省 = 关闭；与 `holdRepeat` 互斥。
+   */
+  directionalHold?: "single" | "long";
+  /**
    * OK 键：用遥控器移动过光标后的 5 秒内，按 OK 直接点击光标位置
    * （缺省 = 关闭；只对 OK 键生效）。
    */
   okContextClick?: boolean;
+}
+
+/** 普通按键识别时间（按机型共享；Windows 当前存一份，默认与旧行为一致）。 */
+export interface ButtonGestureTiming {
+  doubleClickMs: number;
+  longPressMs: number;
+  repeatStartMs: number;
 }
 
 export interface ButtonMappings {
@@ -468,6 +480,10 @@ export interface ButtonMappings {
   focusProfiles?: Record<string, AppFocusProfile>;
   /** 滚动区域档案：键与 `focusProfiles` 相同；只含 UIA 结构特征。 */
   scrollRegions?: Record<string, ScrollRegionTarget>;
+  /** 旧版单份识别时间；没有按机型分桶时用作回落。 */
+  gestureTiming?: ButtonGestureTiming;
+  /** 按机型保存的识别时间；键为 `rc001` / `rc003` 等稳定 token。 */
+  gestureTimingsByModel?: Record<string, ButtonGestureTiming>;
 }
 
 /** APP 级滚动区域记录（Rust `ScrollRegionTarget` 的 camelCase 镜像）。 */
@@ -2247,6 +2263,49 @@ export const buttonLabels: Record<RemoteButton, string> = {
 export function buttonLabel(button: RemoteButton): string {
   return buttonLabels[button];
 }
+
+/** Mac 按键方案摘要使用的完整按键名（电源键、上键…）。 */
+export const buttonFullLabels: Record<RemoteButton, string> = {
+  get back() {
+    return t("返回键");
+  },
+  get ok() {
+    return t("确定键");
+  },
+  get tv() {
+    return t("TV 键");
+  },
+  get home() {
+    return t("主页键");
+  },
+  get right() {
+    return t("右键");
+  },
+  get left() {
+    return t("左键");
+  },
+  get down() {
+    return t("下键");
+  },
+  get up() {
+    return t("上键");
+  },
+  get menu() {
+    return t("菜单键");
+  },
+  get power() {
+    return t("电源键");
+  },
+  get volume_mute() {
+    return t("静音键");
+  },
+  get volume_up() {
+    return t("音量 +");
+  },
+  get volume_down() {
+    return t("音量 −");
+  },
+};
 
 export function buttonTriggerLabel(trigger: ButtonTrigger): string {
   return t(
