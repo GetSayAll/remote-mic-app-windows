@@ -611,7 +611,7 @@ function mappingActionSummary(
   trigger: ButtonTrigger,
 ): string {
   const action = actionOf(button, trigger);
-  return actionSummary(action);
+  return action.type === "disabled" ? t("不执行") : actionSummary(action);
 }
 
 function holdTriggerFor(button: RemoteButton): ButtonTrigger {

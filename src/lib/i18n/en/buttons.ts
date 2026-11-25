@@ -120,6 +120,7 @@ export default {
   "按住时 按住 ": "While held: hold down ",
   "按住时 长按后按住 ": "While held: hold down after long press ",
   "配置不可用": "Configuration unavailable",
+  "不执行": "No action",
   "返回键": "Back button",
   "确定键": "OK button",
   "TV 键": "TV button",
