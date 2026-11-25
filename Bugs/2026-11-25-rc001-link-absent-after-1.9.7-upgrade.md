@@ -139,6 +139,13 @@
   sayall-windows-app 226 / 2 ignored；其余 crate 与文档测试 0 failed）
 - `cargo check --workspace`：`passed`
 - `cargo check -p sayall-windows-app --features runtime-simulation`：`passed`
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.7_x64-setup.exe`
+  （13,559,580 字节，SHA-256
+  `738FD5278671DC898F956011FE4D23DB57186D2BF6A0AFBB38750CD057F4D54C`）；
+  `scripts/verify-frontend-embedded.ps1` 18/18 `passed`；app exe 内嵌
+  `source_revision=744e4966026030566770b858242e8da416a11b0e`。本地测试签名密钥
+  与 CI updater pubkey 不匹配，属预期；该包与 `.sig` 不可发布。
+- 安装/升级与真机复现：`deferred`（需要用户机器与遥控器；包未在本机安装覆盖）。
 - 真机探测：`deferred`（需要用户机器与遥控器在失败态复现；本机无该现场）
 
 下次报障只需一份 `sayall-diagnostic.log`，先看 `ble_adv seen/connectable`
