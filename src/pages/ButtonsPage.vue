@@ -108,13 +108,19 @@ import {
 } from "../lib/bridge";
 import type { NavigationRequest } from "../navigation";
 import { settingsComponent as commonPhraseSettingsComponent } from "../private/windows-common-phrases";
+import {
+  createButtonProfileScope,
+  type ButtonProfileScope,
+  type ProfileBindingState,
+} from "../private/windows-button-profiles";
 
 const props = withDefaults(
   defineProps<{
     runtime: RuntimeSnapshot | null;
     initialEditor?: { button: RemoteButton; trigger: ButtonTrigger } | null;
+    initialProfileId?: string | null;
   }>(),
-  { initialEditor: null },
+  { initialEditor: null, initialProfileId: null },
 );
 const emit = defineEmits<{ navigate: [page: string | NavigationRequest] }>();
 
@@ -125,6 +131,175 @@ const emit = defineEmits<{ navigate: [page: string | NavigationRequest] }>();
 const commonPhraseEditor = commonPhraseSettingsComponent();
 const showCommonPhraseEditor = ref(false);
 
+/**
+ * 私有键位方案作用域。公开构建返回 null；有私有组件时由它加载方案并
+ * 把方案绑定转换成公开 ButtonActions。页面只消费稳定接口。
+ */
+const profileScope: ButtonProfileScope | null = createButtonProfileScope();
+const profileScopeState = computed(() => profileScope?.state.value ?? null);
+const profileScopeAvailable = computed(
+  () =>
+    Boolean(profileScope && profileScopeState.value?.available) &&
+    !profileScopeState.value?.loading,
+);
+const profileScopeProfiles = computed(
+  () => profileScopeState.value?.profiles ?? [],
+);
+const profileScopeSelected = computed(
+  () => profileScopeState.value?.selectedProfileId ?? null,
+);
+const profileScopeAccess = computed(
+  () => profileScopeState.value?.access ?? "unavailable",
+);
+const profileScopeCanEdit = computed(
+  () =>
+    profileScopeAccess.value === "allowed" ||
+    profileScopeAccess.value === "temporarilyOffline",
+);
+const profileScopeNeedsMembership = computed(
+  () => profileScopeAccess.value === "requiresPlus",
+);
+const profileScopeUnsupportedTitle = computed(() =>
+  t("键位方案只支持 10 个普通按键。"),
+);
+
+const PROFILE_SCOPE_BUTTONS: RemoteButton[] = [
+  "up",
+  "down",
+  "left",
+  "right",
+  "ok",
+  "back",
+  "home",
+  "volume_up",
+  "volume_down",
+  "power",
+];
+
+const showProfileSaveDialog = ref(false);
+const profileNameDraft = ref("");
+const profileSaveBusy = ref(false);
+const profileSaveMode = ref<"create" | "copy">("create");
+const profileSaveSourceId = ref<string | null>(null);
+const profileSaveSourceName = ref("");
+
+const profileSaveDialogTitle = computed(() =>
+  profileSaveMode.value === "copy"
+    ? t("复制为新的键位方案")
+    : t("创建新的键位方案"),
+);
+const profileSaveDialogNote = computed(() =>
+  t("会把当前的动作与按住方式复制成一份独立方案；之后修改基础映射，这份方案不会跟着变。"),
+);
+const profileSaveConfirmLabel = computed(() => profileSaveDialogTitle.value);
+const profileScopeMembershipHint = computed(() =>
+  profileScopeSelected.value === null
+    ? t("开通后可创建新方案")
+    : t("开通后可复制当前方案"),
+);
+
+function openProfileSaveDialog(): void {
+  if (!profileScope || !profileScopeCanEdit.value) {
+    membershipRoute();
+    return;
+  }
+  const selected = profileScopeSelected.value
+    ? profileScopeProfiles.value.find(
+        (profile) => profile.id === profileScopeSelected.value,
+      )
+    : null;
+  if (selected) {
+    profileSaveMode.value = "copy";
+    profileSaveSourceId.value = selected.id;
+    profileSaveSourceName.value = selected.name;
+    profileNameDraft.value = t("{name} 副本", { name: selected.name }).slice(
+      0,
+      20,
+    );
+  } else {
+    profileSaveMode.value = "create";
+    profileSaveSourceId.value = null;
+    profileSaveSourceName.value = t("基础映射");
+    profileNameDraft.value = t("按键方案 {index}", {
+      index: profileScopeProfiles.value.length + 1,
+    }).slice(0, 20);
+  }
+  showProfileSaveDialog.value = true;
+}
+
+function closeProfileSaveDialog(): void {
+  if (profileSaveBusy.value) return;
+  showProfileSaveDialog.value = false;
+}
+
+async function submitProfileSave(): Promise<void> {
+  if (!profileScope || profileSaveBusy.value) return;
+  const name = profileNameDraft.value.trim();
+  if (!name) {
+    statusMessage.value = t("请填写方案名称。");
+    return;
+  }
+  profileSaveBusy.value = true;
+  try {
+    if (profileSaveMode.value === "copy") {
+      const sourceId = profileSaveSourceId.value;
+      if (!sourceId) throw new Error("profile_copy_source_missing");
+      await profileScope.copyProfile(sourceId, name);
+      statusMessage.value = t("键位方案已创建，已切换到新方案");
+    } else {
+      const entries = PROFILE_SCOPE_BUTTONS.flatMap((button) =>
+        TRIGGERS.map((trigger) => ({
+          button,
+          trigger,
+          action:
+            mappings.value.actions[button]?.[trigger] ?? { type: "disabled" },
+        })),
+      );
+      const holds: Array<{
+        button: RemoteButton;
+        hold: "single" | "long" | "singleHold" | "longHold";
+      }> = [];
+      for (const button of PROFILE_SCOPE_BUTTONS) {
+        const actions = mappings.value.actions[button];
+        if (!actions) continue;
+        if (actions.directionalHold === "single") {
+          holds.push({ button, hold: "singleHold" });
+        } else if (actions.directionalHold === "long") {
+          holds.push({ button, hold: "longHold" });
+        } else if (actions.holdRepeat) {
+          holds.push({ button, hold: actions.holdRepeat });
+        }
+      }
+      await profileScope.createFromBase(name, entries, holds);
+      statusMessage.value = t("键位方案已创建");
+    }
+    showProfileSaveDialog.value = false;
+  } catch (reason) {
+    statusMessage.value = operationErrorText(
+      "profile save as new failed",
+      reason,
+      profileSaveMode.value === "copy"
+        ? "复制键位方案失败，请重试。"
+        : "创建键位方案失败，请重试。",
+    );
+  } finally {
+    profileSaveBusy.value = false;
+  }
+}
+
+function profileScopeSupports(button: RemoteButton): boolean {
+  return !profileScopeSelected.value || !profileScope || profileScope.supportsButton(button);
+}
+
+function selectProfileScope(profileId: string | null): void {
+  profileScope?.select(profileId);
+}
+
+function membershipRoute(): void {
+  emit("navigate", "membership");
+}
+
+void profileScope?.load();
 
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
@@ -352,8 +527,28 @@ const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
 const editorScrollHost = ref<HTMLElement | null>(null);
+const restoringProfileBinding = ref(false);
+const profileBindingState = computed<ProfileBindingState | null>(() => {
+  if (
+    !profileScope ||
+    !profileScopeSelected.value ||
+    !editingTarget.value ||
+    !profileScope.supportsButton(editingTarget.value.button)
+  ) {
+    return null;
+  }
+  return profileScope.bindingState(
+    editingTarget.value.button,
+    editingTarget.value.trigger,
+  );
+});
+const editorCanWrite = computed(() => {
+  if (profileBindingState.value === "unavailable") return false;
+  return !profileScopeSelected.value || profileScopeCanEdit.value;
+});
 const disableActionActive = computed(() => {
   if (!editingTarget.value) return false;
+  if (profileScopeSelected.value) return profileBindingState.value === "disabled";
   return actionOf(editingTarget.value.button, editingTarget.value.trigger).type === "disabled";
 });
 type EditorSaveOutcome = "idle" | "saving" | "saved" | "failed" | "unknown";
@@ -362,6 +557,8 @@ const editorSaveRetry = ref<(() => void) | null>(null);
 const EDITOR_SAVE_FEEDBACK_MS = 2400;
 let editorSaveTimer: number | null = null;
 const editorSaveLabel = computed(() => {
+  if (profileBindingState.value === "unavailable") return t("不可用");
+  if (!editorCanWrite.value) return t("只读");
   if (editorSaveOutcome.value === "saved") return t("自动保存成功");
   if (editorSaveOutcome.value === "failed") return t("保存失败");
   if (editorSaveOutcome.value === "unknown") return t("保存状态未知，请重试。");
@@ -439,12 +636,52 @@ const statusMessage = computed<string | null>({
     }, STATUS_VISIBLE_MS);
   },
 });
+async function restoreProfileBinding(): Promise<void> {
+  const scope = profileScope;
+  const target = editingTarget.value;
+  if (!scope || !target || profileScopeSelected.value === null) return;
+  restoringProfileBinding.value = true;
+  setEditorSaveOutcome("saving");
+  try {
+    await scope.clearAction(target.button, target.trigger);
+    setEditorSaveOutcome("saved");
+  } catch (reason) {
+    console.warn("profile binding restore failed", reason);
+    setEditorSaveOutcome("failed", () => {
+      void restoreProfileBinding();
+    });
+  } finally {
+    restoringProfileBinding.value = false;
+  }
+}
+
+function saveProfileAction(
+  target: { button: RemoteButton; trigger: ButtonTrigger },
+  action: ButtonAction,
+): void {
+  const scope = profileScope;
+  if (!scope) return;
+  const retry = () => saveProfileAction(target, action);
+  setEditorSaveOutcome("saving");
+  void scope
+    .writeAction(target.button, target.trigger, action)
+    .then(() => setEditorSaveOutcome("saved"))
+    .catch((reason) => {
+      console.warn("profile action save failed", reason);
+      setEditorSaveOutcome("failed", retry);
+    });
+}
+
 function toggleDisableAction(event: Event): void {
   const target = editingTarget.value;
   if (!target) return;
   const disabled = (event.target as HTMLInputElement).checked;
   if (disabled) {
     applyAction({ type: "disabled" });
+    return;
+  }
+  if (profileScope && profileScopeSelected.value !== null) {
+    void restoreProfileBinding();
     return;
   }
   applyAction({ type: "shortcut", chord: { keys: ["escape"] } });
@@ -592,13 +829,14 @@ const voiceActive = computed(
 );
 
 function actionsOf(button: RemoteButton): ButtonActions {
-  return (
+  const base =
     mappings.value.actions[button] ?? {
       single: { type: "disabled" },
       double: { type: "disabled" },
       long: { type: "disabled" },
-    }
-  );
+    };
+  if (!profileScope || !profileScopeSelected.value) return base;
+  return profileScope.displayActions(button, base);
 }
 
 function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
@@ -649,6 +887,14 @@ function holdSummaryFor(button: RemoteButton): string {
 
 function openHoldEditor(button: RemoteButton): void {
   if (captureGated(button)) return;
+  if (profileScopeSelected.value && !profileScopeSupports(button)) {
+    statusMessage.value = profileScopeUnsupportedTitle.value;
+    return;
+  }
+  if (profileScope && profileScopeSelected.value && !profileScopeCanEdit.value) {
+    membershipRoute();
+    return;
+  }
   openEditor(button, holdTriggerFor(button), "hold");
 }
 
@@ -926,6 +1172,10 @@ async function selectApp(app: CustomAppPick): Promise<void> {
 function selectButton(button: RemoteButton): void {
   // 三键在「全按键支持」关闭时置灰禁用：合成事件绕过原生 disabled，这里再守一道。
   if (captureGated(button)) return;
+  if (profileScopeSelected.value && !profileScopeSupports(button)) {
+    statusMessage.value = profileScopeUnsupportedTitle.value;
+    return;
+  }
   selectedButton.value = button;
 }
 
@@ -935,6 +1185,10 @@ function openEditor(
   filterOverride: ActionFilter | null = null,
 ): void {
   if (captureGated(button)) return;
+  if (profileScopeSelected.value && !profileScopeSupports(button)) {
+    statusMessage.value = t("键位方案只支持 10 个普通按键。");
+    return;
+  }
   selectedButton.value = button;
   pendingActionFilterOverride = filterOverride;
   editingTarget.value = { button, trigger };
@@ -974,8 +1228,16 @@ function blockUnsupportedReplacement(): boolean {
 function applyAction(action: ButtonAction): void {
   const target = editingTarget.value;
   if (!target) return;
+  if (profileScope && profileScopeSelected.value && !profileScopeCanEdit.value) {
+    void membershipRoute();
+    return;
+  }
   if (blockUnsupportedReplacement()) return;
   unsupportedReplaceArmed.value = false;
+  if (profileScope && profileScopeSelected.value) {
+    saveProfileAction(target, action);
+    return;
+  }
   const next: ButtonMappings = {
     ...mappings.value,
     actions: { ...mappings.value.actions },
@@ -1899,6 +2161,10 @@ const okClickChecked = computed(() => actionsOf("ok").okContextClick === true);
 function toggleOkContextClick(): void {
   const target = editingTarget.value;
   if (!target || target.button !== "ok") return;
+  if (profileScope && profileScopeSelected.value) {
+    statusMessage.value = t("键位方案不支持这个开关。");
+    return;
+  }
   const actions = { ...actionsOf("ok") };
   if (actions.okContextClick) {
     delete actions.okContextClick;
@@ -1973,6 +2239,10 @@ function reconcileHoldRepeat(
 function selectHoldRepeat(choice: HoldRepeatChoice): void {
   const target = editingTarget.value;
   if (!target) return;
+  if (profileScope && profileScopeSelected.value && !profileScopeCanEdit.value) {
+    void membershipRoute();
+    return;
+  }
   const reason =
     choice === "single"
       ? repeatSingleReason.value
@@ -1988,6 +2258,21 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
     return;
   }
   if (repeatChoice.value === choice) return;
+  if (profileScope && profileScopeSelected.value) {
+    void profileScope
+      .writeHold(target.button, choice === "off" ? null : choice)
+      .then(() => {
+        statusMessage.value = t("自动保存成功");
+      })
+      .catch((reason) => {
+        statusMessage.value = operationErrorText(
+          "profile hold save failed",
+          reason,
+          "保存失败，请重试。",
+        );
+      });
+    return;
+  }
   const actions = { ...actionsOf(target.button) };
   if (choice === "off") {
     delete actions.holdRepeat;
@@ -2916,6 +3201,10 @@ onMounted(async () => {
   mappings.value = loaded;
   savedSnapshot.value = JSON.parse(JSON.stringify(loaded)) as ButtonMappings;
   mappingSnapshot.value = snapshot;
+  if (props.initialProfileId && profileScope) {
+    await profileScope.load();
+    profileScope.select(props.initialProfileId);
+  }
   // 两个开关的「就绪」与真值在同一渲染批次生效：本批次才创建开关本体，创建即带
   // 正确 checked，不产生属性变更，因此没有"状态回来后开→关"的滑动过渡。
   mappingsLoaded.value = true;
@@ -3170,6 +3459,68 @@ onUnmounted(() => {
         </div>
       </div>
     </header>
+
+    <div
+      v-if="profileScopeAvailable"
+      class="profile-scope-bar"
+    >
+      <div class="scope-chips">
+        <button
+          type="button"
+          class="scope-chip"
+          :class="{ selected: profileScopeSelected === null }"
+          @click="selectProfileScope(null)"
+        >
+          {{ t("默认") }}
+        </button>
+        <button
+          v-for="profile in profileScopeProfiles"
+          :key="profile.id"
+          type="button"
+          class="scope-chip"
+          :class="{ selected: profileScopeSelected === profile.id }"
+          :title="profile.name"
+          @click="selectProfileScope(profile.id)"
+        >
+          {{ profile.name }}
+        </button>
+      </div>
+      <span
+        v-if="profileScopeNeedsMembership"
+        class="scope-membership-hint"
+      >
+        {{ profileScopeMembershipHint }}
+      </span>
+      <button
+        v-if="profileScopeNeedsMembership"
+        type="button"
+        class="secondary-button"
+        :title="profileScopeMembershipHint"
+        @click="membershipRoute"
+      >
+        {{ t("开通会员") }}
+      </button>
+      <button
+        v-else
+        type="button"
+        class="secondary-button"
+        :disabled="!profileScopeCanEdit"
+        :title="profileSaveDialogNote"
+        @click="openProfileSaveDialog"
+      >
+        {{
+          profileScopeSelected === null
+            ? t("创建新的键位方案")
+            : t("复制为新的键位方案")
+        }}
+      </button>
+    </div>
+    <p
+      v-if="profileScopeAvailable && profileScopeSelected !== null"
+      class="profile-scope-hint"
+    >
+      {{ t("键位方案只覆盖这些按键：电源键、方向键、确定键、返回键、主页键、音量 +、音量 −；其他按键仍按基础映射执行。") }}
+    </p>
     </div>
 
     <div class="mapping-scroll-area">
@@ -3237,10 +3588,22 @@ onUnmounted(() => {
           active: activeButtons.has(placement.button),
           flashed: firedFlash?.button === placement.button,
           'is-locked': captureGated(placement.button),
+          'is-profile-disabled':
+            profileScopeSelected !== null && !profileScopeSupports(placement.button),
         }"
         :style="{ top: `${cardTop(placement)}px`, width: `${cardWidth}px` }"
-        :title="captureGated(placement.button) ? triKeyGatedTitle : undefined"
-        :aria-disabled="captureGated(placement.button) || undefined"
+        :title="
+          captureGated(placement.button)
+            ? triKeyGatedTitle
+            : profileScopeSelected !== null && !profileScopeSupports(placement.button)
+              ? profileScopeUnsupportedTitle
+              : undefined
+        "
+        :aria-disabled="
+          captureGated(placement.button) ||
+          (profileScopeSelected !== null && !profileScopeSupports(placement.button)) ||
+          undefined
+        "
         @click="selectButton(placement.button)"
       >
         <div class="mapping-card-title">
@@ -3259,7 +3622,10 @@ onUnmounted(() => {
           <button
             type="button"
             class="mapping-hold-chip"
-            :disabled="captureGated(placement.button)"
+            :disabled="
+              captureGated(placement.button) ||
+              (profileScopeSelected !== null && !profileScopeSupports(placement.button))
+            "
             :title="`${buttonFullLabels[placement.button]} · ${holdSummaryFor(placement.button)}`"
             @click.stop="openHoldEditor(placement.button)"
           >
@@ -3278,11 +3644,16 @@ onUnmounted(() => {
                 editingTarget?.button === placement.button && editingTarget?.trigger === trigger,
               flashed: firedFlash?.button === placement.button && firedFlash?.trigger === trigger,
             }"
-            :disabled="captureGated(placement.button)"
+            :disabled="
+              captureGated(placement.button) ||
+              (profileScopeSelected !== null && !profileScopeSupports(placement.button))
+            "
             :title="
               captureGated(placement.button)
                 ? triKeyGatedTitle
-                : actionCellTitle(placement.button, trigger)
+                : profileScopeSelected !== null && !profileScopeSupports(placement.button)
+                  ? profileScopeUnsupportedTitle
+                  : actionCellTitle(placement.button, trigger)
             "
             @click.stop="openEditor(placement.button, trigger)"
           >
@@ -3302,8 +3673,12 @@ onUnmounted(() => {
 
       <article
         class="mapping-card voice-card right"
-        :class="{ active: voiceActive }"
+        :class="{
+          active: voiceActive,
+          'is-profile-disabled': profileScopeSelected !== null,
+        }"
         :style="{ top: `${cardTop(VOICE_PLACEMENT)}px`, width: `${cardWidth}px` }"
+        :title="profileScopeSelected !== null ? profileScopeUnsupportedTitle : undefined"
       >
         <div class="mapping-card-title">
           <svg class="mapping-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -3360,7 +3735,41 @@ onUnmounted(() => {
             <span class="editor-title-separator"> · </span>
             <span class="editor-trigger-pill">{{ buttonTriggerLabel(editingTarget.trigger) }}</span>
           </div>
-          <p class="muted">{{ t("当前：{summary}", { summary: mappingActionSummary(editingTarget.button, editingTarget.trigger) }) }}</p>
+          <p v-if="!profileBindingState" class="muted">{{ t("当前：{summary}", { summary: mappingActionSummary(editingTarget.button, editingTarget.trigger) }) }}</p>
+          <div v-if="profileBindingState" class="profile-binding-source">
+            <template v-if="profileBindingState === 'inherit'">
+              <span class="profile-binding-source-label">
+                <svg class="profile-binding-link-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M6.2 9.8 9.8 6.2M6.8 4.6l.8-.8a2.4 2.4 0 0 1 3.4 3.4l-.8.8M9.2 11.4l-.8.8a2.4 2.4 0 0 1-3.4-3.4l.8-.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                </svg>
+                {{ t("继承默认方案：{summary}", { summary: mappingActionSummary(editingTarget.button, editingTarget.trigger) }) }}
+              </span>
+            </template>
+            <template v-else>
+              <span class="profile-binding-source-label">
+                {{
+                  profileBindingState === "disabled"
+                    ? t("本方案禁用")
+                    : profileBindingState === "unavailable"
+                      ? t("不可用")
+                      : t("本方案 · {summary}", {
+                          summary: mappingActionSummary(
+                            editingTarget.button,
+                            editingTarget.trigger,
+                          ),
+                        })
+                }}
+              </span>
+              <button
+                class="link-button"
+                type="button"
+                :disabled="restoringProfileBinding || !profileScopeCanEdit"
+                @click="restoreProfileBinding"
+              >
+                {{ restoringProfileBinding ? t("恢复中…") : t("恢复继承默认") }}
+              </button>
+            </template>
+          </div>
         </div>
         <div class="button-row">
           <!-- 全按键支持开关已移至页面头部（与「启用自定义按键功能」并排，
@@ -3380,7 +3789,7 @@ onUnmounted(() => {
               class="toggle-input"
               type="checkbox"
               :checked="disableActionActive"
-              :disabled="busy"
+              :disabled="busy || !editorCanWrite"
               @change="toggleDisableAction"
             />
           </label>
@@ -4013,6 +4422,42 @@ onUnmounted(() => {
     </p>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false; unsupportedReplaceArmed = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
+    <div v-if="showProfileSaveDialog" class="profile-save-overlay" @click.self="closeProfileSaveDialog">
+      <div class="profile-save-dialog" role="dialog" aria-modal="true">
+        <h2>{{ profileSaveDialogTitle }}</h2>
+        <label class="profile-save-field">
+          <span>{{ t("方案名称") }}</span>
+          <input
+            v-model="profileNameDraft"
+            maxlength="20"
+            :placeholder="t('按键方案')"
+            @keydown.enter.prevent="submitProfileSave"
+          />
+        </label>
+        <p class="muted profile-save-note">{{ profileSaveDialogNote }}</p>
+        <p class="muted">{{ t("覆盖范围") }}</p>
+        <div class="profile-save-scope">
+          <span
+            v-for="button in PROFILE_SCOPE_BUTTONS"
+            :key="button"
+            class="profile-save-scope-chip"
+          >
+            {{ buttonFullLabels[button] }}
+          </span>
+        </div>
+        <p class="muted">
+          {{ t("来源 {name}", { name: profileSaveSourceName }) }}
+        </p>
+        <div class="profile-save-actions">
+          <button type="button" class="secondary-button" :disabled="profileSaveBusy" @click="closeProfileSaveDialog">
+            {{ t("取消") }}
+          </button>
+          <button type="button" class="primary-button" :disabled="profileSaveBusy || !profileNameDraft.trim()" @click="submitProfileSave">
+            {{ profileSaveConfirmLabel }}
+          </button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -4090,6 +4535,34 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .focus-result-message { margin: 8px 0 0; font-size: 12px; }
+/* 按键页方案作用域：显示当前动作来自默认方案还是本方案。 */
+.profile-binding-source {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.profile-binding-source-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.profile-binding-link-icon { width: 14px; height: 14px; flex: none; }
+.profile-binding-source .link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.profile-binding-source .link-button:disabled { cursor: default; opacity: 0.5; }
 /* 编辑面板右上角：自动保存状态 + Mac 同款「停用此动作」开关。 */
 .editor-title-row {
   display: flex;
