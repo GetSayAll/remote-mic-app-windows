@@ -36,9 +36,8 @@ import {
 } from "../lib/capture-switch";
 import {
   actionSummary,
-  buttonLabel,
+  buttonFullLabels,
   isKnownButtonAction,
-  buttonLabels,
   buttonTriggerLabel,
   chordLabel,
   connectRemote,
@@ -70,6 +69,7 @@ import {
   resetButtonMappings,
   saveButtonMappings,
   saveLockMappingSelection,
+  setMappingSuspension,
   scanPairedRemotes,
   shortcutCapability,
   startRawInput,
@@ -82,6 +82,7 @@ import {
   type ButtonAction,
   type ButtonActions,
   type ButtonEdge,
+  type ButtonGestureTiming,
   type ButtonMappingSnapshot,
   type ButtonMappings,
   type ButtonTrigger,
@@ -124,6 +125,7 @@ const emit = defineEmits<{ navigate: [page: string | NavigationRequest] }>();
 const commonPhraseEditor = commonPhraseSettingsComponent();
 const showCommonPhraseEditor = ref(false);
 
+
 /** 画布几何：对齐 Mac RemoteMappingCanvas——高度固定 570，宽度流式
  * （占满容器，ResizeObserver 观测）；卡宽 = clamp((宽-260)/2, 270, 300)，
  * 与 Mac cardWidth(for:) 同公式；容器不足最小画布 800px 时由 CSS
@@ -136,7 +138,7 @@ const CANVAS_HEIGHT = 570;
 // 不裁掉可见像素）。锚点/橙点/连线一律用归一化比例 × 本尺寸，故全部按比例跟随。
 const REMOTE_WIDTH = 250;
 const REMOTE_HEIGHT = 508;
-const CARD_HEIGHT = 72;
+const CARD_HEIGHT = 78;
 const REMOTE_TOP = (CANVAS_HEIGHT - REMOTE_HEIGHT) / 2;
 
 const canvasEl = ref<HTMLElement | null>(null);
@@ -189,6 +191,10 @@ const deviceLabel = computed(() => {
   if (remoteModel.value !== "unknown") return remoteModelLabel(remoteModel.value);
   return connectionInfo.value?.remoteName ?? t("未连接遥控器");
 });
+
+/**
+ * 设备卡片只显示型号、状态和电量；不再显示蓝牙广播名（MI RC）。
+ */
 
 /**
  * 操作失败文案：中文界面保留既有原始错误（既有行为与测试口径）；英文界面只给
@@ -345,6 +351,60 @@ const commonPhraseAllowed = computed(() => commonPhraseAccess.value === "allowed
 const selectedButton = ref<RemoteButton | null>(null);
 const editingTarget = ref<{ button: RemoteButton; trigger: ButtonTrigger } | null>(null);
 const editorPanel = ref<HTMLElement | null>(null);
+const editorScrollHost = ref<HTMLElement | null>(null);
+const disableActionActive = computed(() => {
+  if (!editingTarget.value) return false;
+  return actionOf(editingTarget.value.button, editingTarget.value.trigger).type === "disabled";
+});
+type EditorSaveOutcome = "idle" | "saving" | "saved" | "failed" | "unknown";
+const editorSaveOutcome = ref<EditorSaveOutcome>("idle");
+const editorSaveRetry = ref<(() => void) | null>(null);
+const EDITOR_SAVE_FEEDBACK_MS = 2400;
+let editorSaveTimer: number | null = null;
+const editorSaveLabel = computed(() => {
+  if (editorSaveOutcome.value === "saved") return t("自动保存成功");
+  if (editorSaveOutcome.value === "failed") return t("保存失败");
+  if (editorSaveOutcome.value === "unknown") return t("保存状态未知，请重试。");
+  return t("自动保存");
+});
+const editorSaveTone = computed(() => {
+  if (editorSaveOutcome.value === "saved") return "saved";
+  if (editorSaveOutcome.value === "failed" || editorSaveOutcome.value === "unknown") {
+    return "error";
+  }
+  return "idle";
+});
+function setEditorSaveOutcome(
+  outcome: EditorSaveOutcome,
+  retry: (() => void) | null = null,
+): void {
+  if (editorSaveTimer !== null) {
+    window.clearTimeout(editorSaveTimer);
+    editorSaveTimer = null;
+  }
+  editorSaveOutcome.value = outcome;
+  editorSaveRetry.value = retry;
+  if (outcome === "saved") {
+    editorSaveTimer = window.setTimeout(() => {
+      if (editorSaveOutcome.value === "saved") {
+        editorSaveOutcome.value = "idle";
+        editorSaveRetry.value = null;
+      }
+      editorSaveTimer = null;
+    }, EDITOR_SAVE_FEEDBACK_MS);
+  }
+}
+function resetEditorSaveStatus(): void {
+  if (editorSaveTimer !== null) {
+    window.clearTimeout(editorSaveTimer);
+    editorSaveTimer = null;
+  }
+  editorSaveOutcome.value = "idle";
+  editorSaveRetry.value = null;
+}
+function retryEditorSave(): void {
+  editorSaveRetry.value?.();
+}
 const lockSelection = ref(switchCache?.lockSelection ?? true);
 const activeButtons = ref<Set<RemoteButton>>(new Set());
 const lastFired = ref<FiredGesture | null>(null);
@@ -379,6 +439,17 @@ const statusMessage = computed<string | null>({
     }, STATUS_VISIBLE_MS);
   },
 });
+function toggleDisableAction(event: Event): void {
+  const target = editingTarget.value;
+  if (!target) return;
+  const disabled = (event.target as HTMLInputElement).checked;
+  if (disabled) {
+    applyAction({ type: "disabled" });
+    return;
+  }
+  applyAction({ type: "shortcut", chord: { keys: ["escape"] } });
+}
+
 const capturingShortcut = ref(false);
 const captureStarting = ref(false);
 /** start 返回的 preheld 键尚未全部松开：后端吞键但不投递边沿，必须提示用户。 */
@@ -534,12 +605,59 @@ function actionOf(button: RemoteButton, trigger: ButtonTrigger): ButtonAction {
   return actionsOf(button)[trigger];
 }
 
+/** 按键卡里的空动作按 Mac 文案显示为「不执行」。 */
+function mappingActionSummary(
+  button: RemoteButton,
+  trigger: ButtonTrigger,
+): string {
+  const action = actionOf(button, trigger);
+  return actionSummary(action);
+}
+
+function holdTriggerFor(button: RemoteButton): ButtonTrigger {
+  const actions = actionsOf(button);
+  if (actions.directionalHold === "long" || actions.holdRepeat === "long") {
+    return "long";
+  }
+  return "single";
+}
+
+function holdSummaryFor(button: RemoteButton): string {
+  const actions = actionsOf(button);
+  const actionFor = (trigger: ButtonTrigger) => {
+    const action = actionOf(button, trigger);
+    return action.type === "shortcut" &&
+      action.chord.keys.length === 1 &&
+      (action.chord.keys[0] === "left" || action.chord.keys[0] === "right")
+      ? actionSummary(action)
+      : mappingActionSummary(button, trigger);
+  };
+  if (actions.directionalHold === "single") {
+    return `${t("按住时 按住 ")}${actionFor("single")}`;
+  }
+  if (actions.directionalHold === "long") {
+    return `${t("按住时 长按后按住 ")}${actionFor("long")}`;
+  }
+  if (actions.holdRepeat === "single") {
+    return `${t("按住时 重复单击动作 ")}${actionFor("single")}`;
+  }
+  if (actions.holdRepeat === "long") {
+    return `${t("按住时 重复长按动作 ")}${actionFor("long")}`;
+  }
+  return t("按住时");
+}
+
+function openHoldEditor(button: RemoteButton): void {
+  if (captureGated(button)) return;
+  openEditor(button, holdTriggerFor(button), "hold");
+}
+
 /** 卡片格子的悬停标题：随界面语言实时生成（含全角冒号的原文作为字典 key）。 */
 function actionCellTitle(button: RemoteButton, trigger: ButtonTrigger): string {
   return t("{button} · {trigger}：{summary}", {
-    button: buttonLabels[button],
+    button: buttonFullLabels[button],
     trigger: buttonTriggerLabel(trigger),
-    summary: actionSummary(actionOf(button, trigger)),
+    summary: mappingActionSummary(button, trigger),
   });
 }
 
@@ -715,11 +833,20 @@ const customApps = computed<Array<{ path: string; name: string }>>(() => {
 const appPickerOpen = ref(false);
 const appPickerError = ref<string | null>(null);
 const customAppsOpen = ref<boolean | null>(null);
+const customAppGroupEl = ref<HTMLElement | null>(null);
 const customAppsExpanded = computed(
   () =>
     customAppsOpen.value ??
     Boolean(focusTarget.value && !focusTargetIsBuiltInPreset.value),
 );
+/** 展开自定义 APP 列表后滚到完整可见：首次打开时列表在编辑卡底部，不滚动会看不全。 */
+function toggleCustomApps(): void {
+  customAppsOpen.value = !customAppsExpanded.value;
+  if (!customAppsExpanded.value) return;
+  void nextTick(() => {
+    customAppGroupEl.value?.scrollIntoView?.({ block: "start", behavior: "auto" });
+  });
+}
 const focusScrollStatus = computed(() => {
   const target = focusTarget.value;
   if (!target) return null;
@@ -802,9 +929,14 @@ function selectButton(button: RemoteButton): void {
   selectedButton.value = button;
 }
 
-function openEditor(button: RemoteButton, trigger: ButtonTrigger): void {
+function openEditor(
+  button: RemoteButton,
+  trigger: ButtonTrigger,
+  filterOverride: ActionFilter | null = null,
+): void {
   if (captureGated(button)) return;
   selectedButton.value = button;
+  pendingActionFilterOverride = filterOverride;
   editingTarget.value = { button, trigger };
   const action = actionOf(button, trigger);
   customAppsOpen.value =
@@ -856,14 +988,521 @@ function applyAction(action: ButtonAction): void {
   if (action.type === "open_app") {
     customAppsOpen.value = !presetAppIds.value.has(action.target);
   }
-  // 对齐 Mac：点击动作即自动保存生效（静默；失败时显示错误信息）。互斥收口
-  // 产生的说明随保存一起展示（否则会被 persist 的清理覆盖）。
-  void persist(reconciled.notice ?? undefined);
+  // 对齐 Mac：点击动作即自动保存生效（静默；失败信息显示在编辑面板右上方）。
+  const retry = () => {
+    void persist(reconciled.notice ?? undefined, false).then((ok) => {
+      if (ok) setEditorSaveOutcome("saved");
+      else setEditorSaveOutcome("failed", retry);
+    });
+  };
+  setEditorSaveOutcome("saving");
+  void persist(reconciled.notice ?? undefined, false).then((ok) => {
+    if (ok) setEditorSaveOutcome("saved");
+    else setEditorSaveOutcome("failed", retry);
+  });
 }
 
 const selectedAction = computed(() => editingTarget.value ? actionOf(editingTarget.value.button, editingTarget.value.trigger) : null);
-watch(editingTarget, () => {
+
+type ActionFilter =
+  | "all"
+  | "basic"
+  | "customActions"
+  | "applications"
+  | "mouse"
+  | "combinations"
+  | "hold"
+  | "buttonSpeed";
+const activeActionFilter = ref<ActionFilter>("all");
+const actionFilterItems = computed<Array<{ id: ActionFilter; label: string }>>(() => {
+  // 2026-11-24 用户定稿：基础按键合并「系统与媒体」，自定义动作合并
+  // 「自定义按键 + 输入框」；鼠标动作独立成类。顺序固定如下。
+  const items: Array<{ id: ActionFilter; label: string }> = [
+    { id: "all", label: t("全部") },
+    { id: "basic", label: t("基础按键") },
+    { id: "customActions", label: t("自定义动作") },
+    { id: "applications", label: t("打开 App") },
+    { id: "mouse", label: t("鼠标动作") },
+  ];
+  if (COMBINATION_ACTIONS_ENABLED) {
+    items.push({ id: "combinations", label: t("组合动作") });
+  }
+  items.push(
+    { id: "hold", label: t("按住") },
+    { id: "buttonSpeed", label: t("按键速度") },
+  );
+  return items;
+});
+const showActionEditor = computed(
+  () =>
+    !!editingTarget.value &&
+    activeActionFilter.value !== "hold" &&
+    activeActionFilter.value !== "buttonSpeed",
+);
+const showStandaloneHoldPanel = computed(
+  () => !!editingTarget.value && activeActionFilter.value === "hold",
+);
+const showSpeedPanel = computed(
+  () =>
+    !!editingTarget.value &&
+    (activeActionFilter.value === "all" || activeActionFilter.value === "buttonSpeed"),
+);
+const visibleShortcutGroups = computed(() => {
+  if (activeActionFilter.value === "all" || activeActionFilter.value === "basic") {
+    return SHORTCUT_PRESET_GROUPS;
+  }
+  return [];
+});
+const showCustomShortcutSection = computed(
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "customActions",
+);
+const showInputSection = computed(
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "customActions",
+);
+const showAppSection = computed(
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "applications",
+);
+const showMacroSection = computed(
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "combinations",
+);
+const showCommonPhrasesSection = computed(
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "customActions",
+);
+const showMouseSection = computed(
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "mouse",
+);
+const showInlineHoldSection = computed(
+  () => repeatGroupVisible.value && activeActionFilter.value === "all",
+);
+let pendingActionFilterOverride: ActionFilter | null = null;
+
+const DEFAULT_GESTURE_TIMING: ButtonGestureTiming = {
+  doubleClickMs: 300,
+  longPressMs: 550,
+  repeatStartMs: 350,
+};
+function normalizeGestureTiming(timing?: ButtonGestureTiming | null): ButtonGestureTiming {
+  const roundStep = (value: number, min: number, max: number) =>
+    Math.min(max, Math.max(min, Math.round(value / 50) * 50));
+  const source = timing ?? DEFAULT_GESTURE_TIMING;
+  return {
+    doubleClickMs: roundStep(
+      Number.isFinite(source.doubleClickMs) ? source.doubleClickMs : 300,
+      50,
+      500,
+    ),
+    longPressMs: roundStep(
+      Number.isFinite(source.longPressMs) ? source.longPressMs : 550,
+      300,
+      1000,
+    ),
+    repeatStartMs: roundStep(
+      Number.isFinite(source.repeatStartMs) ? source.repeatStartMs : 350,
+      50,
+      2000,
+    ),
+  };
+}
+const gestureTimingDraft = reactive<ButtonGestureTiming>({ ...DEFAULT_GESTURE_TIMING });
+const gestureTimingSaved = ref<ButtonGestureTiming>({ ...DEFAULT_GESTURE_TIMING });
+const gestureTimingSaveState = ref<"idle" | "saving" | "saved" | "failed">("idle");
+const gestureTimingModelKey = computed(
+  () => props.runtime?.platform.connection?.remoteModel ?? "unknown",
+);
+const gestureTimingModelKnown = computed(() => gestureTimingModelKey.value !== "unknown");
+function markGestureTimingEdited(): void {
+  if (gestureTimingSaveState.value !== "saving") {
+    gestureTimingSaveState.value = "idle";
+  }
+}
+function storedGestureTiming(): ButtonGestureTiming {
+  const key = gestureTimingModelKey.value;
+  const buckets = mappings.value.gestureTimingsByModel ?? {};
+  if (Object.keys(buckets).length > 0) {
+    return normalizeGestureTiming(buckets[key]);
+  }
+  return normalizeGestureTiming(mappings.value.gestureTiming);
+}
+const gestureTimingDirty = computed(
+  () =>
+    gestureTimingDraft.doubleClickMs !== gestureTimingSaved.value.doubleClickMs ||
+    gestureTimingDraft.longPressMs !== gestureTimingSaved.value.longPressMs ||
+    gestureTimingDraft.repeatStartMs !== gestureTimingSaved.value.repeatStartMs,
+);
+const gestureTimingCanSave = computed(
+  () =>
+    gestureTimingModelKnown.value &&
+    !busy.value &&
+    gestureTimingSaveState.value !== "saving" &&
+    gestureTimingDirty.value,
+);
+const gestureTimingHint = computed(() => {
+  if (!gestureTimingModelKnown.value) {
+    return t("连接并识别遥控器后才能保存按键速度。");
+  }
+  if (gestureTimingSaveState.value === "failed") {
+    return t("保存失败，请重试。");
+  }
+  if (gestureTimingSaveState.value === "saved") {
+    return t("已保存；重新打开也会保留。");
+  }
+  if (gestureLearning.step === "complete") {
+    return t("学习结果会填入识别时间并保留，重新打开也会显示学习完成，点保存后才会用到按键上。");
+  }
+  if (gestureTimingDirty.value) {
+    return t("点保存后才会用到按键上。");
+  }
+  return t("学习结果会填入识别时间并保留，重新打开也会显示学习完成，点保存后才会用到按键上。");
+});
+type GestureLearningStep = "idle" | "single" | "double" | "long" | "complete";
+const gestureLearning = reactive<{
+  step: GestureLearningStep;
+  button: RemoteButton | null;
+  single: number | null;
+  double: number | null;
+  long: number | null;
+  pressedAt: number | null;
+  firstDoubleReleaseAt: number | null;
+  doublePresses: number;
+  ignoreNextDoubleRelease: boolean;
+}>({
+  step: "idle",
+  button: null,
+  single: null,
+  double: null,
+  long: null,
+  pressedAt: null,
+  firstDoubleReleaseAt: null,
+  doublePresses: 0,
+  ignoreNextDoubleRelease: false,
+});
+const GESTURE_LEARNING_CACHE = "sayall.buttonGestureLearning.v1";
+function gestureLearningCacheKey(): string {
+  return `${GESTURE_LEARNING_CACHE}.${gestureTimingModelKey.value}`;
+}
+function restoreGestureLearningCache(): void {
+  gestureLearning.single = null;
+  gestureLearning.double = null;
+  gestureLearning.long = null;
+  gestureLearning.step = "idle";
+  try {
+    const raw = window.localStorage.getItem(gestureLearningCacheKey());
+    if (!raw) return;
+    const saved = JSON.parse(raw) as Partial<typeof gestureLearning>;
+    if (
+      typeof saved.single === "number" &&
+      typeof saved.double === "number" &&
+      typeof saved.long === "number"
+    ) {
+      gestureLearning.single = saved.single;
+      gestureLearning.double = saved.double;
+      gestureLearning.long = saved.long;
+      gestureLearning.step = "complete";
+    }
+  } catch {
+    // 学习缓存只是展示用的便利数据；损坏时静默丢弃。
+  }
+}
+function persistGestureLearningCache(): void {
+  try {
+    window.localStorage.setItem(
+      gestureLearningCacheKey(),
+      JSON.stringify({
+        single: gestureLearning.single,
+        double: gestureLearning.double,
+        long: gestureLearning.long,
+      }),
+    );
+  } catch {
+    // localStorage 不可用时不阻断学习流程。
+  }
+}
+restoreGestureLearningCache();
+watch(gestureTimingModelKey, () => {
+  cancelGestureLearning();
+  restoreGestureLearningCache();
+});
+watch(
+  () => {
+    const phase = props.runtime?.platform.connection?.phase;
+    return phase === "ready" || phase === "streaming";
+  },
+  (ready) => {
+    if (!ready) cancelGestureLearning();
+  },
+);
+watch(showSpeedPanel, (visible) => {
+  if (!visible) cancelGestureLearning();
+});
+const gestureLearningActive = computed(
+  () => gestureLearning.step !== "idle" && gestureLearning.step !== "complete",
+);
+const gestureLearningCanStart = computed(
+  () => connectionReady.value && gestureTimingModelKnown.value,
+);
+const gestureLearningSuspensionHeld = ref(false);
+const gestureLearningStarting = ref(false);
+let gestureLearningStartRequest = 0;
+async function setGestureLearningSuspension(suspended: boolean): Promise<boolean> {
+  try {
+    await setMappingSuspension(suspended);
+    gestureLearningSuspensionHeld.value = suspended;
+    return true;
+  } catch (error) {
+    console.warn("button gesture learning suspension failed", error);
+    statusMessage.value = operationErrorText(
+      "button gesture learning suspension failed",
+      error,
+      t("无法暂停按键动作，学习未开始。"),
+    );
+    return false;
+  }
+}
+function releaseGestureLearningSuspension(): void {
+  if (!gestureLearningSuspensionHeld.value) return;
+  gestureLearningSuspensionHeld.value = false;
+  void setMappingSuspension(false).catch(() => {
+    // 页面已卸载时桥接可能不可用；学习暂停必须在可用的下一次进入页面时由
+    // 开始流程重新建立，这里只保证不因收尾异常打断卸载。
+  });
+}
+function cancelGestureLearning(): void {
+  gestureLearningStartRequest += 1;
+  if (!gestureLearningActive.value) {
+    releaseGestureLearningSuspension();
+    return;
+  }
+  gestureLearning.step = "idle";
+  gestureLearning.button = null;
+  gestureLearning.single = null;
+  gestureLearning.double = null;
+  gestureLearning.long = null;
+  gestureLearning.pressedAt = null;
+  gestureLearning.firstDoubleReleaseAt = null;
+  gestureLearning.doublePresses = 0;
+  gestureLearning.ignoreNextDoubleRelease = false;
+  releaseGestureLearningSuspension();
+}
+const gestureLearningStatusText = computed(() => {
+  if (gestureLearningStarting.value) return t("正在暂停按键动作…");
+  if (gestureLearning.step === "complete") return t("学习完成");
+  if (gestureLearning.step === "single") return t("正在学习 1/3");
+  if (gestureLearning.step === "double") return t("正在学习 2/3");
+  if (gestureLearning.step === "long") return t("正在学习 3/3");
+  return t("未开始学习");
+});
+
+watch(gestureTimingModelKey, () => {
+  gestureTimingSaveState.value = "idle";
+});
+watch(
+  () =>
+    [
+      gestureTimingModelKey.value,
+      mappings.value.gestureTimingsByModel,
+      mappings.value.gestureTiming,
+    ] as const,
+  () => {
+    const next = storedGestureTiming();
+    Object.assign(gestureTimingDraft, next);
+    gestureTimingSaved.value = { ...next };
+    if (gestureTimingSaveState.value !== "saving") {
+      gestureTimingSaveState.value = "idle";
+    }
+  },
+  { immediate: true, deep: true },
+);
+
+async function startGestureLearning(): Promise<void> {
+  if (!gestureLearningCanStart.value || gestureLearningActive.value) return;
+  if (gestureLearningStarting.value) return;
+  const request = ++gestureLearningStartRequest;
+  gestureLearningStarting.value = true;
+  let suspended = false;
+  try {
+    suspended = await setGestureLearningSuspension(true);
+  } finally {
+    gestureLearningStarting.value = false;
+  }
+  if (request !== gestureLearningStartRequest || unmounted) {
+    releaseGestureLearningSuspension();
+    return;
+  }
+  if (!suspended) return;
+  gestureLearning.step = "single";
+  gestureLearning.button = null;
+  gestureLearning.single = null;
+  gestureLearning.double = null;
+  gestureLearning.long = null;
+  gestureLearning.pressedAt = null;
+  gestureLearning.firstDoubleReleaseAt = null;
+  gestureLearning.doublePresses = 0;
+  gestureLearning.ignoreNextDoubleRelease = false;
+  gestureTimingSaveState.value = "idle";
+}
+
+function handleGestureLearningEdge(edge: ButtonEdge): void {
+  if (!gestureLearningActive.value) return;
+  if (gestureLearning.button === null) {
+    if (!edge.isPressed) return;
+    gestureLearning.button = edge.button;
+  } else if (gestureLearning.button !== edge.button) {
+    return;
+  }
+  const now = performance.now();
+  if (edge.isPressed) {
+    gestureLearning.pressedAt = now;
+    if (gestureLearning.step === "double") {
+      if (gestureLearning.doublePresses === 1 && gestureLearning.firstDoubleReleaseAt !== null) {
+        const interval = Math.max(
+          0,
+          Math.round(now - gestureLearning.firstDoubleReleaseAt),
+        );
+        // 报告层可能把一次按压拆成相邻边沿：松手到再按下 < 20ms 不可能是
+        // 人工双击，整对忽略，保留第一次松手时刻等待用户真正补第二下。
+        if (interval < 20) {
+          gestureLearning.ignoreNextDoubleRelease = true;
+        } else {
+          gestureLearning.double = interval;
+        }
+      }
+    }
+    return;
+  }
+  const pressedAt = gestureLearning.pressedAt;
+  if (pressedAt === null) return;
+  gestureLearning.pressedAt = null;
+  const duration = Math.max(0, Math.round(now - pressedAt));
+  if (gestureLearning.step === "single") {
+    gestureLearning.single = duration;
+    gestureLearning.step = "double";
+    gestureLearning.doublePresses = 0;
+    gestureLearning.ignoreNextDoubleRelease = false;
+    gestureLearning.firstDoubleReleaseAt = null;
+    return;
+  }
+  if (gestureLearning.step === "double") {
+    if (gestureLearning.ignoreNextDoubleRelease) {
+      gestureLearning.ignoreNextDoubleRelease = false;
+      return;
+    }
+    gestureLearning.doublePresses += 1;
+    if (gestureLearning.doublePresses === 1) {
+      gestureLearning.firstDoubleReleaseAt = now;
+    } else {
+      gestureLearning.step = "long";
+    }
+    return;
+  }
+  if (gestureLearning.step === "long") {
+    if (duration < 150) {
+      return;
+    }
+    gestureLearning.long = duration;
+    gestureLearning.step = "complete";
+    persistGestureLearningCache();
+    releaseGestureLearningSuspension();
+    const double = gestureLearning.double ?? 0;
+    gestureTimingDraft.doubleClickMs = normalizeGestureTiming({
+      doubleClickMs: Math.max(150, Math.ceil(double / 50) * 50),
+      longPressMs: Math.floor(duration / 50) * 50,
+      repeatStartMs: gestureTimingDraft.repeatStartMs,
+    }).doubleClickMs;
+    gestureTimingDraft.longPressMs = normalizeGestureTiming({
+      doubleClickMs: gestureTimingDraft.doubleClickMs,
+      longPressMs: Math.floor(duration / 50) * 50,
+      repeatStartMs: gestureTimingDraft.repeatStartMs,
+    }).longPressMs;
+  }
+}
+
+async function saveGestureTiming(): Promise<void> {
+  if (!gestureTimingCanSave.value || !gestureTimingModelKnown.value) return;
+  const timing = normalizeGestureTiming(gestureTimingDraft);
+  const modelKey = gestureTimingModelKey.value;
+  gestureTimingSaveState.value = "saving";
+  mappings.value = {
+    ...mappings.value,
+    gestureTiming: timing,
+    gestureTimingsByModel: {
+      ...(mappings.value.gestureTimingsByModel ?? {}),
+      [modelKey]: timing,
+    },
+  };
+  const ok = await persist(t("按键速度已保存"));
+  if (ok) {
+    gestureTimingSaved.value = { ...timing };
+    gestureTimingSaveState.value = "saved";
+  } else {
+    gestureTimingSaveState.value = "failed";
+  }
+}
+
+function shortcutCategory(keys: readonly KeyCode[]): ActionFilter {
+  for (const group of SHORTCUT_PRESET_GROUPS) {
+    if (
+      group.items.some(
+        (item) =>
+          item.keys.length === keys.length &&
+          item.keys.every((key, keyIndex) => key === keys[keyIndex]),
+      )
+    ) {
+      // 预设快捷键（基础按键 + 系统与媒体）都归入「基础按键」；
+      // 不在预设表里的快捷键归入「自定义动作」。
+      return "basic";
+    }
+  }
+  return "customActions";
+}
+
+function filterForAction(action: ButtonAction | null): ActionFilter {
+  if (!action || action.type === "disabled") return "all";
+  switch (action.type) {
+    case "shortcut":
+      return shortcutCategory(action.chord.keys);
+    case "app_switcher":
+      return "basic";
+    case "mouse_click":
+    case "mouse_move":
+    case "scroll":
+    case "page_up":
+    case "page_down":
+    case "scroll_to_top":
+    case "scroll_to_bottom":
+      return "mouse";
+    case "focus_input":
+      return "customActions";
+    case "run_macro":
+      return COMBINATION_ACTIONS_ENABLED ? "combinations" : "all";
+    case "open_common_phrases":
+      return "customActions";
+    case "open_app":
+      return "applications";
+    default:
+      return "all";
+  }
+}
+
+function selectActionFilter(filter: ActionFilter): void {
+  if (activeActionFilter.value === filter) return;
+  activeActionFilter.value = filter;
+  void nextTick(() => {
+    const host = editorScrollHost.value;
+    if (host && typeof host.scrollIntoView === "function") {
+      host.scrollIntoView({ block: "start" });
+    }
+  });
+}
+
+watch(editingTarget, (target) => {
   unsupportedReplaceArmed.value = false;
+  resetEditorSaveStatus();
+  if (target) {
+    activeActionFilter.value =
+      pendingActionFilterOverride ??
+      filterForAction(actionOf(target.button, target.trigger));
+    pendingActionFilterOverride = null;
+  }
 });
 watch(selectedAction, () => {
   unsupportedReplaceArmed.value = false;
@@ -1043,7 +1682,12 @@ const repeatGroupVisible = computed(() => {
   return target.trigger === "single" || target.trigger === "long";
 });
 
-type HoldRepeatChoice = "off" | "single" | "long";
+type HoldRepeatChoice =
+  | "off"
+  | "single"
+  | "long"
+  | "singleHold"
+  | "longHold";
 
 /** 选项不可选的原因（null = 可选）；radio 展示与一致性收口共用同一判据。 */
 function holdRepeatBlockedReason(
@@ -1080,10 +1724,75 @@ function holdRepeatBlockedReason(
   return null;
 }
 
-/** 当前按键的「按住时连续执行」状态（按键级，两页同源）。 */
+/** 方向键按住只支持左/右；目标动作必须是单个左或右方向键。 */
+function directionalHoldBlockedReason(
+  actions: ButtonActions,
+  slot: "single" | "long",
+): string | null {
+  const target = slot === "single" ? actions.single : actions.long;
+  if (!isKnownButtonAction(target)) {
+    return t("这个动作来自更新版本，当前版本只保留、不执行，不能设为按住方向键");
+  }
+  if (target.type === "disabled") {
+    return slot === "single"
+      ? t("先给这个按键配置单击方向键")
+      : t("先给这个按键配置长按方向键");
+  }
+  if (
+    target.type !== "shortcut" ||
+    target.chord.keys.length !== 1 ||
+    (target.chord.keys[0] !== "left" && target.chord.keys[0] !== "right")
+  ) {
+    return slot === "single"
+      ? t("“单击”的动作必须是单个左或右方向键")
+      : t("“长按”的动作必须是单个左或右方向键");
+  }
+  return null;
+}
+
+const directionalHoldVisible = computed(() => {
+  const target = editingTarget.value;
+  return (
+    !!target &&
+    (target.button === "left" || target.button === "right") &&
+    (target.trigger === "single" || target.trigger === "long")
+  );
+});
+
+const singleHoldReason = computed<string | null>(() => {
+  const target = editingTarget.value;
+  return target
+    ? directionalHoldBlockedReason(actionsOf(target.button), "single")
+    : null;
+});
+
+const longHoldReason = computed<string | null>(() => {
+  const target = editingTarget.value;
+  return target
+    ? directionalHoldBlockedReason(actionsOf(target.button), "long")
+    : null;
+});
+
+const singleHoldTitle = computed(
+  () =>
+    singleHoldReason.value ??
+    t("按住不放会保持方向键按下，松开才释放"),
+);
+
+const longHoldTitle = computed(
+  () =>
+    longHoldReason.value ??
+    t("按住约 0.55 秒后会保持方向键按下，松开才释放"),
+);
+
+/** 当前按键的按住状态（按键级，两页同源）。 */
 const repeatChoice = computed<HoldRepeatChoice>(() => {
   const target = editingTarget.value;
-  const hold = target ? actionsOf(target.button).holdRepeat : undefined;
+  if (!target) return "off";
+  const actions = actionsOf(target.button);
+  if (actions.directionalHold === "single") return "singleHold";
+  if (actions.directionalHold === "long") return "longHold";
+  const hold = actions.holdRepeat;
   return hold === "long" ? "long" : hold === "single" ? "single" : "off";
 });
 
@@ -1101,6 +1810,8 @@ const repeatLongReason = computed<string | null>(() => {
 const repeatPageReason = computed<string | null>(() => {
   const target = editingTarget.value;
   if (!target) return null;
+  if (repeatChoice.value === "singleHold") return singleHoldReason.value;
+  if (repeatChoice.value === "longHold") return longHoldReason.value;
   if (target.trigger === "single") return repeatSingleReason.value;
   if (target.trigger === "long") return repeatLongReason.value;
   return null;
@@ -1124,6 +1835,54 @@ const repeatSingleTitle = computed(() => {
 const repeatLongTitle = computed(
   () => repeatLongReason.value ?? t("按住约 0.55 秒后，长按动作会不断重复，直到松手"),
 );
+
+type HoldPanelOption = {
+  id: HoldRepeatChoice;
+  title: string;
+  description: string;
+  reason: string | null;
+};
+const holdPanelTarget = computed(() => editingTarget.value?.button ?? null);
+const holdPanelSupportsHoldDown = computed(
+  () => holdPanelTarget.value === "left" || holdPanelTarget.value === "right",
+);
+const holdPanelOptions = computed<HoldPanelOption[]>(() => {
+  const button = holdPanelTarget.value;
+  if (!button) return [];
+  const single = mappingActionSummary(button, "single");
+  const long = mappingActionSummary(button, "long");
+  const options: HoldPanelOption[] = [
+    {
+      id: "single",
+      title: t("重复执行单击动作 {action}", { action: single }),
+      description: t("按住时重复执行单击动作，松手后停止。"),
+      reason: repeatSingleReason.value,
+    },
+    {
+      id: "long",
+      title: t("重复执行长按动作 {action}", { action: long }),
+      description: t("达到当前长按时间后重复执行长按动作，松手后停止。"),
+      reason: repeatLongReason.value,
+    },
+  ];
+  if (holdPanelSupportsHoldDown.value) {
+    options.push(
+      {
+        id: "singleHold",
+        title: t("按住 {action}", { action: single }),
+        description: t("相当于按住键盘上的 {action}，直到松手。", { action: single }),
+        reason: singleHoldReason.value,
+      },
+      {
+        id: "longHold",
+        title: t("长按后按住 {action}", { action: long }),
+        description: t("达到当前长按时间后按住 {action}，松手时松开。", { action: long }),
+        reason: longHoldReason.value,
+      },
+    );
+  }
+  return options;
+});
 
 /**
  * OK 键「移动光标后按 OK 点击」（2026-10-06 定稿，方案见
@@ -1165,6 +1924,21 @@ function toggleOkContextClick(): void {
 function reconcileHoldRepeat(
   actions: ButtonActions,
 ): { actions: ButtonActions; notice: string | null } {
+  if (actions.directionalHold) {
+    const targetAction =
+      actions.directionalHold === "single" ? actions.single : actions.long;
+    // 更新版本的动作当前不执行；保留用户的按住设置，等信息完整的版本处理。
+    if (!isKnownButtonAction(targetAction)) return { actions, notice: null };
+    if (directionalHoldBlockedReason(actions, actions.directionalHold) === null) {
+      return { actions, notice: null };
+    }
+    const next = { ...actions };
+    delete next.directionalHold;
+    return {
+      actions: next,
+      notice: t("目标动作已变更，方向键按住已关闭"),
+    };
+  }
   const hold = actions.holdRepeat;
   if (!hold) return { actions, notice: null };
   const slot = hold === "long" ? "long" : "single";
@@ -1204,7 +1978,11 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
       ? repeatSingleReason.value
       : choice === "long"
         ? repeatLongReason.value
-        : null;
+        : choice === "singleHold"
+          ? singleHoldReason.value
+          : choice === "longHold"
+            ? longHoldReason.value
+            : null;
   if (reason) {
     statusMessage.value = reason;
     return;
@@ -1213,8 +1991,13 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
   const actions = { ...actionsOf(target.button) };
   if (choice === "off") {
     delete actions.holdRepeat;
-  } else {
+    delete actions.directionalHold;
+  } else if (choice === "single" || choice === "long") {
     actions.holdRepeat = choice;
+    delete actions.directionalHold;
+  } else {
+    actions.directionalHold = choice === "singleHold" ? "single" : "long";
+    delete actions.holdRepeat;
   }
   mappings.value = {
     ...mappings.value,
@@ -1225,7 +2008,11 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
       ? t("已关闭“按住时连续执行”")
       : choice === "long"
         ? t("已开启：长按后不松手会继续连续执行")
-        : t("已开启：按住不放会连续执行"),
+        : choice === "singleHold"
+          ? t("已开启：按住不放会保持方向键按下")
+          : choice === "longHold"
+            ? t("已开启：长按后不松手会保持方向键按下")
+            : t("已开启：按住不放会连续执行"),
   );
 }
 
@@ -1326,11 +2113,15 @@ const captureSwitchTitle = computed(() =>
 
 let saveQueue: Promise<void> = Promise.resolve();
 let saveRequest = 0;
-async function persist(message?: string): Promise<void> {
+async function persist(
+  message?: string,
+  reportFailure = true,
+): Promise<boolean> {
   const request = ++saveRequest;
   const payload = JSON.parse(JSON.stringify(mappings.value)) as ButtonMappings;
   busy.value = true;
   statusMessage.value = null;
+  let ok = false;
   const task = saveQueue.then(async () => {
     try {
       const saved = await saveButtonMappings(payload);
@@ -1340,19 +2131,23 @@ async function persist(message?: string): Promise<void> {
         mappings.value = saved;
         if (message) statusMessage.value = message;
       }
+      ok = true;
     } catch (error) {
       if (request === saveRequest) {
-        statusMessage.value = operationErrorText(
-          "save button mappings failed",
-          error,
-          "没能保存按键映射，请重试。",
-        );
+        if (reportFailure) {
+          statusMessage.value = operationErrorText(
+            "save button mappings failed",
+            error,
+            "没能保存按键映射，请重试。",
+          );
+        }
       }
     }
   });
   saveQueue = task;
   await task;
   if (request === saveRequest) busy.value = false;
+  return ok;
 }
 
 // 页面底部的快照错误只显示固定一句用户语言；原始错误留在控制台/后端日志。
@@ -1580,7 +2375,7 @@ watch(capturingShortcut, (active) => {
 watch(editingTarget, async (target) => {
   if (!target) return;
   await nextTick();
-  editorPanel.value?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  editorScrollHost.value?.scrollIntoView?.({ behavior: "smooth", block: "start" });
 });
 
 function phaseLabel(phase: RawInputPhase | undefined): string {
@@ -2154,6 +2949,7 @@ onMounted(async () => {
 
   const stopEdges = await subscribeButtonEdges((edge: ButtonEdge) => {
     const arrival = performance.now();
+    handleGestureLearningEdge(edge);
     const next = new Set(activeButtons.value);
     if (edge.isPressed) {
       next.add(edge.button);
@@ -2254,6 +3050,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unmounted = true;
+  releaseGestureLearningSuspension();
   releasePageResources();
   reportFrontendEvent({
     event: "buttons_page_resource_cleanup",
@@ -2275,17 +3072,30 @@ onUnmounted(() => {
     </header>
     <component :is="commonPhraseEditor" />
   </section>
-  <section v-else class="buttons-page buttons-page-main">
-    <!-- 头部对齐 Mac mappingPage：标题 + 启用开关相邻居左，遥控器状态最右
-         （保存按钮移入编辑面板，与"测试一次/关闭"同排）。 -->
+  <section v-else class="buttons-page mapping-page">
+    <div class="mapping-fixed-top">
+    <!-- 头部对齐 Mac mappingPage：标题、副标题、自定义按键开关纵向排列，
+         遥控器状态最右；顶部整体不参与内容滚动。
+         保存按钮移入编辑面板，与"测试一次/关闭"同排。 -->
     <header class="page-header mapping-header">
-      <div>
-        <div class="mapping-title-row">
-          <h1>{{ tPage("按键映射") }}</h1>
+      <div class="mapping-header-copy">
+        <h1>{{ tPage("按键映射") }}</h1>
+        <p
+          class="page-subtitle"
+          :class="{
+            'is-failure': captureFailure || captureRevokedNote || captureInactiveNote,
+          }"
+        >
+          {{
+            captureFailure ??
+            captureRevokedNote ??
+            captureInactiveNote ??
+            t("点击按键进行设置")
+          }}
+        </p>
+        <div class="mapping-toggle-row">
           <label class="toggle-row" :title="t('开启后，遥控器按键按本页配置执行动作；关闭时，遥控器保持原始按键行为。')">
-            <span>{{ t("启用自定义按键功能") }}</span>
-            <!-- 始终渲染：值先取上次已知值（localStorage），IPC 回来后以权威值覆盖。
-                 数据未到之前禁用，避免用户用默认值触发一次保存、把真实设置覆盖掉。 -->
+            <span>{{ t("自定义按键") }}</span>
             <input
               v-model="enabled"
               type="checkbox"
@@ -2293,26 +3103,11 @@ onUnmounted(() => {
               :disabled="busy || !mappingsLoaded"
             />
           </label>
-          <!-- 全按键支持开关常驻页面头部（2026-09-27 Andy 要求）：不依赖
-               选中某个按键的编辑面板，任何时刻都能开启/关闭。
-               样式与「启用自定义按键功能」一致（toggle-input Switch，2026-09-28）；
-               桥接状态是开关右侧的行内圆点——不能再用独立状态行：v-if 插行会把
-               下方画布整体顶下去（页面抖动），胶囊底色+状态光晕也把标题区染了色
-               （2026-09-28 Andy 报告）。 -->
-          <!-- 悬停提示随开关状态切换（2026-09-28 Andy 定稿）：关闭态指向
-               「开启后支持使用…」，开启态指向「关闭后…将不可映射」；本机不可用
-               （ARM64，issue #206）时固定为不可用口径。 -->
           <label
             class="toggle-row"
             :title="captureSwitchTitle"
           >
             <span>{{ t("全按键支持") }}</span>
-            <!-- 开关 + 状态提示合并成一个开关（2026-10-10 Andy 定稿，见
-                 docs/product-copy.md §4）：只有关闭 / 开启 / 正在操作三态，
-                 进行中=置灰 + 转圈且不配文字；只有失败才在标题下方显示一句原因。
-                 终值就绪前用同尺寸占位符顶位、就绪后才创建开关本体——与
-                 「启动行为」页登录自启动开关同法（2026-09-28 Andy 要求）：
-                 开关创建即带正确 checked，不产生"状态回来后关→开"的滑动动画。 -->
             <span class="toggle-switch-slot">
               <span
                 v-if="rc003CaptureEnabled === null"
@@ -2335,33 +3130,14 @@ onUnmounted(() => {
               ></span>
             </span>
           </label>
-          <!-- 本机不可用（ARM64，issue #206）：开关旁一句短说明，说结果不说机制。 -->
           <span v-if="captureUnsupported" class="capture-unavailable-note">
             {{ captureUnsupportedNote }}
           </span>
         </div>
-        <!-- 标题下方一行：平时是页面副标题；只有开关操作失败/启动失败、或
-             「开着却没生效」时改说原因（2026-10-10 定稿 + 2026-10-13 定稿：
-             其余情况不显示任何状态文案）。位置不动、不插行，沿用 2026-09-28 的防抖动约定。 -->
-        <p
-          class="page-subtitle"
-          :class="{
-            'is-failure': captureFailure || captureRevokedNote || captureInactiveNote,
-          }"
-        >
-          {{
-            captureFailure ??
-            captureRevokedNote ??
-            captureInactiveNote ??
-            t("点击按键进行自定义配置")
-          }}
-        </p>
       </div>
       <div class="mapping-header-controls">
-        <!-- 遥控器信息卡片（2026-10-04，对标 Mac mappingPage 右上卡片）：图标 + 型号 +
-             状态/电量 + 重新连接。状态行与按钮文案都是常驻的（不靠 v-if 插行），
-             避免头部高度变化把画布顶下去（2026-09-28 抖动教训）。 -->
-        <div class="remote-info-card">
+        <!-- 遥控器信息卡片：型号 + 状态/电量 + 重新连接。 -->
+        <div class="remote-info-card" :class="{ connected: connectionReady }">
           <div class="remote-info-main">
             <strong>{{ deviceLabel }}</strong>
             <span class="remote-info-status">
@@ -2381,6 +3157,9 @@ onUnmounted(() => {
         </div>
       </div>
     </header>
+    </div>
+
+    <div class="mapping-scroll-area">
 
     <!-- 桥接状态不再有独立行（2026-09-28）：状态收进头部开关右侧的行内圆点
          （title 悬停看文案），开启失败走底部提示条——独立行的 v-if 插入 /
@@ -2463,7 +3242,16 @@ onUnmounted(() => {
               stroke-linejoin="round"
             />
           </svg>
-          <strong>{{ buttonLabels[placement.button] }}</strong>
+          <strong>{{ buttonFullLabels[placement.button] }}</strong>
+          <button
+            type="button"
+            class="mapping-hold-chip"
+            :disabled="captureGated(placement.button)"
+            :title="`${buttonFullLabels[placement.button]} · ${holdSummaryFor(placement.button)}`"
+            @click.stop="openHoldEditor(placement.button)"
+          >
+            {{ holdSummaryFor(placement.button) }}
+          </button>
         </div>
         <div class="mapping-cells">
           <button
@@ -2489,11 +3277,11 @@ onUnmounted(() => {
             <span
               :class="{
                 'direction-arrow': isDirectionSummary(
-                  actionSummary(actionOf(placement.button, trigger)),
+                  mappingActionSummary(placement.button, trigger),
                 ),
               }"
             >
-              {{ actionSummary(actionOf(placement.button, trigger)) }}
+              {{ mappingActionSummary(placement.button, trigger) }}
             </span>
           </button>
         </div>
@@ -2518,32 +3306,71 @@ onUnmounted(() => {
             />
           </svg>
           <strong>{{ t("语音键") }}</strong>
-          <span class="badge pending voice-badge" :class="{ active: voiceActive }">{{ t("按住说话") }}</span>
+          <span class="badge pending voice-badge" :class="{ active: voiceActive }">{{ t("语音触发键") }}</span>
         </div>
         <p class="voice-note">{{ t("按下开始、松开结束；不参与自定义映射，不加双击/长按延迟。") }}</p>
       </article>
     </div>
 
-    <article v-if="editingTarget" ref="editorPanel" class="card mapping-editor">
+    <div v-if="editingTarget" ref="editorScrollHost" class="mapping-editor-host">
+    <div class="mapping-action-filter" role="tablist" :aria-label="t('动作分类')">
+      <button
+        v-for="item in actionFilterItems"
+        :key="item.id"
+        class="action-filter-chip"
+        :class="{ selected: activeActionFilter === item.id }"
+        type="button"
+        role="tab"
+        :aria-selected="activeActionFilter === item.id"
+        @click="selectActionFilter(item.id)"
+      >
+        {{ item.label }}
+      </button>
+    </div>
+
+    <article v-if="showActionEditor" ref="editorPanel" class="card mapping-editor">
       <div class="card-title-row">
         <div>
-          <h2>{{ buttonLabel(editingTarget.button) }} · {{ buttonTriggerLabel(editingTarget.trigger) }}</h2>
-          <p class="muted">{{ t("当前：{summary}", { summary: actionSummary(actionOf(editingTarget.button, editingTarget.trigger)) }) }}</p>
+          <div class="editor-title-row">
+            <svg class="mapping-icon editor-title-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                v-for="(path, index) in buttonIcons[editingTarget.button]"
+                :key="index"
+                :d="path"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <h2>{{ buttonFullLabels[editingTarget.button] }}</h2>
+            <span class="editor-title-separator"> · </span>
+            <span class="editor-trigger-pill">{{ buttonTriggerLabel(editingTarget.trigger) }}</span>
+          </div>
+          <p class="muted">{{ t("当前：{summary}", { summary: mappingActionSummary(editingTarget.button, editingTarget.trigger) }) }}</p>
         </div>
         <div class="button-row">
           <!-- 全按键支持开关已移至页面头部（与「启用自定义按键功能」并排，
                2026-09-27），编辑面板只保留按键级操作。 -->
+          <span class="editor-save-status" :class="editorSaveTone">{{ editorSaveLabel }}</span>
           <button
-            class="secondary-button editor-disable-btn"
-            :class="{ 'is-active': actionOf(editingTarget.button, editingTarget.trigger).type === 'disabled' }"
+            v-if="editorSaveOutcome === 'failed' || editorSaveOutcome === 'unknown'"
+            class="link-button editor-save-retry"
             type="button"
-            :disabled="busy"
-            :title="t('只禁用当前格子的映射，此按键恢复原始行为')"
-            @click="applyAction({ type: 'disabled' })"
+            @click="retryEditorSave"
           >
-            {{ t("禁用按键") }}
+            {{ t("重试") }}
           </button>
-          <button class="secondary-button" type="button" @click="editingTarget = null">{{ t("关闭") }}</button>
+          <label class="editor-disable-toggle" :class="{ active: disableActionActive }">
+            <span>{{ t("停用此动作") }}</span>
+            <input
+              class="toggle-input"
+              type="checkbox"
+              :checked="disableActionActive"
+              :disabled="busy"
+              @change="toggleDisableAction"
+            />
+          </label>
         </div>
       </div>
       <div class="action-sections">
@@ -2554,7 +3381,7 @@ onUnmounted(() => {
         >
           {{ t("这个动作来自更新版本：当前版本保留它但不执行。选择下面的任意动作后，再选一次才会替换它；如需使用原动作，请升级无线麦。") }}
         </p>
-        <section v-for="group in SHORTCUT_PRESET_GROUPS" :key="group.label" class="action-section">
+        <section v-for="group in visibleShortcutGroups" :key="group.label" class="action-section">
           <h4 class="action-section-title">{{ group.label }}</h4>
           <div class="preset-grid">
             <!-- 芯片显示实际按键组合（组合在不同 App 里语义不同，功能描述
@@ -2573,10 +3400,9 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <!-- 自定义动作放在系统与媒体下方（2026-10-22 用户指定顺序）；
-             原「设备操作 / 聚焦输入框」并入本组的录制按钮右侧。 -->
-        <section class="action-section">
-          <h4 class="action-section-title">{{ t("自定义动作") }}</h4>
+        <!-- 自定义按键、输入框是两类独立候选（2026-11-24 对齐 Mac 2.0.10）。 -->
+        <section v-if="showCustomShortcutSection" class="action-section">
+          <h4 class="action-section-title">{{ t("自定义按键") }}</h4>
           <div class="custom-shortcut-row">
             <button
               class="chip"
@@ -2586,15 +3412,6 @@ onUnmounted(() => {
               @click="capturingShortcut ? finishShortcutCapture(t('已取消录入')) : beginShortcutCapture()"
             >
               {{ capturingShortcut ? t("录入中…（按 Esc 取消）") : t("录入自定义快捷键") }}
-            </button>
-            <button
-              class="chip"
-              :class="{ selected: selectedAction?.type === 'focus_input' }"
-              type="button"
-              :title="t('把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）')"
-              @click="applyAction({ type: 'focus_input' })"
-            >
-              {{ t("聚焦输入框") }}
             </button>
             <span v-if="capturingShortcut" class="capture-display">
               {{ captureDisplay.length ? chordLabel({ keys: captureDisplay }) : (safeCaptureMode ? t("先选择修饰键") : t("请按下快捷键组合")) }}
@@ -2635,7 +3452,25 @@ onUnmounted(() => {
           </template>
         </section>
 
-        <section class="action-section">
+        <section v-if="showInputSection" class="action-section">
+          <h4 class="action-section-title">{{ t("输入框") }}</h4>
+          <div class="custom-shortcut-row">
+            <button
+              class="chip"
+              :class="{ selected: selectedAction?.type === 'focus_input' }"
+              type="button"
+              :title="t('把键盘焦点放到当前前台应用的输入框（不切换应用、不输入文字）')"
+              @click="applyAction({ type: 'focus_input' })"
+            >
+              {{ t("聚焦输入框") }}
+            </button>
+            <span class="muted input-section-hint">
+              {{ t("学习指定 App 的输入框请去「聚焦与翻页」页面") }}
+            </span>
+          </div>
+        </section>
+
+        <section v-if="showAppSection" class="action-section">
           <h4 class="action-section-title">{{ t("打开 APP") }}</h4>
           <div class="preset-grid app-library">
             <button
@@ -2655,12 +3490,12 @@ onUnmounted(() => {
               type="button"
               :aria-expanded="customAppsExpanded"
               aria-controls="custom-app-group"
-              @click="customAppsOpen = !customAppsExpanded"
+              @click="toggleCustomApps"
             >
               {{ t("打开自定义 APP") }}
             </button>
           </div>
-          <div v-if="customAppsExpanded" id="custom-app-group" class="custom-app-group">
+          <div v-if="customAppsExpanded" id="custom-app-group" ref="customAppGroupEl" class="custom-app-group">
             <p class="action-section-title target-app-title">{{ t("目标 APP") }}</p>
             <div class="preset-grid app-library">
               <button
@@ -2702,7 +3537,7 @@ onUnmounted(() => {
 
         <!-- 组合动作（自定义动作；2026-10-15）：把已有动作绑定到本按键。
              入口显隐跟随 COMBINATION_ACTIONS_ENABLED，隐藏时已绑定动作照常执行。 -->
-        <section v-if="COMBINATION_ACTIONS_ENABLED" class="action-section">
+        <section v-if="COMBINATION_ACTIONS_ENABLED && showMacroSection" class="action-section">
           <h4 class="action-section-title">{{ t("组合动作") }}</h4>
           <p v-if="macroDefinitions.length === 0" class="muted">
             {{ t("还没有组合动作。先到“组合动作”页创建。") }}
@@ -2741,7 +3576,7 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section v-if="commonPhrasesAvailable" class="action-section">
+        <section v-if="commonPhrasesAvailable && showCommonPhrasesSection" class="action-section">
           <h4 class="action-section-title">{{ t("常用语") }}</h4>
           <div class="preset-grid">
             <button
@@ -2818,7 +3653,7 @@ onUnmounted(() => {
 
       <!-- 鼠标动作固定为编辑区最后一块（2026-10-22 用户指定顺序）：
            单击 → 四方向移动 → 滚轮上下 → 数量输入框。 -->
-      <div class="action-sections mouse-action-sections">
+      <div v-if="showMouseSection" class="action-sections mouse-action-sections">
         <section class="action-section">
           <h4 class="action-section-title">{{ t("鼠标动作") }}</h4>
           <!-- 两个可换行的组：空间够时并排成一行；不够时整组换行，
@@ -2871,10 +3706,25 @@ onUnmounted(() => {
             <span v-else-if="mouseAmountKind === 'mouse_move'" class="mouse-amount-hint">{{ MOUSE_AMOUNT_HINT }}</span>
           </label>
         </section>
+        <div v-if="okClickVisible" class="ok-click-setting">
+          <label class="toggle-row ok-click-toggle" :title="t('刚用遥控器移动过光标时，按 OK 会点击光标位置')">
+            <span>{{ t("移动光标后按 OK 点击") }}</span>
+            <input
+              class="toggle-input"
+              type="checkbox"
+              :checked="okClickChecked"
+              :disabled="busy"
+              @change="toggleOkContextClick"
+            />
+          </label>
+          <p class="muted ok-click-hint">
+            {{ t("刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。") }}
+          </p>
+        </div>
       </div>
-      <div v-if="repeatGroupVisible" class="action-sections repeat-action-sections">
+      <div v-if="showInlineHoldSection" class="action-sections repeat-action-sections">
         <section class="action-section repeat-group">
-          <h4 class="action-section-title">{{ t("连续执行") }}</h4>
+          <h4 class="action-section-title">{{ t("按住行为") }}</h4>
           <div class="repeat-options">
             <button
               class="chip"
@@ -2906,71 +3756,245 @@ onUnmounted(() => {
             >
               {{ t("重复长按动作") }}
             </button>
+            <button
+              v-if="directionalHoldVisible"
+              class="chip"
+              :class="{ selected: repeatChoice === 'singleHold' }"
+              type="button"
+              :title="singleHoldTitle"
+              :disabled="busy || (!!singleHoldReason && repeatChoice !== 'singleHold')"
+              @click="selectHoldRepeat('singleHold')"
+            >
+              {{ t("按住单击方向") }}
+            </button>
+            <button
+              v-if="directionalHoldVisible"
+              class="chip"
+              :class="{ selected: repeatChoice === 'longHold' }"
+              type="button"
+              :title="longHoldTitle"
+              :disabled="busy || (!!longHoldReason && repeatChoice !== 'longHold')"
+              @click="selectHoldRepeat('longHold')"
+            >
+              {{ t("长按后按住方向") }}
+            </button>
           </div>
           <p v-if="repeatPageReason" class="muted repeat-hint">{{ repeatPageReason }}</p>
         </section>
       </div>
-      <label v-if="okClickVisible" class="toggle-row ok-click-toggle" :title="t('刚用遥控器移动过光标时，按 OK 会点击光标位置')">
-        <span>{{ t("移动光标后按 OK 点击") }}</span>
-        <input
-          class="toggle-input"
-          type="checkbox"
-          :checked="okClickChecked"
-          :disabled="busy"
-          @change="toggleOkContextClick"
-        />
-      </label>
-      <p v-if="okClickVisible" class="muted ok-click-hint">
-        {{ t("刚用遥控器移动过光标（5 秒内），按 OK 会点击光标位置。这时 OK 的单击、双击、长按都不会执行。") }}
-      </p>
     </article>
 
-    <div class="mapping-bottom">
-      <footer class="card mapping-footer">
-        <div class="mapping-footer-status">
-          <span class="status-dot" :class="rawInput?.phase === 'ready' ? 'success' : 'pending'"></span>
-          <span>{{ phaseLabel(rawInput?.phase) }}</span>
-          <button
-            v-if="rawInput?.phase === 'ready' || rawInput?.phase === 'stopped' || rawInput?.phase === 'failed'"
-            class="secondary-button footer-listener-toggle"
-            type="button"
-            :disabled="busy"
-            @click="toggleListener"
-          >
-            {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
-          </button>
-          <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
+    <article
+      v-if="showStandaloneHoldPanel && holdPanelTarget"
+      class="card mapping-editor mapping-hold-panel"
+    >
+      <div class="card-title-row">
+        <div>
+          <div class="editor-title-row">
+            <svg class="mapping-icon editor-title-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                v-for="(path, index) in buttonIcons[holdPanelTarget]"
+                :key="index"
+                :d="path"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <h2>{{ buttonFullLabels[holdPanelTarget] }}</h2>
+            <span class="editor-title-separator"> · </span>
+            <span class="editor-trigger-pill">{{ t("按住时") }}</span>
+          </div>
+          <p class="hold-panel-subtitle">{{ t("选择一种行为") }}</p>
         </div>
-        <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
-          <span>{{ t("锁定当前按键") }}</span>
-          <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
-          <input
-            v-model="lockSelection"
-            type="checkbox"
-            class="toggle-input"
-            :disabled="!lockSelectionReady"
-          />
-        </label>
-        <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
         <div class="button-row">
-          <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
-            {{ t("保存配置") }}
-          </button>
-          <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
-            {{ t("导入配置…") }}
-          </button>
-          <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
-            {{ t("导出配置…") }}
-          </button>
-          <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
-            {{ t("恢复默认") }}
+          <span class="editor-save-status" :class="editorSaveTone">{{ editorSaveLabel }}</span>
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="busy || repeatChoice === 'off'"
+            @click="selectHoldRepeat('off')"
+          >
+            {{ t("清除设置") }}
           </button>
         </div>
-      </footer>
+      </div>
 
-      <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
-      <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
+      <div class="hold-mode-grid">
+        <button
+          v-for="option in holdPanelOptions"
+          :key="option.id"
+          class="hold-mode-card"
+          :class="{ selected: repeatChoice === option.id }"
+          type="button"
+          :title="option.reason ?? option.description"
+          :disabled="busy || (!!option.reason && repeatChoice !== option.id)"
+          @click="selectHoldRepeat(option.id)"
+        >
+          <span class="hold-mode-radio" aria-hidden="true"></span>
+          <span class="hold-mode-title">{{ option.title }}</span>
+          <span class="hold-mode-description">{{ option.description }}</span>
+          <span v-if="option.id === 'long' || option.id === 'longHold'" class="hold-mode-description">
+            {{ t("长按时间采用当前已保存的按键速度设置。") }}
+          </span>
+          <span v-if="option.reason" class="hold-mode-reason">{{ option.reason }}</span>
+        </button>
+      </div>
+    </article>
+
+    <article v-if="showSpeedPanel" class="card mapping-editor mapping-speed-panel">
+      <h2 class="speed-panel-title">{{ t("按键速度") }}</h2>
+      <p class="speed-panel-subtitle">{{ t("本型号的全部普通按键共用以下识别时间。") }}</p>
+
+      <h3 class="speed-section-title">{{ t("识别时间") }}</h3>
+      <div class="speed-slider-grid">
+        <label class="speed-slider">
+          <span class="speed-slider-head">
+            <span>{{ t("双击等待时间") }}</span>
+            <output>{{ gestureTimingDraft.doubleClickMs }} ms</output>
+          </span>
+          <span class="speed-slider-track">
+            <span>50</span>
+            <input
+              v-model.number="gestureTimingDraft.doubleClickMs"
+              type="range"
+              @input="markGestureTimingEdited"
+              min="50"
+              max="500"
+              step="50"
+              :aria-label="t('双击等待时间')"
+            />
+            <span>500</span>
+          </span>
+        </label>
+        <label class="speed-slider">
+          <span class="speed-slider-head">
+            <span>{{ t("长按判定时间") }}</span>
+            <output>{{ gestureTimingDraft.longPressMs }} ms</output>
+          </span>
+          <span class="speed-slider-track">
+            <span>300</span>
+            <input
+              v-model.number="gestureTimingDraft.longPressMs"
+              type="range"
+              @input="markGestureTimingEdited"
+              min="300"
+              max="1000"
+              step="50"
+              :aria-label="t('长按判定时间')"
+            />
+            <span>1,000</span>
+          </span>
+        </label>
+      </div>
+      <div class="speed-save-row">
+        <span class="speed-save-hint">{{ gestureTimingHint }}</span>
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="!gestureTimingCanSave"
+          @click="saveGestureTiming"
+        >
+          {{ gestureTimingSaveState === "saving" ? t("保存中…") : t("保存") }}
+        </button>
+      </div>
+
+      <section class="speed-learning-card">
+        <div class="speed-learning-head">
+          <h3 class="speed-section-title">{{ t("学习你的单击、双击和长按") }}</h3>
+          <span class="speed-learning-status">{{ gestureLearningStatusText }}</span>
+        </div>
+        <p class="speed-panel-subtitle">
+          {{ t("需要依次完成 3 次操作：单击、双击和长按。学习结果会填入下面的识别时间。") }}
+        </p>
+        <div class="speed-learning-grid">
+          <div class="speed-learning-step" :class="{ current: gestureLearning.step === 'single' }">
+            <strong>{{ t("1/3 · 单击一次") }}</strong>
+            <span>{{ t("按下后立即松开") }}</span>
+            <output>{{ gestureLearning.single === null ? t("等待中") : `${gestureLearning.single} ms` }}</output>
+          </div>
+          <div class="speed-learning-step" :class="{ current: gestureLearning.step === 'double' }">
+            <strong>{{ t("2/3 · 双击一次") }}</strong>
+            <span>{{ t("连续按下两次") }}</span>
+            <output>{{ gestureLearning.double === null ? t("等待中") : `${gestureLearning.double} ms` }}</output>
+          </div>
+          <div class="speed-learning-step" :class="{ current: gestureLearning.step === 'long' }">
+            <strong>{{ t("3/3 · 长按一次") }}</strong>
+            <span>{{ t("按住后自然松开") }}</span>
+            <output>{{ gestureLearning.long === null ? t("等待中") : `${gestureLearning.long} ms` }}</output>
+          </div>
+        </div>
+        <p v-if="!gestureLearningCanStart" class="speed-learning-unavailable">
+          {{ t("连接遥控器后才能学习按键速度。") }}
+        </p>
+        <div class="speed-learning-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="!gestureLearningCanStart || gestureLearningActive || gestureLearningStarting || gestureLearning.step === 'idle'"
+            @click="startGestureLearning"
+          >
+            {{ t("重新学习") }}
+          </button>
+          <button
+            class="primary-button"
+            type="button"
+            :disabled="!gestureLearningCanStart || gestureLearningActive || gestureLearningStarting || gestureLearning.step === 'complete'"
+            @click="startGestureLearning"
+          >
+            {{ t("开始学习") }}
+          </button>
+        </div>
+      </section>
+    </article>
     </div>
+
+    <footer class="mapping-footer">
+      <div class="mapping-footer-status">
+        <span class="status-dot" :class="rawInput?.phase === 'ready' ? 'success' : 'pending'"></span>
+        <span>{{ phaseLabel(rawInput?.phase) }}</span>
+        <button
+          v-if="rawInput?.phase === 'ready' || rawInput?.phase === 'stopped' || rawInput?.phase === 'failed'"
+          class="secondary-button footer-listener-toggle"
+          type="button"
+          :disabled="busy"
+          @click="toggleListener"
+        >
+          {{ rawInput?.phase === "ready" ? t("停止监听") : t("启动监听") }}
+        </button>
+        <small v-if="mappingSnapshot && !mappings.enabled" class="muted">{{ t(" · 总开关关闭（按键保持原样）") }}</small>
+      </div>
+      <label class="toggle-row" :title="t('开启后，操作实体遥控器不会切换正在编辑的按键。')">
+        <span>{{ t("锁定当前按键") }}</span>
+        <!-- 同「启用自定义按键功能」：始终渲染、先用上次已知值，数据未到前禁用。 -->
+        <input
+          v-model="lockSelection"
+          type="checkbox"
+          class="toggle-input"
+          :disabled="!lockSelectionReady"
+        />
+      </label>
+      <span class="muted lock-hint">{{ t("按遥控器时保持当前编辑项") }}</span>
+      <div class="button-row">
+        <button class="secondary-button" type="button" :disabled="busy" @click="saveConfiguration">
+          {{ t("保存配置") }}
+        </button>
+        <button class="secondary-button" type="button" :disabled="busy" @click="importConfiguration">
+          {{ t("导入配置…") }}
+        </button>
+        <button class="secondary-button" type="button" :disabled="busy" @click="exportConfiguration">
+          {{ t("导出配置…") }}
+        </button>
+        <button class="secondary-button" type="button" :disabled="busy" @click="restoreDefaults">
+          {{ t("恢复默认") }}
+        </button>
+      </div>
+    </footer>
+    </div>
+
+    <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
+    <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false; unsupportedReplaceArmed = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>
@@ -2997,8 +4021,9 @@ onUnmounted(() => {
 .repeat-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .repeat-hint { margin: 6px 0 0; font-size: 12px; }
 /* OK 键「移动光标后按 OK 点击」：按键级开关 + 常驻说明句（2026-10-06）。 */
-.ok-click-toggle { margin-top: 12px; }
-.ok-click-hint { margin: 6px 0 0; font-size: 12px; }
+.ok-click-setting { display: flex; flex-direction: column; gap: 6px; }
+.ok-click-toggle { margin-top: 0; }
+.ok-click-hint { margin: 0; font-size: 12px; }
 .mouse-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .mouse-action-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .page-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
@@ -3049,4 +4074,243 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .focus-result-message { margin: 8px 0 0; font-size: 12px; }
+/* 编辑面板右上角：自动保存状态 + Mac 同款「停用此动作」开关。 */
+.editor-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.editor-title-row h2 { margin: 0; }
+.editor-title-separator {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.editor-title-icon { width: 18px; height: 18px; color: var(--accent); }
+.editor-trigger-pill {
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: var(--accent-text);
+  background: var(--accent-surface);
+  font-size: 12px;
+  font-weight: 600;
+}
+.card-title-row .button-row { align-items: center; }
+/* 动作分类胶囊：位置和顺序对齐 Mac 按键页。 */
+.mapping-editor-host { display: flex; flex-direction: column; gap: 8px; }
+/* 全局 .mapping-editor 自带 10px 上边距；分类行与编辑卡之间的实际间距
+   只保留 host 的 8px gap，避免 8 + 10 变成 18px。 */
+.mapping-editor-host > .mapping-editor { margin-top: 0; }
+.mapping-action-filter {
+  display: flex;
+  gap: 6px;
+  /* 2026-11-24 用户定稿：分类行不再使用灰色底板；上方留白 8px，
+     与下方编辑卡的间距由 host 的 8px gap 提供。 */
+  padding: 8px 0 0;
+  background: transparent;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.mapping-action-filter::-webkit-scrollbar { display: none; }
+.action-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.action-filter-chip:hover { background: var(--surface-hover); }
+.action-filter-chip.selected {
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+  background: var(--accent);
+  font-weight: 600;
+}
+.editor-save-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.editor-save-status.saved {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #fff;
+  background: #12704a;
+}
+html[data-theme="dark"] .editor-save-status.saved { background: #1a7a52; }
+.editor-save-status.error { color: var(--error-text); }
+.editor-save-retry {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.editor-disable-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+html[data-theme="dark"] .editor-disable-toggle { background: rgba(255, 69, 58, 0.14); }
+.editor-disable-toggle .toggle-input:checked { background: var(--delete-text); }
+.hold-panel-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.input-section-hint { font-size: 12px; line-height: 1.45; }
+.hold-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.hold-mode-card {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  column-gap: 8px;
+  align-content: start;
+  align-items: start;
+  min-height: 116px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hold-mode-card:hover:not(:disabled) { border-color: var(--accent-border); background: var(--accent-surface); }
+.hold-mode-card.selected {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.hold-mode-card:disabled { cursor: default; opacity: 0.62; }
+.hold-mode-radio {
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.hold-mode-card.selected .hold-mode-radio {
+  border: 4px solid var(--accent);
+  background: var(--surface-chip);
+}
+.hold-mode-title { font-size: 13px; font-weight: 600; line-height: 1.35; }
+.hold-mode-description {
+  grid-column: 2;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.hold-mode-reason {
+  grid-column: 2;
+  margin-top: 5px;
+  color: var(--warning-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+@media (max-width: 720px) {
+  .hold-mode-grid { grid-template-columns: 1fr; }
+}
+.speed-panel-title { margin: 0 0 4px; font-size: 20px; }
+.speed-panel-subtitle { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.speed-section-title { margin: 16px 0 0; font-size: 15px; }
+.speed-slider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  margin-top: 10px;
+}
+.speed-slider { display: flex; flex-direction: column; gap: 8px; }
+.speed-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.speed-slider-head output { font-variant-numeric: tabular-nums; font-weight: 600; }
+.speed-slider-track {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.speed-slider-track input { flex: 1; accent-color: var(--accent); }
+.speed-save-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.035);
+}
+html[data-theme="dark"] .speed-save-row { background: rgba(255, 255, 255, 0.05); }
+.speed-save-hint { flex: 1; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.speed-learning-card {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-subtle);
+}
+.speed-learning-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.speed-learning-head .speed-section-title { margin: 0; }
+.speed-learning-status { color: var(--accent-text); font-size: 12px; font-weight: 600; }
+.speed-learning-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.speed-learning-step {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 76px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-chip);
+  color: var(--muted);
+  font-size: 12px;
+}
+.speed-learning-step strong { color: var(--text-primary); font-size: 13px; }
+.speed-learning-step output { margin-top: auto; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.speed-learning-step.current { border-color: var(--accent-border); box-shadow: inset 0 0 0 1px var(--accent-border); }
+.speed-learning-unavailable { margin: 10px 0 0; color: var(--warning-text); font-size: 12px; }
+.speed-learning-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+@media (max-width: 720px) {
+  .speed-slider-grid, .speed-learning-grid { grid-template-columns: 1fr; }
+}
 </style>
