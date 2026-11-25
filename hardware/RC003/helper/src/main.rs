@@ -214,6 +214,10 @@ mod imp {
     /// 自愈换宿主后回来的新 agent 会被不变量当成外来者拒掉——修一个坏、造一个更坏的。
     static SERVED_HOST_PID: AtomicU32 = AtomicU32::new(0);
 
+    /// 宿主判决缓存：app bridge 在应用未运行时每 2 秒重试一次，不能每次都扫整棵
+    /// `Enum` 树并查子 HID 属性。30 秒 TTL + pid 作为键；宿主 pid 变化时自动失效。
+    static HOST_SHARING_CACHE: Mutex<Option<(u32, HostSharingInfo, Instant)>> = Mutex::new(None);
+
     // ============================================================ Win32 FFI
 
     type Handle = *mut c_void;
@@ -303,6 +307,58 @@ mod imp {
         ) -> i32;
         fn RegCloseKey(key: Handle) -> i32;
     }
+
+    // 枚举设备节点的子节点并读属性（2026-11-25：仅用于判断共享宿主里是否有键盘类
+    // HID 成员；不把设备身份写进日志）。cfgmgr32 是系统自带库。
+    #[link(name = "cfgmgr32")]
+    extern "system" {
+        fn CM_Locate_DevNodeW(devinst: *mut u32, instance: *const u16, flags: u32) -> u32;
+        fn CM_Get_Child(child: *mut u32, devinst: u32, flags: u32) -> u32;
+        fn CM_Get_Sibling(sibling: *mut u32, devinst: u32, flags: u32) -> u32;
+        fn CM_Get_DevNode_PropertyW(
+            devinst: u32,
+            key: *const DevPropKey,
+            ty: *mut u32,
+            buf: *mut u8,
+            size: *mut u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct DevPropGuid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
+
+    #[repr(C)]
+    struct DevPropKey {
+        fmtid: DevPropGuid,
+        pid: u32,
+    }
+
+    /// `DEVPKEY_Device_HardwareIds`（devpkey.h 逐字段一致）。HID 子节点的硬件 ID
+    /// 里包含 `HID_DEVICE_SYSTEM_KEYBOARD` / `HID_DEVICE_UP:0001_U:0006`。
+    const DEVPKEY_DEVICE_HARDWARE_IDS: DevPropKey = DevPropKey {
+        fmtid: DevPropGuid {
+            data1: 0xa45c_254e,
+            data2: 0xdf1c,
+            data3: 0x4efd,
+            data4: [0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0],
+        },
+        pid: 3,
+    };
+    const CR_SUCCESS: u32 = 0;
+    const CR_BUFFER_SMALL: u32 = 0x1A;
+    const CR_NO_SUCH_DEVNODE: u32 = 0x0D;
+    const DEVPROP_TYPE_STRING: u32 = 0x12;
+    /// 列表类型 = 基础类型 | `DEVPROP_TYPEMOD_LIST(0x2000)`；2026-11-18 实测
+    /// `DEVPKEY_Device_HardwareIds` 返回 0x2012，不是 0x13。
+    const DEVPROP_TYPE_STRING_LIST: u32 = 0x2012;
+    const MAX_DEVPROP_BYTES: u32 = 16 * 1024;
 
     #[link(name = "shell32")]
     extern "system" {
@@ -831,7 +887,6 @@ mod imp {
 
     // ============================================================ 注册表定位
 
-    #[derive(Debug)]
     struct HostEntry {
         pid: u32,
         enumerator: String,
@@ -841,11 +896,27 @@ mod imp {
         /// 真机复测实证）。**绝不进日志**——它含设备接口路径（VID/PID/REV/实例序号），
         /// 属 `LOGGING.md` 隐私红线的"HID 路径"。
         rc003_instance_id: Option<String>,
+        /// 完整设备实例 ID，用于查询该成员子 HID 节点是否键盘类。**只在内存中使用，
+        /// 绝不进日志**（同上隐私红线）。
+        instance_id: String,
         /// 不保留设备名：它同样含设备接口路径，排错不需要它。
         is_rc003: bool,
     }
 
-    /// RC003 识别判据（纯函数）：BTHLEDevice 枚举器 + HID 服务前缀 + 本型号硬件串。
+    /// 隐私：Debug 只输出可公开字段；两个实例 ID 永不进日志或 panic 消息。
+    impl std::fmt::Debug for HostEntry {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("HostEntry")
+                .field("pid", &self.pid)
+                .field("enumerator", &self.enumerator)
+                .field("is_rc003", &self.is_rc003)
+                .finish()
+        }
+    }
+
+    /// 增强捕获目标识别判据（纯函数）：BTHLEDevice 枚举器 + HID 服务前缀 + 硬件串。
+    /// RC001 与 RC003 共用同一 BLE HID 硬件串，因此本判据**同时匹配两型号**；
+    /// 型号区分只在应用层 GATT 2A24（`ble_model`）。名称沿用历史，勿据此认为只匹配 RC003。
     /// 抽出来是为了让**扫描与卸载清理共用同一判据**，避免两处漂移。
     fn device_is_rc003(enumerator: &str, device: &str) -> bool {
         let folded = device.to_lowercase();
@@ -1714,14 +1785,16 @@ mod imp {
                         }
                     };
                     let is_rc003 = device_is_rc003(enumerator.as_str(), device.as_str());
+                    let instance_id = format!("{enumerator}\\{device}\\{instance}");
                     scan.entries.push(HostEntry {
                         pid,
                         enumerator: enumerator.clone(),
                         rc003_instance_id: if is_rc003 {
-                            Some(format!("{enumerator}\\{device}\\{instance}"))
+                            Some(instance_id.clone())
                         } else {
                             None
                         },
+                        instance_id,
                         is_rc003,
                     });
                 }
@@ -1731,6 +1804,217 @@ mod imp {
         }
         unsafe { RegCloseKey(root) };
         Ok(scan)
+    }
+
+    /// 读一个设备节点属性：第一次拿类型与长度，第二次读内容。
+    fn devnode_property(devinst: u32, key: &DevPropKey) -> Option<(u32, Vec<u16>)> {
+        let mut ty: u32 = 0;
+        let mut size: u32 = 0;
+        let rc = unsafe {
+            CM_Get_DevNode_PropertyW(devinst, key, &mut ty, std::ptr::null_mut(), &mut size, 0)
+        };
+        if rc != CR_SUCCESS && rc != CR_BUFFER_SMALL {
+            return None;
+        }
+        if size == 0 || size > MAX_DEVPROP_BYTES {
+            return None;
+        }
+        let words = (size as usize + 1) / 2;
+        let mut buf = vec![0u16; words];
+        let rc = unsafe {
+            CM_Get_DevNode_PropertyW(
+                devinst,
+                key,
+                &mut ty,
+                buf.as_mut_ptr() as *mut u8,
+                &mut size,
+                0,
+            )
+        };
+        if rc != CR_SUCCESS {
+            return None;
+        }
+        buf.truncate(size as usize / 2);
+        Some((ty, buf))
+    }
+
+    fn locate_devnode(instance_id: &str) -> Option<u32> {
+        let wide = to_wide(instance_id);
+        let mut devinst: u32 = 0;
+        let rc = unsafe { CM_Locate_DevNodeW(&mut devinst, wide.as_ptr(), 0) };
+        (rc == CR_SUCCESS).then_some(devinst)
+    }
+
+    fn devprop_strings(ty: u32, words: &[u16]) -> Vec<String> {
+        if ty != DEVPROP_TYPE_STRING && ty != DEVPROP_TYPE_STRING_LIST {
+            return Vec::new();
+        }
+        words
+            .split(|&word| word == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf16_lossy(part))
+            .collect()
+    }
+
+    fn devnode_hardware_ids(devinst: u32) -> Option<Vec<String>> {
+        let (ty, words) = devnode_property(devinst, &DEVPKEY_DEVICE_HARDWARE_IDS)?;
+        Some(devprop_strings(ty, &words))
+    }
+
+    /// 硬件 ID 是否表示键盘类 HID。`HID_DEVICE_UP:0001_U:0006` 是 Usage Page 1 /
+    /// Usage 6（Keyboard）；`HID_DEVICE_SYSTEM_KEYBOARD` 是系统键盘集合。
+    fn hardware_id_is_keyboard(id: &str) -> bool {
+        let folded = id.to_ascii_uppercase();
+        folded.contains("HID_DEVICE_SYSTEM_KEYBOARD")
+            || folded.contains("HID_DEVICE_UP:0001_U:0006")
+    }
+
+    /// 该设备节点的子 HID 集合里是否有键盘。
+    ///
+    /// 返回 `Some(false)` = 已确认没有；`Some(true)` = 有；`None` = 查询失败/未知。
+    /// 只在共享宿主里调用；不记录任何设备 ID。
+    fn member_is_keyboard(instance_id: &str) -> Option<bool> {
+        let devinst = locate_devnode(instance_id)?;
+        let mut child: u32 = 0;
+        let rc = unsafe { CM_Get_Child(&mut child, devinst, 0) };
+        if rc == CR_NO_SUCH_DEVNODE {
+            return Some(false);
+        }
+        if rc != CR_SUCCESS {
+            return None;
+        }
+        let mut saw_error = false;
+        loop {
+            match devnode_hardware_ids(child) {
+                Some(ids) => {
+                    if ids.iter().any(|id| hardware_id_is_keyboard(id)) {
+                        return Some(true);
+                    }
+                }
+                None => saw_error = true,
+            }
+            let mut sibling: u32 = 0;
+            let rc = unsafe { CM_Get_Sibling(&mut sibling, child, 0) };
+            if rc == CR_NO_SUCH_DEVNODE {
+                break;
+            }
+            if rc != CR_SUCCESS {
+                return None;
+            }
+            child = sibling;
+        }
+        if saw_error {
+            None
+        } else {
+            Some(false)
+        }
+    }
+
+    /// 共享宿主判决（只含计数与布尔，不含设备身份）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct HostSharingInfo {
+        members: usize,
+        rc003_members: usize,
+        /// `Some(true)` = 其它成员里有键盘；`Some(false)` = 已确认没有；
+        /// `None` = 查询失败或无法判断。
+        other_keyboard: Option<bool>,
+    }
+
+    impl HostSharingInfo {
+        fn shared(&self) -> bool {
+            self.members > 1
+        }
+
+        fn host_label(&self) -> &'static str {
+            if self.members == 0 {
+                "unknown"
+            } else if self.shared() {
+                "shared"
+            } else {
+                "exclusive"
+            }
+        }
+
+        fn other_keyboard_label(&self) -> &'static str {
+            match self.other_keyboard {
+                Some(true) => "1",
+                Some(false) => "0",
+                None => "unknown",
+            }
+        }
+
+        /// 报告层是否应让出高频键（方向 / OK / Enter）。共享宿主且无法排除键盘时
+        /// 取保守值：收紧。独占宿主或确认没有键盘时不收紧。
+        fn policy_label(&self) -> &'static str {
+            if !self.shared() || self.other_keyboard == Some(false) {
+                "full"
+            } else {
+                "restrict_high_freq"
+            }
+        }
+
+        fn verdict(&self) -> &'static str {
+            match (self.host_label(), self.other_keyboard) {
+                ("exclusive", _) => "exclusive_rc003_host",
+                ("shared", Some(true)) => "shared_host_with_keyboard",
+                ("shared", Some(false)) => "shared_host_without_keyboard",
+                ("shared", None) => "shared_host_unknown_keyboard",
+                _ => "unknown_host",
+            }
+        }
+    }
+
+    fn host_sharing_from_entries(entries: &[HostEntry], pid: u32) -> HostSharingInfo {
+        let members: Vec<&HostEntry> = entries.iter().filter(|entry| entry.pid == pid).collect();
+        let rc003_members = members.iter().filter(|entry| entry.is_rc003).count();
+        let mut other_keyboard = if members.is_empty() {
+            None
+        } else {
+            Some(false)
+        };
+        if members.len() > 1 {
+            for entry in members.iter().filter(|entry| !entry.is_rc003) {
+                match member_is_keyboard(&entry.instance_id) {
+                    Some(true) => {
+                        other_keyboard = Some(true);
+                        break;
+                    }
+                    Some(false) => {}
+                    None => other_keyboard = None,
+                }
+            }
+        }
+        HostSharingInfo {
+            members: members.len(),
+            rc003_members,
+            other_keyboard,
+        }
+    }
+
+    fn host_sharing_for(pid: u32) -> HostSharingInfo {
+        match enum_hosts() {
+            Ok(scan) => host_sharing_from_entries(&scan.entries, pid),
+            Err(_) => HostSharingInfo {
+                members: 0,
+                rc003_members: 0,
+                other_keyboard: None,
+            },
+        }
+    }
+
+    /// 带 30 秒缓存的宿主判决：app bridge 未运行时每 2 秒重连一次，避免反复扫描。
+    fn host_sharing_cached(pid: u32) -> HostSharingInfo {
+        let mut cache = HOST_SHARING_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((cached_pid, info, at)) = *cache {
+            if cached_pid == pid && at.elapsed() < Duration::from_secs(30) {
+                return info;
+            }
+        }
+        let info = host_sharing_for(pid);
+        *cache = Some((pid, info, Instant::now()));
+        info
     }
 
     /// 宿主成员行的分类文本（纯函数，自检覆盖）。
@@ -5012,6 +5296,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///
     /// 返回**错误原因字符串**（不是 `io::Error`）：这些原因是给人看的排查线索，
     /// 会被折叠进日志，必须能一眼区分"主程序没开"与"令牌不对"。
+    fn bridge_hello_line(version: u32, token: &str, pid: u32, sharing: &HostSharingInfo) -> String {
+        format!(
+            "HELLO {version} {token} {pid} host={} members={} rc003_members={} other_keyboard={}\n",
+            sharing.host_label(),
+            sharing.members,
+            sharing.rc003_members,
+            sharing.other_keyboard_label()
+        )
+    }
+
     fn bridge_connect(
         path: Option<&Path>,
         logger: &Logger,
@@ -5093,11 +5387,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 AppBridgeStream::Tcp(tcp)
             }
         };
-        let hello = format!(
-            "HELLO {} {} {}\n",
+        let sharing = host_sharing_cached(SERVED_HOST_PID.load(Ordering::Relaxed));
+        logger.kv(
+            "[APP-BRIDGE]",
+            &[
+                ("event", "hello_config".into()),
+                ("host", sharing.host_label().into()),
+                ("members", sharing.members.to_string()),
+                ("rc003_members", sharing.rc003_members.to_string()),
+                ("other_keyboard", sharing.other_keyboard_label().into()),
+                ("host_policy", sharing.policy_label().into()),
+            ],
+        );
+        let hello = bridge_hello_line(
             BRIDGE_PROTOCOL_VERSION,
-            target.token,
-            std::process::id()
+            &target.token,
+            std::process::id(),
+            &sharing,
         );
         stream
             .write_all(hello.as_bytes())
@@ -6543,21 +6849,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         // ---- 独占性核对（参考实现的简单绑定路径前提） ----
         if args.target_pid.is_none() {
+            let sharing = host_sharing_from_entries(&entries, target_pid);
             let members: Vec<&HostEntry> = entries.iter().filter(|e| e.pid == target_pid).collect();
-            let rc003_members = members.iter().filter(|e| e.is_rc003).count();
             logger.kv(
                 "[EXCLUSIVE]",
                 &[
-                    ("members", members.len().to_string()),
-                    ("rc003_members", rc003_members.to_string()),
-                    (
-                        "verdict",
-                        if members.len() == 1 && rc003_members == 1 {
-                            "exclusive_rc003_host".to_string()
-                        } else {
-                            "shared_host".to_string()
-                        },
-                    ),
+                    ("members", sharing.members.to_string()),
+                    ("rc003_members", sharing.rc003_members.to_string()),
+                    ("verdict", sharing.verdict().to_string()),
+                    ("other_keyboard", sharing.other_keyboard_label().to_string()),
+                    ("host_policy", sharing.policy_label().to_string()),
                 ],
             );
             for (index, m) in members.iter().enumerate() {
@@ -6571,7 +6872,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             // 残留前提（写进日志供验收核对）：同一宿主里没有**别的**设备会发出
             // 这三个 usage（0xF1 为保留/厂商定义，0x80/0x81 是键盘页音量键，
             // 通用键盘的音量走消费页 0xE9/0xEA）。
-            if !(members.len() == 1 && rc003_members == 1) {
+            if !(sharing.members == 1 && sharing.rc003_members == 1) {
                 if args.require_exclusive_host || args.force {
                     // 旧行为（--require-exclusive-host；--force 保持同义）：
                     // 共享宿主直接停止，不做任何注入。
@@ -6582,13 +6883,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     "[SHARED-HOST]",
                     &[
                         ("decision", "continue_with_usage_gate".to_string()),
-                        ("members", members.len().to_string()),
-                        ("rc003_members", rc003_members.to_string()),
+                        ("members", sharing.members.to_string()),
+                        ("rc003_members", sharing.rc003_members.to_string()),
+                        ("other_keyboard", sharing.other_keyboard_label().to_string()),
+                        ("host_policy", sharing.policy_label().to_string()),
                     ],
                 );
                 logger.line(
-                    "[INFO] 宿主同时承载其它 HID 设备：仅改写含目标 usage（F1/80/81）\
-                     的键盘报告，其它设备的报告不动；如需恢复旧行为加 --require-exclusive-host。",
+                    "[INFO] 宿主同时承载其它 HID 设备：报告层只处理主程序下发的目标 usage；\
+                     共享宿主且检测到键盘类成员时，方向/OK/Enter 不进入报告层，\
+                     回落到旧键盘门控。检测结果见 [EXCLUSIVE] other_keyboard/host_policy；\
+                     如需恢复旧行为加 --require-exclusive-host。",
                 );
             }
         }
@@ -10671,6 +10976,8 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     rc003_instance_id: Some(
                         "BTHLEDevice\\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\\9&2E2B90C9&1&0055".to_string()
                     ),
+                    instance_id:
+                        "BTHLEDevice\\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_E85540B1B76B\\9&2E2B90C9&1&0055".to_string(),
                 },
                 HostEntry {
                     pid: 200,
@@ -10679,12 +10986,15 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     rc003_instance_id: Some(
                         "BTHLEDevice\\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\\9&220DF34&1&0055".to_string()
                     ),
+                    instance_id:
+                        "BTHLEDevice\\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&012717_PID&32B8_REV&00A4_C05D39C2D9DB\\9&220DF34&1&0055".to_string(),
                 },
                 HostEntry {
                     pid: 300,
                     enumerator: "USB".to_string(),
                     is_rc003: false,
                     rc003_instance_id: None,
+                    instance_id: "USB\\VID_0000&PID_0000\\TEST".to_string(),
                 },
             ];
             assert_eq!(
@@ -10925,6 +11235,99 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 "BTHLEDevice",
                 "some-other-bluetooth-device"
             ));
+        }
+
+        #[test]
+        fn hardware_ids_detect_keyboard_collections() {
+            assert!(hardware_id_is_keyboard("HID_DEVICE_SYSTEM_KEYBOARD"));
+            assert!(hardware_id_is_keyboard("HID_DEVICE_UP:0001_U:0006"));
+            assert!(hardware_id_is_keyboard("hid_device_up:0001_u:0006"));
+            assert!(!hardware_id_is_keyboard("HID_DEVICE_SYSTEM_MOUSE"));
+            assert!(!hardware_id_is_keyboard("HID_DEVICE_UP:0001_U:0002"));
+            assert!(!hardware_id_is_keyboard(""));
+        }
+
+        #[test]
+        fn devprop_strings_accepts_hardware_id_list_type() {
+            let words: Vec<u16> = "HID_DEVICE_SYSTEM_KEYBOARD\0HID_DEVICE\0"
+                .encode_utf16()
+                .collect();
+            assert_eq!(
+                devprop_strings(DEVPROP_TYPE_STRING_LIST, &words),
+                vec![
+                    "HID_DEVICE_SYSTEM_KEYBOARD".to_string(),
+                    "HID_DEVICE".to_string()
+                ]
+            );
+            let single: Vec<u16> = "kbdhid\0".encode_utf16().collect();
+            assert_eq!(
+                devprop_strings(DEVPROP_TYPE_STRING, &single),
+                vec!["kbdhid".to_string()]
+            );
+            // 2026-11-18 现场：列表类型是 0x2012，不是 0x13。
+            assert!(devprop_strings(0x13, &words).is_empty());
+        }
+
+        #[test]
+        fn host_policy_restricts_only_shared_hosts_with_keyboard_or_unknown() {
+            let exclusive = HostSharingInfo {
+                members: 1,
+                rc003_members: 1,
+                other_keyboard: None,
+            };
+            assert_eq!(exclusive.host_label(), "exclusive");
+            assert_eq!(exclusive.policy_label(), "full");
+            assert_eq!(exclusive.verdict(), "exclusive_rc003_host");
+
+            let shared_mouse = HostSharingInfo {
+                members: 3,
+                rc003_members: 1,
+                other_keyboard: Some(false),
+            };
+            assert_eq!(shared_mouse.host_label(), "shared");
+            assert_eq!(shared_mouse.policy_label(), "full");
+            assert_eq!(shared_mouse.verdict(), "shared_host_without_keyboard");
+
+            let shared_keyboard = HostSharingInfo {
+                members: 3,
+                rc003_members: 1,
+                other_keyboard: Some(true),
+            };
+            assert_eq!(shared_keyboard.policy_label(), "restrict_high_freq");
+            assert_eq!(shared_keyboard.verdict(), "shared_host_with_keyboard");
+
+            let shared_unknown = HostSharingInfo {
+                members: 3,
+                rc003_members: 1,
+                other_keyboard: None,
+            };
+            assert_eq!(shared_unknown.policy_label(), "restrict_high_freq");
+            assert_eq!(shared_unknown.verdict(), "shared_host_unknown_keyboard");
+
+            let unknown = HostSharingInfo {
+                members: 0,
+                rc003_members: 0,
+                other_keyboard: None,
+            };
+            assert_eq!(unknown.host_label(), "unknown");
+            assert_eq!(unknown.policy_label(), "full");
+            assert_eq!(unknown.verdict(), "unknown_host");
+        }
+
+        #[test]
+        fn hello_line_carries_host_verdict_without_device_identity() {
+            let sharing = HostSharingInfo {
+                members: 3,
+                rc003_members: 1,
+                other_keyboard: Some(true),
+            };
+            let line = bridge_hello_line(2, "token", 4242, &sharing);
+            assert!(line.starts_with("HELLO 2 token 4242 "), "{line}");
+            assert!(line.contains("host=shared"), "{line}");
+            assert!(line.contains("members=3"), "{line}");
+            assert!(line.contains("rc003_members=1"), "{line}");
+            assert!(line.contains("other_keyboard=1"), "{line}");
+            assert!(!line.contains("BTHLEDevice"), "{line}");
         }
     }
 

@@ -16,10 +16,14 @@
 //!
 //! ## 为什么第 ③ 段一行都不用改
 //!
-//! RC001 上这三键本来就以「被吞的键盘边沿」形态流经
-//! [`EngineMessage::GateEdge`]——见 `key_gate` 的"直接归因族"（VK 0xFF 族厂商键）。
-//! 本模块把助手送来的边沿投进**同一条**通道，因此 RC003 与 RC001 在引擎下游
-//! 完全同构：手势识别、映射查表、`SendInput` 注入、按住连发、泄漏对冲全部复用。
+//! RC001 与 RC003 共用同一 BLE HID 硬件串（`vid&012717_pid&32b8_rev&00a4`），
+//! 增强捕获助手对两型号都会匹配并接管报告层；2026-11-15 RC001 真机日志已确认
+//! 助手匹配 RC001（`ownership_resumed` + `synth`）。三键在应用侧的落点同为
+//! [`EngineMessage::GateEdge`]，因此两型号在引擎下游完全同构：手势识别、映射查表、
+//! `SendInput` 注入、按住连发、泄漏对冲全部复用。
+//!
+//! （2026-09-27 的旧注释称“RC001 走 VK 0xFF、不经报告层”，已被上述真机证据反证；
+//! 证据矩阵见 `docs/investigations/2026-11-25-rc001-rc003-key-path-evidence.md`。）
 //!
 //! 选 `GateEdge` 而不是 `HidUsages` 是有意的：后者会**整体替换**引擎内 HID 来源的
 //! 按下集合（`ButtonStateMerger::update_hid_usages` 是替换语义），若同时有 RC001
@@ -52,11 +56,15 @@
 //! （2026-10-13 现场反馈）。语音键不进入 report 目标集；产品路径只把它作为
 //! clear-only 目标（清掉 F5、不上报边沿），合成配置存在时仍优先槽内替换。
 //!
+//! 2026-11-25：助手在 `HELLO` 里报告宿主判决；共享宿主且其它成员里有键盘类 HID 时，
+//! 方向 / OK / Enter（[`HIGH_FREQUENCY_CAPTURE_USAGES`]）不进入报告层，回落到旧
+//! Raw Input + key_gate；独占宿主或确认无键盘时保持全键。判决缺失（旧助手）按旧行为。
+//!
 //! ## 协议（ASCII 行，`\n` 结尾；助手 → 主程序）
 //!
 //! | 行 | 方向 | 含义 |
 //! | --- | --- | --- |
-//! | `HELLO <ver> <token> <helper_pid>` | 助手 → app | 鉴权；必须首行 |
+//! | `HELLO <ver> <token> <helper_pid> [host=... members=... rc003_members=... other_keyboard=...]` | 助手 → app | 鉴权；宿主判决可选 |
 //! | `OK <ver> <gen> <usages>` / `DENY <reason>` | app → 助手 | 鉴权结果与初始目标 |
 //! | `T <gen> <usages>` | app → 助手 | 热更新报告层捕获目标 |
 //! | `O <gen> <usages>` | 助手 → app | agent 已应用目标；随后随心跳续租所有权 |
@@ -74,7 +82,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -363,12 +371,61 @@ pub fn default_bridge_dir() -> PathBuf {
 }
 
 /// 解析结果：一行协议消息。
+/// 助手在 HELLO 里携带的宿主判决（2026-11-25）。
+///
+/// 只含计数与布尔，不含设备身份；用于决定报告层是否让出高频键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostSharingInfo {
+    /// 宿主里是否有多个设备节点（非独占 RC003）。
+    pub shared: bool,
+    pub members: usize,
+    pub rc003_members: usize,
+    /// `Some(true)` = 其它成员里有键盘类 HID；`Some(false)` = 已确认没有；
+    /// `None` = 查询失败/旧助手未报告。
+    pub other_keyboard: Option<bool>,
+}
+
+/// 当前遥控器型号（供日志关联；只存枚举，不含设备身份）。
+static REMOTE_MODEL_CODE: AtomicU8 = AtomicU8::new(0);
+
+/// 记录当前型号：`ble.rs` 在推断/读取到型号后调用，日志用来对照
+/// RC001 / RC003 是否走同一条目标集与同一条边沿路径。
+pub fn set_remote_model(model: crate::RemoteModel) {
+    let code = match model {
+        crate::RemoteModel::Rc001 => 1,
+        crate::RemoteModel::Rc003 => 2,
+        crate::RemoteModel::Unknown => 0,
+    };
+    let previous = REMOTE_MODEL_CODE.swap(code, Ordering::Relaxed);
+    if previous != code {
+        note(format!(
+            "enhanced_capture event=remote_model model={} previous={}",
+            model_label_from_code(code),
+            model_label_from_code(previous)
+        ));
+    }
+}
+
+fn model_label_from_code(code: u8) -> &'static str {
+    match code {
+        1 => "Rc001",
+        2 => "Rc003",
+        _ => "Unknown",
+    }
+}
+
+fn remote_model_label() -> &'static str {
+    model_label_from_code(REMOTE_MODEL_CODE.load(Ordering::Relaxed))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeLine {
     Hello {
         version: u32,
         token: String,
         helper_pid: u32,
+        /// 助手报告的宿主判决（2026-11-25）；旧助手没有该字段时为 `None`。
+        host: Option<HostSharingInfo>,
     },
     /// 绝对状态边沿。`usages` 为空表示"全部释放"。
     Edges {
@@ -458,10 +515,40 @@ pub fn parse_bridge_line(line: &str) -> Result<Option<BridgeLine>, String> {
                 .ok_or_else(|| "HELLO 缺少进程号".to_string())?
                 .parse::<u32>()
                 .map_err(|_| "HELLO 进程号不是整数".to_string())?;
+            let mut host_shared = None;
+            let mut members = 0usize;
+            let mut rc003_members = 0usize;
+            let mut other_keyboard = None;
+            for field in parts {
+                if let Some(value) = field.strip_prefix("host=") {
+                    host_shared = match value {
+                        "exclusive" => Some(false),
+                        "shared" => Some(true),
+                        _ => None,
+                    };
+                } else if let Some(value) = field.strip_prefix("members=") {
+                    members = value.parse().unwrap_or(0);
+                } else if let Some(value) = field.strip_prefix("rc003_members=") {
+                    rc003_members = value.parse().unwrap_or(0);
+                } else if let Some(value) = field.strip_prefix("other_keyboard=") {
+                    other_keyboard = match value {
+                        "1" => Some(true),
+                        "0" => Some(false),
+                        _ => None,
+                    };
+                }
+            }
+            let host = host_shared.map(|shared| HostSharingInfo {
+                shared,
+                members,
+                rc003_members,
+                other_keyboard,
+            });
             Ok(Some(BridgeLine::Hello {
                 version,
                 token,
                 helper_pid,
+                host,
             }))
         }
         "E" => {
@@ -616,6 +703,12 @@ impl Default for BridgeShared {
 struct CaptureTargets {
     generation: u64,
     usages: BTreeSet<u16>,
+    /// 用户是否开启「全按键支持」；宿主判决变化时用它重算目标集。
+    enabled: bool,
+    /// 已配置映射的按键位掩码；同上。
+    mapped_mask: u64,
+    /// 助手最近一次 HELLO 报告的宿主判决；`None` = 旧助手或尚未握手。
+    host_sharing: Option<HostSharingInfo>,
 }
 
 impl Default for CaptureTargets {
@@ -623,7 +716,61 @@ impl Default for CaptureTargets {
         Self {
             generation: 1,
             usages: BTreeSet::new(),
+            enabled: false,
+            mapped_mask: 0,
+            host_sharing: None,
         }
+    }
+}
+
+/// 报告层在共享宿主里让出的高频键（方向 / OK / Enter）。
+///
+/// 这些 usage 与物理键盘完全重合；共享宿主里检测到键盘类 HID 时，继续由报告层
+/// 接管会把键盘同名键当成遥控器。让出后回落到旧 Raw Input + key_gate 路径，
+/// 代价是该键的首按依赖 60ms 武装窗口（2026-11-25 产品决策）。
+const HIGH_FREQUENCY_CAPTURE_USAGES: [u16; 5] = [0x0028, 0x004F, 0x0050, 0x0051, 0x0052];
+
+/// 共享宿主 + 其它成员里有键盘（或无法排除）时收紧；独占/确认无键盘时保持全键。
+fn should_restrict_high_frequency(host: Option<HostSharingInfo>) -> bool {
+    match host {
+        Some(info) if info.shared => info.other_keyboard != Some(false),
+        _ => false,
+    }
+}
+
+fn capture_usages(enabled: bool, mapped_mask: u64, restrict_high_frequency: bool) -> BTreeSet<u16> {
+    if !enabled {
+        return BTreeSet::new();
+    }
+    let mut capture_mask = mapped_mask | always_captured_mask();
+    if restrict_high_frequency {
+        for (button, usage) in ENHANCED_CAPTURE_BUTTON_USAGES {
+            if HIGH_FREQUENCY_CAPTURE_USAGES.contains(&usage) {
+                capture_mask &= !(1u64 << button.ordinal());
+            }
+        }
+    }
+    ENHANCED_CAPTURE_BUTTON_USAGES
+        .iter()
+        .filter_map(|(button, usage)| {
+            (((capture_mask >> button.ordinal()) & 1) == 1).then_some(*usage)
+        })
+        .collect()
+}
+
+fn host_policy_label(host: Option<HostSharingInfo>) -> &'static str {
+    match host {
+        Some(info) if info.shared => "shared",
+        Some(_) => "exclusive",
+        None => "unknown",
+    }
+}
+
+fn other_keyboard_label(host: Option<HostSharingInfo>) -> &'static str {
+    match host.and_then(|info| info.other_keyboard) {
+        Some(true) => "1",
+        Some(false) => "0",
+        None => "unknown",
     }
 }
 
@@ -637,6 +784,56 @@ fn format_usage_payload(usages: &BTreeSet<u16>) -> String {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+/// 用当前策略输入（enabled + mapped_mask + 宿主判决）重算目标集，并在变化时
+/// 撤销旧所有权、投递释放、记录一条可供现场核对的结构化日志。
+fn recompute_capture_targets(
+    shared: &Arc<Mutex<BridgeShared>>,
+    targets: &Arc<Mutex<CaptureTargets>>,
+    sender: &Sender<EngineMessage>,
+    reason: &str,
+) {
+    let (enabled, mapped_mask, host_sharing) = {
+        let targets = lock(targets);
+        (targets.enabled, targets.mapped_mask, targets.host_sharing)
+    };
+    let restrict = should_restrict_high_frequency(host_sharing);
+    let usages = capture_usages(enabled, mapped_mask, restrict);
+    let generation = {
+        let mut targets = lock(targets);
+        if targets.usages == usages {
+            return;
+        }
+        targets.generation = targets.generation.wrapping_add(1).max(1);
+        targets.usages = usages.clone();
+        targets.generation
+    };
+
+    // 先撤销旧所有权，再让 Helper 切换目标；这段窗口宁可走旧逻辑，也不能
+    // 因为仍把键盘钩子关着而让按键完全不可用。
+    clear_ownership(shared);
+    let retained: BTreeSet<u16> = lock(shared)
+        .pressed
+        .intersection(&usages)
+        .copied()
+        .collect();
+    let releases = apply_usages(shared, targets, &retained);
+    for edge in releases {
+        let _ = sender.send(EngineMessage::GateEdge(edge));
+    }
+    note(format!(
+        "enhanced_capture event=targets_changed generation={generation} enabled={enabled} \
+         usages={} host={} members={} rc003_members={} other_keyboard={} \
+         restrict_high_freq={} model={} reason={reason}",
+        format_usage_payload(&usages),
+        host_policy_label(host_sharing),
+        host_sharing.map(|info| info.members).unwrap_or(0),
+        host_sharing.map(|info| info.rc003_members).unwrap_or(0),
+        other_keyboard_label(host_sharing),
+        restrict,
+        remote_model_label(),
+    ));
 }
 
 fn usage_mask(usages: &BTreeSet<u16>) -> u64 {
@@ -688,8 +885,9 @@ fn clear_ownership(shared: &Arc<Mutex<BridgeShared>>) {
         // persistent_swallow= 是常驻抑制吞键累计快照：与 ownership_resumed
         // 的快照做差，即得本窗口内被吞的按压次数（含物理键盘同名键）。
         note(format!(
-            "enhanced_capture event=ownership_released fallback=legacy persistent_swallow={}",
-            crate::key_gate::persistent_swallow_total()
+            "enhanced_capture event=ownership_released fallback=legacy persistent_swallow={} model={}",
+            crate::key_gate::persistent_swallow_total(),
+            remote_model_label()
         ));
     }
 }
@@ -986,44 +1184,18 @@ impl Rc003Bridge {
     /// 已配置映射的按键（仅功能开启时）；其余按键只在配置了映射后才被接管
     /// （未配置者保持原生路径 = 最小接管）。关闭功能或删除映射会立即撤销相应
     /// 所有权并恢复既有 Raw Input/键盘门控路径。
+    ///
+    /// 2026-11-25：共享宿主且助手报告存在键盘类成员时，方向 / OK / Enter
+    /// （[`HIGH_FREQUENCY_CAPTURE_USAGES`]）不再进入报告层，回落到旧键盘门控。
+    /// 宿主判决由助手在 `HELLO` 里携带；判决变化时用同一组 enabled/mapped_mask
+    /// 重算，因此这里只保存策略输入，不直接写死 usages。
     pub fn set_capture_targets(&self, enabled: bool, mapped_mask: u64) {
-        let usages: BTreeSet<u16> = if enabled {
-            let capture_mask = mapped_mask | always_captured_mask();
-            ENHANCED_CAPTURE_BUTTON_USAGES
-                .iter()
-                .filter_map(|(button, usage)| {
-                    (((capture_mask >> button.ordinal()) & 1) == 1).then_some(*usage)
-                })
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
-        let generation = {
+        {
             let mut targets = lock(&self.targets);
-            if targets.usages == usages {
-                return;
-            }
-            targets.generation = targets.generation.wrapping_add(1).max(1);
-            targets.usages = usages.clone();
-            targets.generation
-        };
-
-        // 先撤销旧所有权，再让 Helper 切换目标；这段窗口宁可走旧逻辑，也不能
-        // 因为仍把键盘钩子关着而让按键完全不可用。
-        clear_ownership(&self.shared);
-        let retained: BTreeSet<u16> = lock(&self.shared)
-            .pressed
-            .intersection(&usages)
-            .copied()
-            .collect();
-        let releases = apply_usages(&self.shared, &self.targets, &retained);
-        for edge in releases {
-            let _ = self.sender.send(EngineMessage::GateEdge(edge));
+            targets.enabled = enabled;
+            targets.mapped_mask = mapped_mask;
         }
-        note(format!(
-            "enhanced_capture event=targets_changed generation={generation} enabled={enabled} usages={}",
-            format_usage_payload(&usages)
-        ));
+        recompute_capture_targets(&self.shared, &self.targets, &self.sender, "mapping");
     }
     /// 更新语音键报告层合成目标（2026-09-29 产品化：配置来源 = app 的
     /// 「按住说话快捷键」设置，helper 不再单独设置）。
@@ -1457,6 +1629,7 @@ fn handle_connection(
                         version,
                         token: got,
                         helper_pid,
+                        host,
                     } => {
                         let version_ok = version == BRIDGE_PROTOCOL_VERSION;
                         // TCP 令牌用于防误连；命名管道由 Windows 本机命名对象 ACL
@@ -1496,6 +1669,27 @@ fn handle_connection(
                             // 新助手会话不继承上一实例的恢复窗口。
                             state.recovering_since = None;
                             state.recovery_ended_at = None;
+                        }
+                        // 宿主判决必须在回 `OK` 之前生效：OK 里的目标集决定 helper/agent
+                        // 这一代实际接管哪些 usage，App 的 key_gate 也会按同一集合置
+                        // enhanced_owned。旧助手没有该字段（host=None）→ 保持旧行为。
+                        {
+                            let previous = lock(targets).host_sharing;
+                            if previous != host {
+                                lock(targets).host_sharing = host;
+                            }
+                            note(format!(
+                                "enhanced_capture event=host_policy host={} members={} \
+                                 rc003_members={} other_keyboard={} restrict_high_freq={} \
+                                 model={}",
+                                host_policy_label(host),
+                                host.map(|info| info.members).unwrap_or(0),
+                                host.map(|info| info.rc003_members).unwrap_or(0),
+                                other_keyboard_label(host),
+                                should_restrict_high_frequency(host),
+                                remote_model_label(),
+                            ));
+                            recompute_capture_targets(shared, targets, sender, "hello");
                         }
                         // 上一代连接的租约不属于这一代助手：不清掉的话快照会对外
                         // 谎报"已接管"（对账据此判 active，门禁也会被旧回执抬起），
@@ -1582,8 +1776,9 @@ fn handle_connection(
                                 .collect::<Vec<_>>()
                                 .join(",");
                             note(format!(
-                                "rc003_bridge event=first_edge pressed={pressed} \
-                                 note=边沿已投递给映射引擎，此后按键动作由映射配置决定"
+                                "rc003_bridge event=first_edge pressed={pressed} model={} \
+                                 note=边沿已投递给映射引擎，此后按键动作由映射配置决定",
+                                remote_model_label()
                             ));
                         }
                         session_edges += 1;
@@ -1650,9 +1845,10 @@ fn handle_connection(
                             // 与窗口内物理键被吞次数都不可观测）。
                             note(format!(
                                 "enhanced_capture event=ownership_resumed usages={} \
-                                 persistent_swallow={}",
+                                 persistent_swallow={} model={}",
                                 format_usage_payload(&reported),
-                                crate::key_gate::persistent_swallow_total()
+                                crate::key_gate::persistent_swallow_total(),
+                                remote_model_label()
                             ));
                         }
                     } else {
@@ -1803,9 +1999,10 @@ fn handle_connection(
                 synth_confirmed = false;
                 note(format!(
                     "enhanced_capture event=ownership_timeout timeout_ms={} fallback=legacy \
-                     persistent_swallow={}",
+                     persistent_swallow={} model={}",
                     OWNERSHIP_TIMEOUT.as_millis(),
-                    crate::key_gate::persistent_swallow_total()
+                    crate::key_gate::persistent_swallow_total(),
+                    remote_model_label()
                 ));
             }
         }
@@ -2044,6 +2241,7 @@ mod tests {
         Arc::new(Mutex::new(CaptureTargets {
             generation: 1,
             usages: usages.iter().copied().collect(),
+            ..CaptureTargets::default()
         }))
     }
 
@@ -2147,13 +2345,106 @@ mod tests {
             Some(BridgeLine::Hello {
                 version: 1,
                 token: "abc123".to_string(),
-                helper_pid: 4242
+                helper_pid: 4242,
+                host: None,
+            })
+        );
+        assert_eq!(
+            parse_bridge_line(
+                "HELLO 1 abc123 4242 host=shared members=3 rc003_members=1 other_keyboard=1"
+            )
+            .unwrap(),
+            Some(BridgeLine::Hello {
+                version: 1,
+                token: "abc123".to_string(),
+                helper_pid: 4242,
+                host: Some(HostSharingInfo {
+                    shared: true,
+                    members: 3,
+                    rc003_members: 1,
+                    other_keyboard: Some(true),
+                }),
             })
         );
         assert!(parse_bridge_line("HELLO 1 abc123").is_err());
         assert!(parse_bridge_line("HELLO x abc123 1").is_err());
         assert!(parse_bridge_line("HELLO 1  4242").is_err());
         assert!(parse_bridge_line("WHAT 1 2 3").is_err());
+    }
+
+    #[test]
+    fn shared_host_with_keyboard_excludes_high_frequency_keys() {
+        let mapped = [
+            RemoteButton::Ok,
+            RemoteButton::Up,
+            RemoteButton::Down,
+            RemoteButton::Left,
+            RemoteButton::Right,
+            RemoteButton::Tv,
+            RemoteButton::Back,
+            RemoteButton::VolumeUp,
+            RemoteButton::VolumeDown,
+        ]
+        .iter()
+        .fold(0u64, |mask, button| mask | (1u64 << button.ordinal()));
+
+        let full = capture_usages(true, mapped, false);
+        assert!(full.contains(&0x0028));
+        assert!(full.contains(&0x004F));
+        assert!(full.contains(&0x0050));
+        assert!(full.contains(&0x0051));
+        assert!(full.contains(&0x0052));
+        assert!(full.contains(&0x0035));
+
+        let restricted = capture_usages(true, mapped, true);
+        assert!(!restricted.contains(&0x0028), "OK/Enter 必须让出报告层");
+        assert!(!restricted.contains(&0x004F), "右方向必须让出报告层");
+        assert!(!restricted.contains(&0x0050), "左方向必须让出报告层");
+        assert!(!restricted.contains(&0x0051), "下方向必须让出报告层");
+        assert!(!restricted.contains(&0x0052), "上方向必须让出报告层");
+        // 返回 / 音量± 恒接管；低频键（TV/`）保持原策略。
+        assert!(restricted.contains(&0x00F1));
+        assert!(restricted.contains(&0x0080));
+        assert!(restricted.contains(&0x0081));
+        assert!(restricted.contains(&0x0035));
+    }
+
+    #[test]
+    fn host_policy_only_restricts_shared_hosts_with_keyboard_or_unknown() {
+        let exclusive = HostSharingInfo {
+            shared: false,
+            members: 1,
+            rc003_members: 1,
+            other_keyboard: None,
+        };
+        assert!(!should_restrict_high_frequency(Some(exclusive)));
+
+        let shared_mouse = HostSharingInfo {
+            shared: true,
+            members: 3,
+            rc003_members: 1,
+            other_keyboard: Some(false),
+        };
+        assert!(!should_restrict_high_frequency(Some(shared_mouse)));
+
+        let shared_keyboard = HostSharingInfo {
+            shared: true,
+            members: 3,
+            rc003_members: 1,
+            other_keyboard: Some(true),
+        };
+        assert!(should_restrict_high_frequency(Some(shared_keyboard)));
+
+        let shared_unknown = HostSharingInfo {
+            shared: true,
+            members: 3,
+            rc003_members: 1,
+            other_keyboard: None,
+        };
+        assert!(should_restrict_high_frequency(Some(shared_unknown)));
+
+        // 旧助手没有 verdict：保持旧行为，不收紧。
+        assert!(!should_restrict_high_frequency(None));
     }
 
     #[test]
@@ -2257,6 +2548,62 @@ mod tests {
         );
         assert!(parse_bridge_line("F").is_err());
         assert!(parse_bridge_line("F zz").is_err());
+    }
+
+    /// 共享宿主 + 键盘判决必须改变 HELLO 之后的初始 `OK` 目标集：换 HELLO 之前
+    /// 先按全键下发，收到判决后重算并让出方向 / OK；App 的 `enhanced_owned` 与
+    /// helper 实际接管集合因此仍一致。
+    #[test]
+    fn shared_host_keyboard_verdict_restricts_ok_targets() {
+        let _gate = crate::key_gate::lock_gate_tests();
+        let dir =
+            std::env::temp_dir().join(format!("sayall-bridge-host-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (sender, _receiver) = channel();
+        let bridge = Rc003Bridge::start_in(dir.clone(), sender);
+        let mapped = mask(&[RemoteButton::Ok, RemoteButton::Up, RemoteButton::Back]);
+        bridge.set_capture_targets(true, mapped);
+
+        let descriptor_path = dir.join(BRIDGE_FILE_NAME);
+        let text = std::fs::read_to_string(&descriptor_path).expect("描述文件必须已写出");
+        let (port, token, _version) = parse_descriptor(&text).expect("描述文件必须可解析");
+        let mut stream = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .expect("必须能连上桥接端口");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(2_000)))
+            .ok();
+        let hello = format!(
+            "HELLO {BRIDGE_PROTOCOL_VERSION} {token} 777 host=shared members=3 \
+             rc003_members=1 other_keyboard=1\n"
+        );
+        stream.write_all(hello.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut ok = String::new();
+        reader.read_line(&mut ok).expect("必须收到 OK");
+        let mut parts = ok.trim().split(' ');
+        assert_eq!(parts.next(), Some("OK"), "{ok}");
+        let _ = parts.next();
+        let _ = parts.next();
+        let usages = parse_usage_payload(parts.next().unwrap_or("-")).expect("usage 列表");
+        assert!(
+            !usages.contains(&0x0028),
+            "共享宿主 + 键盘时 OK/Enter 不得进入报告层：{usages:?}"
+        );
+        assert!(
+            !usages.contains(&0x004F),
+            "共享宿主 + 键盘时方向键不得进入报告层：{usages:?}"
+        );
+        assert!(
+            usages.contains(&0x00F1),
+            "返回键必须保持报告层接管：{usages:?}"
+        );
+
+        let snapshot = bridge.snapshot();
+        assert!(snapshot.target_usages.contains(&0x00F1));
+        assert!(!snapshot.target_usages.contains(&0x0028));
+        assert!(!snapshot.target_usages.contains(&0x004F));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 端到端（离线、免提权、免设备）：`F` 行经真 TcpStream 更新帧证据快照。
