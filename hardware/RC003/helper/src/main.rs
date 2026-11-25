@@ -10044,6 +10044,22 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             format!("embedded={AGENT_BUILD}"),
         );
 
+        // 23d) 来源画像（2026-11-25）：只诊断、不改判定。三条线索（句柄身份 /
+        //      8 字节请求头 / IoStatusBlock.Information）各自的落点必须都在内嵌脚本里，
+        //      否则现场日志永远回答不了"能不能只认遥控器"。
+        check(
+            "内嵌 agent：来源画像三条线索的落点齐全（不改变判定）",
+            AGENT_JS.contains("diag:src_new")
+                && AGENT_JS.contains("diag:src id=")
+                && AGENT_JS.contains("diag:edge src=")
+                && AGENT_JS.contains("diag:src_closed")
+                && AGENT_JS.contains("iosb.readU32()")
+                && AGENT_JS.contains("readU64().toNumber()")
+                && AGENT_JS.contains("diagHex(inBytes)")
+                && AGENT_JS.contains("diag_errors"),
+            "diag:src_new/diag:src/diag:edge/diag:src_closed + IOSB + inBuf".to_owned(),
+        );
+
         // 24) 桥接描述文件解析（捕获链第 ② 段）。解析错一处，现象是
         //     "主程序在跑、助手也在跑，但三键就是不动"——日志上只有 APP-BRIDGE unavailable，
         //     而那是一条折叠日志，本身不会告诉你是哪一项不匹配。逐项钉住。
@@ -10702,7 +10718,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-11-15.report-liveness";
+    const AGENT_BUILD: &str = "2026-11-25.source-diagnostics";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；

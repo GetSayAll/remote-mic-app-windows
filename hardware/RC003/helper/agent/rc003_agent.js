@@ -88,7 +88,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-15.report-liveness';
+var AGENT_BUILD = '2026-11-25.source-diagnostics';
 
 var TARGET_IOCTL = 0x80018483;
 /* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
@@ -253,6 +253,8 @@ var stat = {
   read_errors: 0,             /* 读失败导致的断线（此前这条路径不计数，见 pump） */
   auth_rejected: 0,
   stalls: 0,                  /* 心跳/读泵停顿探针触发次数（2026-10-21） */
+  /* 来源画像自身抛异常的次数（只影响诊断，绝不影响清键/边沿）。 */
+  diag_errors: 0,
   errors: 0
 };
 
@@ -271,6 +273,192 @@ var activeSource = null;
 var sourceKeys = {};           /* 句柄字符串 → 设备对象名（或句柄字符串） */
 var ntQueryObject = null;      /* NativeFunction；测试桩/不可用时为 null */
 var inCloseHook = false;       /* NtClose 内部重入 guards（发送路径也可能关闭句柄） */
+
+/* ---------------------------------------------------- 来源画像（只诊断） */
+/* 2026-11-25 现场（RC001 在共享宿主里被另一台 8 ms 设备的字节触发「电源 → 宏」）：
+   报告层按“形状 + 内容”认键，认不出设备。改判定之前必须先回答三条线索哪一条可用：
+     1) FileHandle 身份：同一对象名之下是否仍有不同的句柄（现在按对象名归并）；
+     2) 8 字节请求头：除 [4]/[5] 外是否带目标设备标识、是否每帧都在变；
+     3) 报告实际长度：`IoStatusBlock.Information`（现有判定完全没用过它）。
+   这里**只记录元数据**（句柄值、对象名哈希、请求头 8 字节、完成状态与长度、速率），
+   **不记录报告内容**（报告里是按键语义，可能含用户输入的键码）；
+   也不改变任何判定 / 清键 / 边沿行为；任何异常只计 `diag_errors`。
+   判读要点：`h=` 不同而 `nm=` 相同 ⇒ 可用句柄做来源键；`in_chg=0` ⇒ 请求头是
+   每来源常量；`len=` 只有一种取值 ⇒ 可用完成长度筛设备。 */
+var DIAG = {
+  enabled: true,
+  flushMs: 5000,               /* 汇总落盘周期 */
+  maxSources: 32,              /* 句柄可能churn，封顶防内存无界 */
+  lastFlushAt: 0,
+  seq: 0,
+  overflow: 0,
+  sources: {},                 /* 句柄字符串 → 画像记录 */
+  byName: {},                  /* 对象名哈希 → 首个 id（用来看“名字是否同质”） */
+  inbufSample: 4               /* 每来源最多记住多少个不同的请求头 */
+};
+
+function diagHash(text) {
+  var h = 0x811c9dc5;
+  for (var i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i) & 0xff;
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return ('0000000' + h.toString(16)).slice(-8);
+}
+
+function diagHex(bytes) {
+  var out = '';
+  for (var i = 0; i < bytes.length && i < 8; i++) {
+    out += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
+  }
+  return out;
+}
+
+function diagHist(hist) {
+  var parts = [];
+  for (var k in hist) parts.push(k + ':' + hist[k]);
+  if (parts.length === 0) return '-';
+  if (parts.length > 4) return parts.slice(0, 4).join(',') + ',+';
+  return parts.join(',');
+}
+
+/* 命中落在第几个 u16 槽（0/1/2）。遥控器的物理键通常固定落在某个槽位，
+   别的设备的数据字节分布不同——这是第四条低成本线索。 */
+function firstMatchedSlot(bytes, usages) {
+  for (var i = 0; i < 3; i++) {
+    var o = 3 + i * 2;
+    var u = bytes[o] | (bytes[o + 1] << 8);
+    if (u !== 0 && usages.indexOf(u) >= 0) return i;
+  }
+  return -1;
+}
+
+/* 每条形状匹配的报告都会经过这里：新来源登记一行，之后只累加计数。 */
+function diagTouch(handle, inBytes, outLen) {
+  if (!DIAG.enabled) return null;
+  var hk = handle === null || handle === undefined ? 'null' : handle.toString();
+  var now = Date.now();
+  var rec = DIAG.sources[hk];
+  if (rec === undefined) {
+    if (DIAG.seq >= DIAG.maxSources) { DIAG.overflow++; return null; }
+    var key = String(sourceKeyOf(handle));
+    var hash = diagHash(key);
+    rec = {
+      id: ++DIAG.seq,
+      handle: hk,
+      nameHash: hash,
+      /* 1 = NtQueryObject 没给出设备名、来源键退回句柄字符串（此时 nm 只是句柄的哈希，
+         不能当成"设备名不同"）。 */
+      nameFromHandle: key === hk,
+      nameShared: DIAG.byName[hash] || 0,
+      count: 0,
+      windowStart: now,
+      windowCount: 0,
+      lastCount: 0,
+      obHist: {},
+      inbuf: '',
+      inChanges: 0,
+      inSeen: {},
+      inList: [],
+      inSamples: 0,
+      lenHist: {},
+      statusHist: {},
+      edges: 0
+    };
+    DIAG.sources[hk] = rec;
+    if (rec.nameShared === 0) DIAG.byName[hash] = rec.id;
+    logLine('diag:src_new id=' + rec.id + ' h=' + rec.handle + ' nm=' + rec.nameHash
+      + ' nmh=' + (rec.nameFromHandle ? 1 : 0)
+      + (rec.nameShared ? ' nm_shared_with=' + rec.nameShared : '')
+      + ' ob=' + outLen);
+  }
+  rec.count++;
+  rec.windowCount++;
+  var obKey = String(outLen);
+  rec.obHist[obKey] = (rec.obHist[obKey] || 0) + 1;
+  var ib = diagHex(inBytes);
+  if (rec.inbuf !== ib) {
+    if (rec.inbuf !== '') rec.inChanges++;
+    rec.inbuf = ib;
+    if (!Object.prototype.hasOwnProperty.call(rec.inSeen, ib)
+        && rec.inSamples < DIAG.inbufSample) {
+      rec.inSeen[ib] = true;
+      rec.inSamples++;
+      rec.inList.push(ib);
+    }
+  }
+  return rec;
+}
+
+/* onLeave：读完成状态与 Information（真实报告长度）。IOSB 由调用方提供，
+   可能是 STATUS_PENDING（st=0x103）——此时 len 无意义，靠 st 区分。 */
+function diagComplete(rec, iosb, note) {
+  if (rec === null || rec === undefined) return;
+  var info = -1;
+  var status = 'na';
+  try {
+    if (iosb !== null && iosb !== undefined && !iosb.isNull()) {
+      status = '0x' + (iosb.readU32() >>> 0).toString(16);
+      var infoPtr = iosb.add(Process.pointerSize);
+      info = Process.pointerSize === 8
+        ? infoPtr.readU64().toNumber()
+        : infoPtr.readU32();
+    }
+  } catch (e) {
+    info = -1;
+    status = 'err';
+  }
+  var key = String(info);
+  rec.lenHist[key] = (rec.lenHist[key] || 0) + 1;
+  rec.statusHist[status] = (rec.statusHist[status] || 0) + 1;
+  /* 真机事故里最需要的是“这条幽灵边沿来自哪个来源、多长、落在第几个槽”，
+     所以边沿单独落一行。 */
+  if (note !== null && note !== undefined) {
+    rec.edges++;
+    logLine('diag:edge src=' + note.src + ' u=' + note.u + ' slot=' + note.slot
+      + ' len=' + key + ' st=' + status + ' in=' + rec.inbuf + ' n=' + rec.count);
+  }
+}
+
+/* 心跳里调用：每来源最多一行/周期，且本周期没有新报告就不落。 */
+function diagFlush(now) {
+  if (!DIAG.enabled) return;
+  if (now - DIAG.lastFlushAt < DIAG.flushMs) return;
+  DIAG.lastFlushAt = now;
+  for (var k in DIAG.sources) {
+    var r = DIAG.sources[k];
+    if (r.count === r.lastCount) continue;
+    var dt = Math.max(1, now - r.windowStart);
+    var rate = r.windowCount * 1000 / dt;
+    logLine('diag:src id=' + r.id + ' h=' + r.handle + ' nm=' + r.nameHash
+      + ' nmh=' + (r.nameFromHandle ? 1 : 0)
+      + ' n=' + r.count + ' rate=' + rate.toFixed(1) + '/s'
+      + ' len=' + diagHist(r.lenHist) + ' st=' + diagHist(r.statusHist)
+      + ' ob=' + diagHist(r.obHist) + ' in=' + r.inbuf
+      + ' in_n=' + r.inSamples + ' in_chg=' + r.inChanges
+      + (r.inSamples > 1 ? ' smp=' + r.inList.join('|') : '')
+      + ' edges=' + r.edges);
+    r.lastCount = r.count;
+    r.windowStart = now;
+    r.windowCount = 0;
+  }
+  if (DIAG.overflow > 0) {
+    logLine('diag:src_overflow cap=' + DIAG.maxSources + ' dropped=' + DIAG.overflow);
+    DIAG.overflow = 0;
+  }
+}
+
+/* 句柄关闭：落最后一行并释放槽位（句柄号会被复用，不能把新旧混在一起）。 */
+function diagClose(handle) {
+  if (!DIAG.enabled) return;
+  var hk = handle === null || handle === undefined ? 'null' : handle.toString();
+  var rec = DIAG.sources[hk];
+  if (rec === undefined) return;
+  logLine('diag:src_closed id=' + rec.id + ' h=' + rec.handle + ' n=' + rec.count
+    + ' len=' + diagHist(rec.lenHist) + ' in_chg=' + rec.inChanges
+    + ' edges=' + rec.edges);
+  delete DIAG.sources[hk];
+}
 
 /* 两个集合必须分开，否则"哨兵键"会污染按键证据：
    - reportUsages：**上报**集合。由主程序动态下发，且只能取语义按键白名单的子集。
@@ -836,18 +1024,18 @@ function sourceKeyOf(handle) {
   return key;
 }
 
-function emitEdgesIfChanged(found, source) {
+function emitEdgesIfChanged(found, source, rec) {
   var sorted = found.slice().sort(function (x, y) { return x - y; });
   /* 防御性第二道：onEnter 已对异源报告早退，这里再保证一次“异源不能改状态”。
      只有“当前按下来源”的空报告才是真正的 UP；异源空报告只计数。 */
   if (source !== undefined && activeSource !== null && source !== activeSource) {
     stat.foreign_reports++;
-    return;
+    return null;
   }
   if (source !== undefined && activeSource === null && sorted.length > 0) {
     activeSource = source;
   }
-  if (sameSet(sorted, currentUsages())) return;
+  if (sameSet(sorted, currentUsages())) return null;
   pressed = {};
   for (var i = 0; i < sorted.length; i++) pressed[sorted[i]] = true;
   /* 无按下状态就没有“当前来源”可归属；目标集合变更把它清空时也一样。
@@ -860,10 +1048,13 @@ function emitEdgesIfChanged(found, source) {
     usages: sorted,
     buttons: sorted.map(function (u) { return TARGET_NAMES[u] || ('0x' + u.toString(16)); }),
     n: sorted.length,
+    /* 来源画像（2026-11-25）：只加诊断字段，助手按字段名取值，多一个键不影响解析。 */
+    src: rec === null || rec === undefined ? 0 : rec.id,
     /* 状态变化也有 reason：否则日志里会打出一条空的 `reason=`，
-       而 `reason` 存在的意义就是区分"正常状态变化"与"被强制释放"。 */
+       而 `reason` 存在的意义就是区分“正常状态变化”与“被强制释放”。 */
     reason: 'state'
   });
+  return sorted;
 }
 
 function writeReport(ptr, bytes) {
@@ -937,6 +1128,15 @@ function installHook() {
            这里必须在 `this.hit = true` 之前早退：onLeave 只负责恢复我们改过的
            缓冲区，异源报告我们一个字节都没动。 */
         var source = sourceKeyOf(args[0]);
+        /* 来源画像（2026-11-25，只诊断）：必须在异源早退之前记录——异源报告正是
+           要观察的对象。只读元数据，任何异常都不得影响清键与边沿（fail-open）。 */
+        this.diag = null;
+        this.iosb = args[4];
+        try {
+          this.diag = diagTouch(args[0], inBytes, outLen);
+        } catch (e) {
+          stat.diag_errors++;
+        }
         if (activeSource !== null && source !== activeSource) {
           stat.foreign_reports++;
           if (stat.foreign_reports <= 5 || stat.foreign_reports % 100 === 0) {
@@ -963,7 +1163,14 @@ function installHook() {
         this.orig = bytes;
 
         /* 边沿上报必须早于/独立于清键：即使租约过期不上报也要如实反映状态 */
-        emitEdgesIfChanged(found, source);
+        var emitted = emitEdgesIfChanged(found, source, this.diag);
+        if (emitted !== null && this.diag !== null) {
+          this.edgeNote = {
+            src: this.diag.id,
+            u: usagesHex(emitted),
+            slot: firstMatchedSlot(bytes, emitted)
+          };
+        }
 
         /* 语音键释放保持（2026-10-23 尾字丢失）：上一帧真的替换过合成键，
            这一帧不含语音键 = 物理释放。先睡 RELEASE_HOLD_MS 再让零报告通过；
@@ -1003,9 +1210,12 @@ function installHook() {
         }
 
         if (synthSeen) {
+          /* 来源画像：语音键只可能来自遥控器（用户按下）——这里带上来源 id，
+             现场据此把 `diag:src` 里的某一条直接认定为"遥控器"，不必靠时间猜。 */
           synthTrace('seen mode=' + mode + ' lease=' + (leaseOk() ? 1 : 0)
             + ' disarmed=' + (disarmed ? 1 : 0) + ' connected=' + (connected ? 1 : 0)
-            + ' clears_ok=' + stat.clears_ok);
+            + ' clears_ok=' + stat.clears_ok
+            + ' src=' + (this.diag === null || this.diag === undefined ? 0 : this.diag.id));
         }
 
         if (!leaseOk()) { stat.lease_expired++; if (synthSeen) synthTrace('skip reason=lease'); return; }
@@ -1086,6 +1296,12 @@ function installHook() {
     },
 
     onLeave: function (retval) {
+      /* 来源画像：先记录完成状态/长度（异源报告同样要观察），再做原有的回写。 */
+      try {
+        if (this.diag) diagComplete(this.diag, this.iosb, this.edgeNote);
+      } catch (e) {
+        stat.diag_errors++;
+      }
       if (!this.hit || !this.cleared || !restoreOnLeave) return;
       try {
         var cur = new Uint8Array(this.outPtr.readByteArray(9));
@@ -1114,6 +1330,8 @@ function installHook() {
       Interceptor.attach(closeFn, {
         onEnter: function (args) {
           if (inCloseHook) return;
+          /* 来源画像：句柄关闭落地一行并释放槽位（句柄号会复用）。 */
+          try { diagClose(args[0]); } catch (e) { stat.diag_errors++; }
           var raw = args[0].toString();
           if (!Object.prototype.hasOwnProperty.call(sourceKeys, raw)) return;
           var key = sourceKeys[raw];
@@ -1179,6 +1397,8 @@ function heartbeat() {
      同时检查是否有单行写挂起（迟到回调按必然事件处理）。 */
   txCheckStall();
   txPump();
+  /* 来源画像周期汇总（5 s 一次/来源；只在本周期有新报告时落一行）。 */
+  try { diagFlush(Date.now()); } catch (e) { stat.diag_errors++; }
   var leaseNow = leaseOk();
   if (!leaseNow && lastRenewAt !== 0 && connected && !disarmed) {
     /* 租约刚过期：停止清键，并释放可能仍被记为按下的状态 */
@@ -1249,6 +1469,7 @@ function heartbeat() {
       rx_timeouts: stat.rx_timeouts,
       auth_rejected: stat.auth_rejected,
       stalls: stat.stalls,
+      diag_errors: stat.diag_errors,
       errors: stat.errors
     }
   });
