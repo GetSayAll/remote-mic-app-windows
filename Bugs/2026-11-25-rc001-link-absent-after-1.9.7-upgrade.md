@@ -227,12 +227,12 @@
   `link_status=disconnected` / 0 次 access denied / 0 次 suspend；统计命令与
   输出在本记录第 2 节。结论 `passed`（实际观察到）。
 - 真机 A/B：`deferred`（需要用户机器与遥控器）。
-- 代码改动：`410cba9d860b6257eee1aa4adacf67aabe02c5cb`
+- 代码改动：`5bb32c2ecea7fcf79a9a18dc65e04190b874f087`
   （`diag(ble): 补适配器 PnP 总线与电源诊断`）；只读诊断，不改变重连/GATT/按键。
 - 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.7_x64-setup.exe`
-  （13,607,146 字节，SHA-256
-  `66ab2cd7bf6e964e0cc906694ad14d6f0ab53216b60498a7a017d2fcd64bd14d`）；
-  裸 exe 内嵌 `source_revision=410cba9d860b6257eee1aa4adacf67aabe02c5cb`，
+  （13,608,559 字节，SHA-256
+  `5ac7a4211e2f0f3eae7a36e0bf3be717edd4d9d0d10ad0b0b393b78b66683179`）；
+  裸 exe 内嵌 `source_revision=5bb32c2ecea7fcf79a9a18dc65e04190b874f087`，
   `verify-frontend-embedded.ps1` 18/18 `passed`。本地测试签名与 CI updater
   pubkey 不匹配，属预期；该包与 `.sig` 不可发布。
 - 安装/升级/启动：`deferred`（未在本机覆盖安装；需用户机器验证）。
