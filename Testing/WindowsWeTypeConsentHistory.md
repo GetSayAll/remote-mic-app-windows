@@ -73,7 +73,7 @@
 
 ## 日志判据
 
-默认诊断日志位于 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。健康会话通常包含（`evidence=mic` = ConsentStore 开麦观测；`evidence=marker` = 微信输入法自注入的 0xFC 存活标记，见 Bugs\2026-09-30-wetype-246-consentstore-probe-blind.md；`mic=` 单独记录开麦判据自身结果，用于识别"盲判"）：
+默认诊断日志位于 `%LOCALAPPDATA%\SayAll\Logs\sayall-diagnostic.log`。健康会话通常包含（`evidence=mic` = ConsentStore 开麦观测；`evidence=marker` = 微信输入法自注入的 0xFC 存活标记，见 Bugs\2026-09-30-wetype-246-consentstore-probe-blind.md；`evidence=capture` = 录音端点上的 WASAPI 活跃会话，见 `Testing/WindowsWeTypeCaptureSession.md`；`mic=` / `capture=` 分别记录各判据自身结果，用于识别"盲判"）：
 
 ```text
 wetype_check armed attempt=0 ... marker_baseline=<n>

@@ -5,8 +5,10 @@
 use crate::ConnectionSnapshot;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use wasapi::{DeviceEnumerator, Direction, SessionState};
 use windows::core::BOOL;
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, HWND, LPARAM};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
     REG_QWORD, REG_VALUE_TYPE,
@@ -64,6 +66,173 @@ pub(crate) fn response_since(
             MicResponse::NotObserved
         }
         _ => MicResponse::Unknown,
+    }
+}
+
+/// 微信输入法是否**正在占用录音端点**（WASAPI 会话，2026-11-26 新增）。
+///
+/// 背景：WeType 3.0.3.x 起不再注入 `0xFC`/`WTYP` 存活标记，也不更新 ConsentStore
+/// 的历史时间戳。原有两条判据同时失明时，`NotReacted` 会被误判，随后的和弦重放
+/// 会把正在录音的"按住说话"拆掉（2026-11-26 社区报告）。
+///
+/// 这条判据与输入法版本解耦：只要任一录音端点上有一个属于 WeType 的 Active
+/// 会话，就证明它确实在录音。它只读取公开的音频会话状态与进程可执行文件名，
+/// 不读取音频内容、路径或第三方私有数据。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CaptureEvidence {
+    /// 有 WeType 进程持有 Active 录音会话（正面证据）。
+    Active,
+    /// 枚举成功且没有 WeType 的 Active 会话（可作为"未响应"的负面证据）。
+    Inactive,
+    /// COM/端点/会话枚举不可用：调用方不得据此做任何推断。
+    Unavailable,
+    /// 非微信输入法工具，不适用这条判据（保持既有裁决语义）。
+    #[default]
+    NotApplicable,
+}
+
+impl CaptureEvidence {
+    pub(crate) fn as_log_str(self) -> &'static str {
+        match self {
+            CaptureEvidence::Active => "active",
+            CaptureEvidence::Inactive => "inactive",
+            CaptureEvidence::Unavailable => "unavailable",
+            CaptureEvidence::NotApplicable => "not_applicable",
+        }
+    }
+
+    /// 只有 `Inactive` 在稳定采样点才能当"未响应"的负面证据；录音会话从按下
+    /// 到出现 Active 需要约 1 秒（2026-11-26 本机探针 1.02s），过早的不存在
+    /// 不等于没响应。
+    pub(crate) fn can_convict(self, settled: bool) -> bool {
+        self == CaptureEvidence::Inactive && settled
+    }
+}
+
+/// 进程是否属于微信输入法：可执行文件在 `WeType` 安装目录下，或文件名以
+/// `wetype` 开头。探针实测录音会话由 `wetype_update.exe` 持有；按安装目录匹配
+/// 是为了覆盖未来版本更换录音组件名的情况。只读取路径用于匹配，日志不记录路径。
+fn is_wetype_process_image(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase().replace('/', "\\");
+    normalized.contains("\\wetype\\")
+        || normalized
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.starts_with("wetype"))
+}
+
+/// 枚举所有活动录音端点上的 WASAPI 会话，回答"WeType 现在是否正在录音"。
+///
+/// 失败安全：COM 初始化、端点或会话枚举任一步失败都返回 `Unavailable`，绝不
+/// 返回 `Inactive`。这样上层在观测不可用时不会执行任何破坏性恢复动作。
+pub(crate) fn wetype_capture_evidence() -> CaptureEvidence {
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if initialized.is_err() {
+        return CaptureEvidence::Unavailable;
+    }
+    let result = capture_evidence_for(is_wetype_process_image);
+    unsafe {
+        CoUninitialize();
+    }
+    result
+}
+
+/// 只有微信输入法适用录音会话判据；其他输入工具保持原裁决语义。
+pub(crate) fn capture_for_marker(marker: &str) -> CaptureEvidence {
+    if marker == "wetype" {
+        wetype_capture_evidence()
+    } else {
+        CaptureEvidence::NotApplicable
+    }
+}
+
+/// 录音会话从按下到出现 Active 的稳定观察点（本机 2026-11-26 实测 1.02s；
+/// 取 2.5s 留出冷启动/输入法切换余量）。早于该点的"Inactive"只能算未知。
+pub(crate) const CAPTURE_SETTLE_MS: u64 = 2500;
+
+/// 单个录音端点上的会话判定：`Some(true)` = 有 WeType Active 会话，
+/// `Some(false)` = 端点可枚举且没有，`None` = 该端点不可枚举。
+fn device_session_evidence(
+    device: &wasapi::Device,
+    matches_process: fn(&str) -> bool,
+) -> Option<bool> {
+    let manager = device.get_iaudiosessionmanager().ok()?;
+    let sessions = manager.get_audiosessionenumerator().ok()?;
+    let count = sessions.get_count().ok()?;
+    for index in 0..count {
+        let Ok(session) = sessions.get_session(index) else {
+            // 读不到某条会话就不能断言"没有 WeType 在录音"。
+            return None;
+        };
+        match session.get_state() {
+            Ok(SessionState::Active) => {}
+            Ok(_) => continue,
+            Err(_) => return None,
+        }
+        let Ok(process_id) = session.get_process_id() else {
+            return None;
+        };
+        if process_id == 0 {
+            // 系统/聚合会话不可能是微信输入法；不要让它把判据拖成不可用。
+            continue;
+        }
+        let matched = match crate::app_launcher::process_image_path(process_id) {
+            Some(path) => matches_process(&path),
+            None => {
+                // 进程名读不到（保护进程/权限边界）时用会话标识兜底；
+                // 两者都读不到就不能把"Inactive"当负面证据。
+                let identifier = session.get_session_identifier().unwrap_or_default();
+                if identifier.is_empty() {
+                    return None;
+                }
+                matches_process(&identifier)
+            }
+        };
+        if matched {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn capture_evidence_for(matches_process: fn(&str) -> bool) -> CaptureEvidence {
+    let enumerator = match DeviceEnumerator::new() {
+        Ok(enumerator) => enumerator,
+        Err(_) => return CaptureEvidence::Unavailable,
+    };
+    // 微信输入法的“自动检测”跟随系统默认录音设备；默认端点必须可枚举，
+    // 否则"Inactive"不是可靠负面证据（用户手动选定的其它端点仍会在下面补查）。
+    let mut unknown = false;
+    let default_ok = match enumerator.get_default_device(&Direction::Capture) {
+        Ok(device) => match device_session_evidence(&device, matches_process) {
+            Some(true) => return CaptureEvidence::Active,
+            Some(false) => true,
+            None => {
+                unknown = true;
+                false
+            }
+        },
+        Err(_) => false,
+    };
+    let collection = match enumerator.get_device_collection(&Direction::Capture) {
+        Ok(collection) => collection,
+        Err(_) => return CaptureEvidence::Unavailable,
+    };
+    let mut other_ok = false;
+    for device in &collection {
+        let Ok(device) = device else { continue };
+        match device_session_evidence(&device, matches_process) {
+            Some(true) => return CaptureEvidence::Active,
+            Some(false) => other_ok = true,
+            None => unknown = true,
+        }
+    }
+    if unknown {
+        CaptureEvidence::Unavailable
+    } else if default_ok || other_ok {
+        CaptureEvidence::Inactive
+    } else {
+        CaptureEvidence::Unavailable
     }
 }
 
@@ -127,22 +296,37 @@ fn reaction_log_str(reaction: WetypeReaction) -> &'static str {
     }
 }
 
-/// 合并裁决：标记证据优先于开麦观测（正面证据否决误判）。
+/// 合并裁决：任一**正面**证据（标记 / 开麦 / 录音会话）都判 `Reacted`，
+/// 否决一切破坏性恢复动作。
+///
+/// 负面裁决（`NotReacted`）的规则在 2026-11-26 收紧：
+/// - 微信输入法：不再把"ConsentStore 没更新"当独立负面证据（3.0.3.x 起它不写），
+///   必须由 WASAPI 录音会话在稳定采样点确认"没有在录音"才判 `NotReacted`；
+///   录音会话观测不可用时判 `Unknown`，**不重发按键**（报告 #… 的诉求）。
+/// - 其他输入工具：保持既有语义（`NotApplicable` + 开麦 `NotObserved` → `NotReacted`）。
 pub(crate) fn reaction_verdict(
     mic: MicResponse,
     marker_baseline: u64,
     marker_now: u64,
+    capture: CaptureEvidence,
+    capture_settled: bool,
 ) -> WetypeReaction {
     if marker_now > marker_baseline {
         // 微信输入法自注入标记只可能来自它自己（0xFC break key + extra="WTYP"）：
         // 出现即证明其钩子活着并已消费本次和弦，任何重放都是破坏性的。
         return WetypeReaction::Reacted;
     }
-    match mic {
-        MicResponse::Observed => WetypeReaction::Reacted,
-        MicResponse::NotObserved => WetypeReaction::NotReacted,
-        MicResponse::Unknown => WetypeReaction::Unknown,
+    if mic == MicResponse::Observed || capture == CaptureEvidence::Active {
+        return WetypeReaction::Reacted;
     }
+    if capture.can_convict(capture_settled) {
+        return WetypeReaction::NotReacted;
+    }
+    if capture == CaptureEvidence::NotApplicable && mic == MicResponse::NotObserved {
+        // 豆包 / Vokie 等不适用录音会话判据的工具：沿用原行为。
+        return WetypeReaction::NotReacted;
+    }
+    WetypeReaction::Unknown
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -409,6 +593,10 @@ fn wait_session_end(state: &Arc<Mutex<ConnectionSnapshot>>, budget_ms: u64) -> b
 ///   `mic=` 单独在本机会全程 `not_observed`（issue #118），不能当判据；
 /// - 救回判据从"开麦未观测"改为"合并裁决确认未响应"，并按 `HealAction`
 ///   逐级升级（第 1 档只焦点往返，第 2 档起强制对齐目标输入法）。
+///
+/// 2026-11-26：`voice_verify` 同步记录 `capture=`（WASAPI 录音会话）。
+/// 会话已经结束（短按/已松手）时，录音会话消失属于正常收尾，不能当"没响应"
+/// 的证据；只有仍处于 Streaming 的稳定采样点才允许用 `capture=inactive` 判负。
 pub(crate) fn spawn_mic_verify(
     session: u64,
     tool: &'static str,
@@ -416,6 +604,7 @@ pub(crate) fn spawn_mic_verify(
     baseline: Option<MicObservation>,
     f5_baseline: crate::key_suppressor::F5Snapshot,
     marker_baseline: u64,
+    session_state: Arc<Mutex<ConnectionSnapshot>>,
     heal: Option<ImeHealContext>,
 ) {
     const SAMPLES_MS: [u64; 2] = [800, 2500];
@@ -430,16 +619,28 @@ pub(crate) fn spawn_mic_verify(
                     std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
                 }
                 let mic = response_since(baseline, mic_observation_for(marker));
+                let streaming = {
+                    let snapshot = session_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    snapshot.voice_state == sayall_core::VoiceSessionState::Streaming
+                };
+                let capture = capture_for_marker(marker);
                 reaction = reaction_verdict(
                     mic,
                     marker_baseline,
                     crate::key_suppressor::wetype_marker_count(),
+                    capture,
+                    // 会话已结束时，录音会话消失是正常收尾，不是"没响应"的证据；
+                    // 只有按住期间（仍在 Streaming）的稳定点才允许用 Inactive 判负。
+                    delay >= CAPTURE_SETTLE_MS && streaming,
                 );
                 let f5 = crate::key_suppressor::f5_snapshot().delta_since(f5_baseline);
                 crate::ble::gatt_note(format!(
-                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={} verdict={} f5_edges={} f5_leaked={} f5_key_down={}",
+                    "voice_verify session={session} tool={tool} marker={marker} at_ms={} mic={} capture={} verdict={} f5_edges={} f5_leaked={} f5_key_down={}",
                     started.elapsed().as_millis(),
                     mic.as_log_str(),
+                    capture.as_log_str(),
                     reaction_log_str(reaction),
                     f5.edges,
                     f5.leaked,
@@ -473,6 +674,8 @@ pub(crate) fn spawn_mic_verify(
                 response_since(baseline, mic_observation_for(marker)),
                 marker_baseline,
                 crate::key_suppressor::wetype_marker_count(),
+                capture_for_marker(marker),
+                true,
             );
             if recheck == WetypeReaction::Reacted {
                 IME_HEAL_STEPS.store(0, Ordering::Relaxed);
@@ -524,6 +727,19 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires installed WeType; read-only"]
+    fn live_capture_session_observation_is_readable() {
+        let mut readable = false;
+        for _ in 0..12 {
+            let evidence = wetype_capture_evidence();
+            println!("wetype_capture_evidence={evidence:?}");
+            readable |= evidence != CaptureEvidence::Unavailable;
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        assert!(readable, "capture session enumeration unavailable");
+    }
+
+    #[test]
     #[ignore = "requires installed WeType microphone history; read-only"]
     fn live_consentstore_observation_is_readable() {
         let observation = wetype_mic_observation().expect("WeType observation unavailable");
@@ -572,16 +788,138 @@ mod tests {
     /// 焦点往返/切换会把它拆掉（10-20 教训）。迟到的正面证据必须否决动作。
     #[test]
     fn late_positive_evidence_cancels_a_pending_heal() {
-        // 采样时未响应（marker 未前进）→ 可以救。
+        // 采样时未响应（marker 未前进、录音端点无活动会话）→ 可以救。
         assert!(should_heal(
-            reaction_verdict(MicResponse::NotObserved, 7, 7),
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::Inactive,
+                true
+            ),
             true
         ));
         // 动作前再裁决：marker 前进 → 放弃动作。
         assert!(!should_heal(
-            reaction_verdict(MicResponse::NotObserved, 7, 9),
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                9,
+                CaptureEvidence::Inactive,
+                true
+            ),
             true
         ));
+    }
+
+    #[test]
+    fn capture_session_is_positive_evidence_when_marker_and_consentstore_are_blind() {
+        // 2026-11-26 现场（WeType 3.0.3.x）：marker 不再前进，ConsentStore 也不更新，
+        // 但录音端点上有 WeType 的 Active 会话。必须判 Reacted，绝不重发和弦。
+        assert_eq!(
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::Active,
+                false
+            ),
+            WetypeReaction::Reacted
+        );
+    }
+
+    #[test]
+    fn inactive_capture_session_only_convicts_after_settle() {
+        // 按下后 ~1s 录音会话才出现；700ms 的 Inactive 只是"还没看到"，不是
+        // "没响应"。稳定采样点（>=2.5s）仍无会话才允许恢复。
+        assert_eq!(
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::Inactive,
+                false
+            ),
+            WetypeReaction::Unknown
+        );
+        assert_eq!(
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::Inactive,
+                true
+            ),
+            WetypeReaction::NotReacted
+        );
+    }
+
+    #[test]
+    fn unavailable_capture_session_never_convicts_wechat() {
+        // 2026-11-26 报告诉求：判据读不到时"不重发按键、只提示"，不得把
+        // ConsentStore 的 not_observed 当成证据（WeType 3.x 不写它）。
+        assert_eq!(
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::Unavailable,
+                true
+            ),
+            WetypeReaction::Unknown
+        );
+    }
+
+    #[test]
+    fn capture_inactive_still_allows_recovery_when_consentstore_is_unavailable() {
+        // 反面：录音端点可枚举且确认无活动会话时，即使 ConsentStore 读不到，
+        // 也足以判定微信输入法未响应，保留真休眠的自动恢复。
+        assert_eq!(
+            reaction_verdict(MicResponse::Unknown, 7, 7, CaptureEvidence::Inactive, true),
+            WetypeReaction::NotReacted
+        );
+    }
+
+    #[test]
+    fn non_wechat_tools_keep_legacy_mic_verdict() {
+        assert_eq!(
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::NotApplicable,
+                true
+            ),
+            WetypeReaction::NotReacted
+        );
+        assert_eq!(
+            reaction_verdict(
+                MicResponse::Unknown,
+                7,
+                7,
+                CaptureEvidence::NotApplicable,
+                true
+            ),
+            WetypeReaction::Unknown
+        );
+    }
+
+    #[test]
+    fn wetype_process_image_matching_is_name_or_install_dir_and_case_insensitive() {
+        assert!(is_wetype_process_image(
+            r"C:\Program Files\Tencent\WeType\3.0.3.8\wetype_update.exe"
+        ));
+        assert!(is_wetype_process_image(
+            r"C:\Program Files\Tencent\WeType\wetype_server.exe"
+        ));
+        // 未来版本即使换了录音组件名，只要仍在 WeType 安装目录下也应命中。
+        assert!(is_wetype_process_image(
+            r"C:\Program Files\Tencent\WeType\3.1\voice_helper.exe"
+        ));
+        assert!(is_wetype_process_image(r"WETYPE_RENDERER.EXE"));
+        assert!(!is_wetype_process_image(r"C:\Windows\System32\notepad.exe"));
+        assert!(!is_wetype_process_image(r"C:\Tools\notwetype.exe"));
+        assert!(!is_wetype_process_image(""));
     }
 
     #[test]
@@ -603,16 +941,29 @@ mod tests {
         // NotObserved，但钩子层仍看到它的自注入标记（说明它正在工作）。
         // 必须判 Reacted：绝不重放和弦拆掉进行中的会话。
         assert_eq!(
-            reaction_verdict(MicResponse::NotObserved, 7, 9),
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                9,
+                CaptureEvidence::Inactive,
+                true
+            ),
             WetypeReaction::Reacted
         );
     }
 
     #[test]
     fn dormant_hook_without_marker_and_without_mic_opening_stays_recoverable() {
-        // 2026-09-05 真休眠：无标记、无开麦 → NotReacted，恢复阶梯照旧可用。
+        // 2026-09-05 真休眠：无标记、无开麦、录音端点也没有活动会话 →
+        // NotReacted，恢复阶梯照旧可用。
         assert_eq!(
-            reaction_verdict(MicResponse::NotObserved, 7, 7),
+            reaction_verdict(
+                MicResponse::NotObserved,
+                7,
+                7,
+                CaptureEvidence::Inactive,
+                true
+            ),
             WetypeReaction::NotReacted
         );
     }
@@ -621,16 +972,28 @@ mod tests {
     fn marker_evidence_beats_unavailable_mic_observation() {
         // 观测不可用但标记前进：已有正面存活证据，不得报"不可用"。
         assert_eq!(
-            reaction_verdict(MicResponse::Unknown, 7, 8),
+            reaction_verdict(
+                MicResponse::Unknown,
+                7,
+                8,
+                CaptureEvidence::Unavailable,
+                true
+            ),
             WetypeReaction::Reacted
         );
     }
 
     #[test]
     fn unavailable_mic_observation_without_marker_is_never_dormancy() {
-        // 失败安全保持：观测不可用且无标记 → Unknown（调用方不得据此恢复）。
+        // 失败安全保持：所有观测都不可用且无标记 → Unknown（不得恢复）。
         assert_eq!(
-            reaction_verdict(MicResponse::Unknown, 7, 7),
+            reaction_verdict(
+                MicResponse::Unknown,
+                7,
+                7,
+                CaptureEvidence::Unavailable,
+                true
+            ),
             WetypeReaction::Unknown
         );
     }
@@ -638,7 +1001,7 @@ mod tests {
     #[test]
     fn mic_opening_without_marker_is_still_reacted() {
         assert_eq!(
-            reaction_verdict(MicResponse::Observed, 7, 7),
+            reaction_verdict(MicResponse::Observed, 7, 7, CaptureEvidence::Inactive, true),
             WetypeReaction::Reacted
         );
     }
