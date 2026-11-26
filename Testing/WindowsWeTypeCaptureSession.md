@@ -109,6 +109,26 @@ wetype_check skipped reason=observation_unavailable ... capture=unavailable
 
 提交日志前删除个人路径、设备身份、语音内容与转写正文。
 
+## 2026-11-26 原报障机器复测结果
+
+环境：微信输入法 3.0.3.x、RC001、SayAll 1.9.8（`source_revision=44c6a33`）。
+日志：`sayall-diagnostic(11).log`（UTC 2026-11-26 03:50–04:43）。
+
+| 指标 | 1.9.7 | 1.9.8 |
+|---|---:|---:|
+| `wetype_check armed` | 30 | 5 |
+| `reacted=true` | 0 | 5 |
+| `reacted=false` | 27 | 0 |
+| `chord_retry result=ok` | 11 | 0 |
+| `wetype_revive` | 27 | 0 |
+| `voice_heal` | 51 | 0 |
+| `voice_verify` | 38 × `not_reacted` | 9 × `reacted` + 1 × `unknown`（会话已结束） |
+
+5 次会话时长 2.3 / 5.4 / 4.5 / 11.3 / 6.4 秒，全部 `voice_audio_rate result=full`；
+每次均为 `marker_baseline=0`、`marker_extra=0x0`，`evidence=capture capture=active`。
+结论：**长按不再被自动掐断，passed**；15 秒整、闲置 10 分钟后首用、自然真休眠恢复与
+RC003 未在该日志覆盖，仍为 `deferred`。
+
 ## 结果记录模板
 
 ```text
