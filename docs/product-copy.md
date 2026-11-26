@@ -904,3 +904,15 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   只在连续重连且按键接口缺席时出现。落点：`src/lib/usb-port-hint.ts`、
   `src/onboarding/steps/RemoteStep.vue`、`src/pages/ConnectionPage.vue`、
   `src/lib/i18n/en/connection.ts`；日志见 `LOGGING.md` 的 `usb_hint`。
+- 2026-11-26（向导与设置页新增配置帮助入口，Andy 指定）：向导各步左下在「打开日志目录」
+  下方、设置页「首次设置」卡底部（「重新运行设置向导」行下方）各增加一条低强调文字链
+  「配置有问题？扫码关注抖音、小红书，了解教程」；点击打开本机二维码弹窗，标题
+  「配置有问题？」，说明「扫码关注抖音或小红书，查看设置教程。」，两张卡片分别为
+  「抖音 · 无线麦 SayAll.App」「小红书 · 无线麦 App」，各配「用抖音扫一扫」
+  「用小红书扫一扫」，按钮「关闭」。二维码来自本机静态资源 `public/douyin-qr.png` /
+  `public/xhs-qr.png`（由官方账号图裁切），不请求二维码服务。向导入口不参与门禁，
+  任何步骤都可打开；设置页入口不抢占「重新运行向导」的按钮层级，关闭后焦点回到入口，
+  两者都不改变向导步骤、进度或任何设置。落点：
+  `src/components/HelpQrDialog.vue`、`src/pages/OnboardingPage.vue`、
+  `src/pages/SettingsPage.vue`、`src/lib/i18n/en/onboarding.ts`、
+  `Testing/WindowsOnboardingWizard.md`、`Testing/WindowsRC003Preview.md`。

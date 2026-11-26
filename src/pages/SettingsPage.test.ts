@@ -469,6 +469,30 @@ describe("settings page", () => {
     open.mockRestore();
   });
 
+  it("首次设置卡提供「配置有问题？」二维码入口，关闭后焦点回到入口", async () => {
+    const wrapper = mount(SettingsPage, { props: { runtime }, attachTo: document.body });
+    await flushPromises();
+
+    const entry = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "配置有问题？扫码关注抖音、小红书，了解教程");
+    expect(entry).toBeDefined();
+    expect(wrapper.find(".help-qr-dialog").exists()).toBe(false);
+
+    await entry!.trigger("click");
+    expect(wrapper.find(".help-qr-dialog").exists()).toBe(true);
+    expect(wrapper.findAll(".help-qr-card img").map((img) => img.attributes("src"))).toEqual([
+      "/douyin-qr.png",
+      "/xhs-qr.png",
+    ]);
+
+    await wrapper.get(".help-qr-footer button").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".help-qr-dialog").exists()).toBe(false);
+    expect(document.activeElement).toBe(entry!.element);
+    wrapper.unmount();
+  });
+
   it("入口打开失败时就地显示原因而不是静默", async () => {
     const open = vi
       .spyOn(window, "open")
