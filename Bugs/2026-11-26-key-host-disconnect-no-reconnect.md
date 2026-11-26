@@ -63,6 +63,13 @@
 - `cargo test -p sayall-windows --lib -- --test-threads=1`：`641 passed; 0 failed; 22 ignored`。
 - `cargo check --workspace`：passed（仅既有 warning）。
 - `cargo check -p sayall-windows-app --features runtime-simulation`：passed（仅既有 warning）。
+- 安装包（`89c57ed7`）在本机安装后，强制结束 key host 子进程（pid 30644）：
+  `child_exit phase=reader_eof state=exited_-1` →
+  `disconnected result=degraded` →
+  `reconnect_scheduled reason=host_disconnected` →
+  `retry_scheduled attempt=2 delay_ms=500` →
+  `start result=passed pid=34520 attempt=2` →
+  `gateinstalled=1`；随后心跳 `gate_active=1`、`bumps_ok=2`。这是安装版端到端恢复证据，不只是探针。
 - 真机：deferred。需要在受影响机器上看到 `disconnected` 后出现 `reconnect_scheduled`、`attempt=2`、`start result=passed`、`gateinstalled=1`，并确认下一次实体按键实际执行；本机探针不等同于 RC003 真机验收。
 
 ## 隐私检查
