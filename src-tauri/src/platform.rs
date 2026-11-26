@@ -145,6 +145,16 @@ pub trait PlatformRuntime: Debug + Send + Sync {
         }
     }
     fn set_enhanced_capture_enabled(&self, _enabled: bool) {}
+    /// 弹系统授权窗口前的合成键清理（2026-11-26）。
+    ///
+    /// 返回 `false` = 报告层合成的修饰键补发后仍按着，提权窗口将无法输入
+    /// 账号密码，调用方应中止本次授权。默认实现（仿真/其它平台）恒为 `true`。
+    fn release_stuck_synth_before_elevation(&self) -> bool {
+        true
+    }
+    /// 关闭「全按键支持」前的合成键清理：助手即将解除报告层钩子，合成键
+    /// 若仍按着就会永久留在 OS 键态。默认实现为空操作。
+    fn release_stuck_synth_before_capture_stop(&self) {}
     /// 快捷键录入期间临时暂停增强捕获的报告层清键；fail-open，非 Windows 为 no-op。
     fn set_shortcut_capture_suspension(&self, _suspended: bool) {}
     fn button_mapping_snapshot(&self) -> sayall_windows::button_mapping::ButtonMappingSnapshot;
@@ -459,6 +469,14 @@ impl PlatformRuntime for WindowsPlatform {
         // 翻转 mappings.enabled 却不 store 原子量，set_button_mappings 读到恒为
         // false 的原子量，目标集永远为空，按键边沿全部被丢弃。
         WindowsPlatform::set_enhanced_capture_enabled(self, enabled)
+    }
+
+    fn release_stuck_synth_before_elevation(&self) -> bool {
+        WindowsPlatform::release_stuck_synth_before_elevation(self)
+    }
+
+    fn release_stuck_synth_before_capture_stop(&self) {
+        WindowsPlatform::release_stuck_synth_before_capture_stop(self)
     }
 
     fn set_shortcut_capture_suspension(&self, suspended: bool) {

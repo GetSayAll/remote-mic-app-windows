@@ -198,8 +198,24 @@ export default {
   "执行失败，后续步骤已停止": "Failed; remaining steps stopped",
 
   // 「支持更多输入工具」/「全按键支持」开关文案
+  "键盘的 Alt 键还按着，系统授权窗口会无法输入。请按一下再松开 Alt 键，然后重新打开{name}。":
+    "The Alt key is still held down, so the Windows authorization window cannot receive typing. Press and release Alt, then turn {name} on again.",
   "没有完成系统授权，{name}保持关闭。":
     "System authorization was not completed; {name} stays off.",
+  "全按键支持需要管理员账户；请用管理员账户登录这台电脑后再开启。":
+    "Full-key support requires an administrator account. Sign in to this PC with an administrator account, then turn it on.",
+  "当前登录的账号不是管理员；全按键支持需要管理员账户登录后开启，基础语音与其他按键不受影响。":
+    "The current account is not an administrator. Full-key support requires an administrator sign-in; basic voice input and other keys are unaffected.",
+  "返回 / 音量+ / 音量−需要全按键支持；全按键支持需要管理员账户登录后开启。":
+    "Back / Volume+ / Volume− require full-key support, which needs an administrator sign-in.",
+  "“支持更多输入工具”需要管理员账户；请用管理员账户登录这台电脑后再开启。":
+    "\"Support more input tools\" requires an administrator account. Sign in to this PC with an administrator account, then turn it on.",
+  "当前登录的账号不是管理员；“支持更多输入工具”需要管理员账户登录后开启，基础语音与其他按键不受影响。":
+    "The current account is not an administrator. \"Support more input tools\" requires an administrator sign-in; basic voice input and other keys are unaffected.",
+  "全按键支持需要管理员账户登录后开启":
+    "Full-key support needs an administrator sign-in",
+  "开启{name}需要管理员账户登录这台电脑。":
+    "Turning on {name} requires signing in to this PC with an administrator account.",
   "这台电脑暂不支持{name}。": "This PC does not support {name}.",
   "安装包缺少本机需要的组件，{name}暂不可用；请重新安装本版本。":
     "The installer is missing a component this PC needs, so {name} is unavailable. Reinstall this version.",

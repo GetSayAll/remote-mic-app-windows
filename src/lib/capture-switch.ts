@@ -121,6 +121,18 @@ export function captureFailureText(
   const text = (raw ?? "").trim();
   if (!text) return null;
   const subject = localizedName(name);
+  // Alt 坚持再弹授权窗口没有意义：窗口本身会收不到键盘输入。这句必须排在
+  // “授权”分支之前——原文里同时含“系统授权窗口”（2026-11-26）。
+  if (text.includes("Alt")) {
+    return t(
+      "键盘的 Alt 键还按着，系统授权窗口会无法输入。请按一下再松开 Alt 键，然后重新打开{name}。",
+      { name: subject },
+    );
+  }
+  // 标准用户被后端拒绝（防御过期界面）：这句比“授权没完成”更可操作（2026-11-26）。
+  if (text.includes("管理员")) {
+    return t("开启{name}需要管理员账户登录这台电脑。", { name: subject });
+  }
   if (text.includes("授权") || text.includes("UAC") || text.includes("提权")) {
     return t("没有完成系统授权，{name}保持关闭。", { name: subject });
   }

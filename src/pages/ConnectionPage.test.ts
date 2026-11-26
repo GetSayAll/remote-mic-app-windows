@@ -1680,6 +1680,29 @@ describe("connection page capture support unavailable (issue #206)", () => {
     wrapper.unmount();
   });
 
+  it("标准用户（admin_required）：说需要管理员账户，不说成「本机暂不支持」", async () => {
+    // 2026-11-26：标准用户提权要输别的管理员凭据，任务又绑在那个账户的
+    // 登录会话上——入口直接说明，不把人送进凭据窗口。
+    mocks.getCaptureSupport.mockResolvedValue({
+      nativeArch: "x64",
+      helperExpected: "sayall-helper.exe",
+      available: false,
+      reason: "admin_required",
+    });
+    const wrapper = mount(ConnectionPage, { props: { runtime } });
+    await flushPromises();
+
+    const label = wrapper.find('label[for="capture-switch-doubao"]');
+    expect(label.attributes("title")).toBe(
+      "“支持更多输入工具”需要管理员账户；请用管理员账户登录这台电脑后再开启。",
+    );
+    expect(wrapper.find<HTMLInputElement>(".capture-switch").element.disabled).toBe(true);
+    expect(wrapper.text()).toContain(
+      "当前登录的账号不是管理员；“支持更多输入工具”需要管理员账户登录后开启，基础语音与其他按键不受影响。",
+    );
+    wrapper.unmount();
+  });
+
   it("「其他工具」面板的开关同样置灰并说明；说明句与豆包面板一致", async () => {
     mocks.getVoiceInputTool.mockResolvedValue("other");
     const wrapper = mount(ConnectionPage, { props: { runtime } });

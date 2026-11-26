@@ -44,6 +44,22 @@ describe("captureFailureText（失败文案面向普通用户）", () => {
     expect(captureFailureText(raw, NAME)).toBe("没有完成系统授权，全按键支持保持关闭。");
   });
 
+  it("标准用户被后端拒绝：说清需要管理员账户，不归到泛泛的开启失败", () => {
+    const raw =
+      "这台电脑需要管理员账户登录后才能开启全按键支持。基础语音和其他按键不受影响。";
+    expect(captureFailureText(raw, NAME)).toBe(
+      "开启全按键支持需要管理员账户登录这台电脑。",
+    );
+  });
+
+  it("Alt 仍按下：给出可操作的恢复动作，不归到泛泛的授权失败", () => {
+    const raw =
+      "键盘的 Alt 键还处于按下状态，系统授权窗口会无法输入。已尝试自动恢复一次；请再点一次开关，仍不行就退出无线麦后重新打开。";
+    expect(captureFailureText(raw, NAME)).toBe(
+      "键盘的 Alt 键还按着，系统授权窗口会无法输入。请按一下再松开 Alt 键，然后重新打开全按键支持。",
+    );
+  });
+
   it("授权流程里其它失败（提权/计划任务退出码）同样归到系统授权一句", () => {
     expect(captureFailureText("授权未完成（助手注册计划任务失败，退出码 1）。可再次打开重试。", NAME)).toBe(
       "没有完成系统授权，全按键支持保持关闭。",

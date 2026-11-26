@@ -588,51 +588,29 @@ mod voice_effect_verdict_tests {
     }
 }
 
-/// 语音会话结束后是否应该补发右 Alt 抬起（2026-10-23）。
+/// 语音会话结束后是否应该补发合成键抬起。
 ///
-/// 只在三条同时成立时补发：报告层合成生效、目标是豆包、OS 仍认为右 Alt
-/// 按下。纯判定便于单测；真实键态读取与 SendInput 由调度线程执行。
-fn should_release_stuck_voice_synth(
-    report_layer_active: bool,
-    tool: Option<VoiceInputTool>,
-    right_alt_down: bool,
-) -> bool {
-    report_layer_active && tool == Some(VoiceInputTool::Doubao) && right_alt_down
+/// 判据与输入工具无关（2026-11-26）：合成目标是「按住说话快捷键」的
+/// HID usage 决定的，豆包 / Vokie / 「其他工具 → 右 Alt」走的是同一条
+/// 报告层路径；只按豆包补发会让其余工具在释放报告丢失时永久粘住
+/// （修饰键按住 = 任何输入框都打不出字，含系统授权窗口）。
+/// 纯判定便于单测；真实键态读取与 SendInput 由调用方执行。
+fn should_release_stuck_voice_synth(report_layer_active: bool, key_down: bool) -> bool {
+    report_layer_active && key_down
 }
 
 #[cfg(test)]
 mod stuck_voice_synth_tests {
     use super::should_release_stuck_voice_synth;
-    use sayall_core::settings::VoiceInputTool;
 
     #[test]
-    fn releases_only_when_report_layer_doubao_and_key_is_down() {
-        assert!(should_release_stuck_voice_synth(
-            true,
-            Some(VoiceInputTool::Doubao),
-            true
-        ));
-        assert!(!should_release_stuck_voice_synth(
-            false,
-            Some(VoiceInputTool::Doubao),
-            true
-        ));
-        assert!(!should_release_stuck_voice_synth(
-            true,
-            Some(VoiceInputTool::Wechat),
-            true
-        ));
-        assert!(!should_release_stuck_voice_synth(
-            true,
-            Some(VoiceInputTool::Vokie),
-            true
-        ));
-        assert!(!should_release_stuck_voice_synth(true, None, true));
-        assert!(!should_release_stuck_voice_synth(
-            true,
-            Some(VoiceInputTool::Doubao),
-            false
-        ));
+    fn releases_whenever_report_layer_is_active_and_key_is_down() {
+        // 工具无关：合成目标由按住说话快捷键决定，豆包 / Vokie / 未选工具
+        // 都走同一条报告层路径，释放丢失时都必须补发。
+        assert!(should_release_stuck_voice_synth(true, true));
+        assert!(!should_release_stuck_voice_synth(false, true));
+        assert!(!should_release_stuck_voice_synth(true, false));
+        assert!(!should_release_stuck_voice_synth(false, false));
     }
 }
 
@@ -1119,6 +1097,7 @@ fn worker_loop(
                                 session_id,
                                 "语音流已静默但未收到松开通知，已自动结束本次语音".to_owned(),
                                 &usage,
+                                true,
                             );
                             extend_deadline = None;
                             last_voice_audio_at = None;
@@ -2538,6 +2517,19 @@ fn invalidate_connection(
 ) -> Result<(), PlatformError> {
     *connection_generation = connection_generation.wrapping_add(1);
     release_voice_hold_hotkey(send_input, held_hotkey);
+    // 断连/重连时遥控器的 HID 报告已停：报告层合成的修饰键不会再有后续报告
+    // 把它带回抬起态（agent 租约到期只会解除钩子）。这里补一次，避免修饰键
+    // 粘在 OS 键态里（2026-11-26）。
+    let synth_outcome = release_stuck_voice_synth_now(send_input);
+    if synth_outcome.attempted {
+        gatt_note(format!(
+            "voice_synth_release source=connection_reset right_alt={} left_alt={} action=release still_down={} terminal_result={}",
+            synth_outcome.right_alt_before,
+            synth_outcome.left_alt_before,
+            synth_outcome.still_down,
+            if synth_outcome.still_down { "failed" } else { "passed" }
+        ));
+    }
     usage.finish_voice_session();
     let mut cleanup_errors = Vec::new();
     if let Err(error) = audio.interrupt_session() {
@@ -2962,6 +2954,7 @@ fn handle_control(
             stale_session,
             "上一轮语音未收到松开通知，已自动结束并接受新的按下".to_owned(),
             usage,
+            false,
         );
         *last_voice_audio_at = None;
     }
@@ -3227,6 +3220,7 @@ fn handle_control(
                         Some(session_id),
                         format!("按住说话快捷键注入失败：{error}"),
                         usage,
+                        true,
                     );
                     return;
                 }
@@ -3298,6 +3292,7 @@ fn handle_control(
                     Some(session_id),
                     error.to_string(),
                     usage,
+                    true,
                 );
                 return;
             }
@@ -3341,6 +3336,7 @@ fn handle_control(
                     None,
                     error.to_string(),
                     usage,
+                    true,
                 );
                 return;
             }
@@ -3378,7 +3374,6 @@ fn handle_control(
                 Arc::clone(send_input),
                 Arc::clone(voice_session_epoch),
                 generation,
-                *lock(voice_input_tool),
             );
         }
         PipelineOutput::DecoderSynchronized { .. }
@@ -3402,9 +3397,11 @@ fn spawn_voice_synth_guard(
     send_input: Arc<SendInputRuntime>,
     voice_session_epoch: Arc<AtomicU64>,
     generation: u64,
-    tool: Option<VoiceInputTool>,
 ) {
-    if tool != Some(VoiceInputTool::Doubao) || !crate::key_gate::voice_synth_active() {
+    // 工具无关（2026-11-26）：合成目标由「按住说话快捷键」决定，豆包 /
+    // Vokie / 「其他工具 → 右 Alt」同一条路径；只给豆包兜底会让其余工具
+    // 在释放报告丢失时永久粘住修饰键。
+    if !crate::key_gate::voice_synth_active() {
         return;
     }
     let epoch = voice_session_epoch.load(Ordering::SeqCst);
@@ -3418,26 +3415,64 @@ fn spawn_voice_synth_guard(
                 ));
                 return;
             }
-            let report_layer_active = crate::key_gate::voice_synth_active();
-            let key_down = crate::send_input_windows::right_alt_down();
-            if !should_release_stuck_voice_synth(report_layer_active, tool, key_down) {
+            let outcome = release_stuck_voice_synth_now(&send_input);
+            if !outcome.attempted {
                 gatt_note(format!(
-                    "voice_synth_guard generation={generation} epoch={epoch} report_layer={report_layer_active} key_down={key_down} action=none"
+                    "voice_synth_guard generation={generation} epoch={epoch} report_layer={} right_alt={} left_alt={} action=none",
+                    crate::key_gate::voice_synth_active(),
+                    outcome.right_alt_before,
+                    outcome.left_alt_before
                 ));
                 return;
             }
-            let chord = KeyChord {
-                keys: vec![KeyCode::RightAlt],
-            };
-            match send_input.release(&chord) {
-                Ok(_) => gatt_note(format!(
-                    "voice_synth_guard generation={generation} epoch={epoch} report_layer=true key_down=true action=release terminal_result=passed"
-                )),
-                Err(_) => gatt_note(format!(
-                    "voice_synth_guard generation={generation} epoch={epoch} report_layer=true key_down=true action=release terminal_result=failed error_domain=send_input error_code=release_failed retryable=true"
-                )),
-            }
+            gatt_note(format!(
+                "voice_synth_guard generation={generation} epoch={epoch} report_layer=true right_alt={} left_alt={} action=release still_down={} terminal_result={}",
+                outcome.right_alt_before,
+                outcome.left_alt_before,
+                outcome.still_down,
+                if outcome.still_down { "failed" } else { "passed" }
+            ));
         });
+}
+
+/// 一次补发的结果（供松手保险与中止路径共用；日志字段一一对应）。
+struct SynthReleaseOutcome {
+    right_alt_before: bool,
+    left_alt_before: bool,
+    attempted: bool,
+    still_down: bool,
+}
+
+/// 补发报告层合成修饰键的抬起并读回。
+///
+/// 合成白名单是 `0x00E2 → VK_LMENU` / `0x00E6 → VK_RMENU`
+/// （`rc003_bridge::VOICE_SYNTHABLE_USAGES`），所以右/左 Alt 分别判定；
+/// 只有报告层合成门禁为真时才动作，避免碰用户正按住的物理键。
+/// `still_down` 是补发后的 OS 键态读回：SendInput 在提权窗口前台时会被
+/// UIPI 丢弃，那一次补发会失败——调用方必须把这个事实写进日志。
+fn release_stuck_voice_synth_now(send_input: &SendInputRuntime) -> SynthReleaseOutcome {
+    let synth_active = crate::key_gate::voice_synth_active();
+    let right_alt_before = crate::send_input_windows::right_alt_down();
+    let left_alt_before = crate::send_input_windows::left_alt_down();
+    let mut attempted = false;
+    for (key, down) in [
+        (KeyCode::RightAlt, right_alt_before),
+        (KeyCode::LeftAlt, left_alt_before),
+    ] {
+        if !should_release_stuck_voice_synth(synth_active, down) {
+            continue;
+        }
+        attempted = true;
+        let _ = send_input.release(&KeyChord { keys: vec![key] });
+    }
+    let still_down =
+        crate::send_input_windows::right_alt_down() || crate::send_input_windows::left_alt_down();
+    SynthReleaseOutcome {
+        right_alt_before,
+        left_alt_before,
+        attempted,
+        still_down,
+    }
 }
 
 /// 每会话生效增益的日志去重（2026-10-04）：返回 true 表示这一批音频的
@@ -3498,6 +3533,7 @@ fn handle_audio(
             pipeline.session_id(),
             error,
             usage,
+            true,
         );
         return;
     }
@@ -3527,6 +3563,7 @@ fn handle_audio(
                     pipeline.session_id(),
                     error.to_string(),
                     usage,
+                    true,
                 );
                 return;
             }
@@ -3553,8 +3590,26 @@ fn abort_voice_session(
     session_id: Option<u8>,
     error: String,
     usage: &UsageCounters,
+    release_synth: bool,
 ) {
     release_voice_hold_hotkey(send_input, held_hotkey);
+    // 合成路径下 `held_hotkey` 从未赋值（按下被报告层接管），上面那次释放
+    // 对合成键是空操作。中止/音视频失败是终态：立刻补发一次抬起，不能让
+    // 修饰键留到"下一次按下"去赌（2026-10-21 现场：右 Alt 粘住 = 键盘不可用）。
+    // `stream_replaced` 例外：后面紧接新会话，新按下的合成键正被 HID 报告
+    // 保持，此时补发会打断新会话。
+    if release_synth {
+        let outcome = release_stuck_voice_synth_now(send_input);
+        if outcome.attempted {
+            gatt_note(format!(
+                "voice_synth_release source=session_aborted right_alt={} left_alt={} action=release still_down={} terminal_result={}",
+                outcome.right_alt_before,
+                outcome.left_alt_before,
+                outcome.still_down,
+                if outcome.still_down { "failed" } else { "passed" }
+            ));
+        }
+    }
     usage.finish_voice_session();
     if let (Some(connected), Some(capabilities), Some(session_id)) =
         (session.as_mut(), pipeline.capabilities(), session_id)

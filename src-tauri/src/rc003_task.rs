@@ -121,20 +121,27 @@ pub struct CaptureSupport {
     pub helper_expected: String,
     pub available: bool,
     /// `arch_unsupported` = 本机原生架构不属于 x64 / arm64；
-    /// `helper_missing` = 架构对得上，但安装包里没有对应的助手（载荷缺失）。
+    /// `helper_missing` = 架构对得上，但安装包里没有对应的助手（载荷缺失）；
+    /// `admin_required` = 当前登录账号是标准用户：提权要输别的管理员凭据，
+    /// 而任务按 `InteractiveToken` 绑定被提权账户，那个账户不在当前会话里，
+    /// 任务起不来（2026-11-26，见 Bugs/2026-11-26-fullkey-uac-credential-input-blocked.md）。
     pub reason: Option<String>,
 }
 
-/// 可用性判定（纯函数，便于单测覆盖两种不可用原因）。
+/// 可用性判定（纯函数，便于单测覆盖三种不可用原因）。
 pub(crate) fn capture_support_decision(
     arch: sayall_windows::os_arch::NativeArch,
     helper_found: bool,
+    authorization_allowed: bool,
 ) -> (bool, Option<&'static str>) {
     if arch.is_explicitly_unsupported() {
         return (false, Some("arch_unsupported"));
     }
     if !helper_found {
         return (false, Some("helper_missing"));
+    }
+    if !authorization_allowed {
+        return (false, Some("admin_required"));
     }
     (true, None)
 }
@@ -144,7 +151,10 @@ pub(crate) fn capture_support_decision(
 pub fn capture_support() -> CaptureSupport {
     let arch = sayall_windows::os_arch::native_arch();
     let helper_found = locate_helper_exe_for(arch).is_some();
-    let (available, reason) = capture_support_decision(arch, helper_found);
+    let elevation = sayall_windows::user_account::elevation_kind();
+    let authorization_allowed =
+        sayall_windows::user_account::allows_capture_authorization(elevation);
+    let (available, reason) = capture_support_decision(arch, helper_found, authorization_allowed);
     CaptureSupport {
         native_arch: arch.as_str().to_string(),
         helper_expected: arch.helper_file_name().to_string(),
@@ -352,6 +362,10 @@ pub fn enable_capture() -> Result<(), String> {
         ));
         return Err(match support.reason.as_deref() {
             Some("arch_unsupported") => "这台电脑暂不支持全按键支持。".to_string(),
+            Some("admin_required") => {
+                "这台电脑需要管理员账户登录后才能开启全按键支持。基础语音和其他按键不受影响。"
+                    .to_string()
+            }
             _ => "安装包缺少本机需要的组件，全按键支持暂不可用；请重新安装本版本。".to_string(),
         });
     }
@@ -1086,39 +1100,61 @@ mod tests {
         use sayall_windows::os_arch::NativeArch;
         // 不受支持的原生架构（如 32 位 ARM）：无论助手在不在，都判不可用且原因固定
         assert_eq!(
-            capture_support_decision(NativeArch::Other, true),
+            capture_support_decision(NativeArch::Other, true, true),
             (false, Some("arch_unsupported"))
         );
         assert_eq!(
-            capture_support_decision(NativeArch::Other, false),
+            capture_support_decision(NativeArch::Other, false, true),
             (false, Some("arch_unsupported"))
         );
         // 架构对得上但载荷缺失：只有这一种情况算 helper_missing
         assert_eq!(
-            capture_support_decision(NativeArch::X64, false),
+            capture_support_decision(NativeArch::X64, false, true),
             (false, Some("helper_missing"))
         );
         assert_eq!(
-            capture_support_decision(NativeArch::Arm64, false),
+            capture_support_decision(NativeArch::Arm64, false, true),
             (false, Some("helper_missing"))
+        );
+        // 标准用户：架构与载荷都正常也不能开（2026-11-26）
+        assert_eq!(
+            capture_support_decision(NativeArch::X64, true, false),
+            (false, Some("admin_required"))
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::Arm64, true, false),
+            (false, Some("admin_required"))
+        );
+        // 优先报架构/载荷问题：用户先要换机器/重装，不是先换账号
+        assert_eq!(
+            capture_support_decision(NativeArch::Other, false, false).1,
+            Some("arch_unsupported")
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::X64, false, false).1,
+            Some("helper_missing")
         );
         // 正常与"探测失败"都必须可用：探测失败不改既有行为
         assert_eq!(
-            capture_support_decision(NativeArch::X64, true),
+            capture_support_decision(NativeArch::X64, true, true),
             (true, None)
         );
         assert_eq!(
-            capture_support_decision(NativeArch::Arm64, true),
+            capture_support_decision(NativeArch::Arm64, true, true),
             (true, None)
         );
         assert_eq!(
-            capture_support_decision(NativeArch::Unknown, true),
+            capture_support_decision(NativeArch::Unknown, true, true),
             (true, None)
         );
-        // 这两条字符串是前端契约（`reason` 字段），改名即破坏界面判据
+        // 这三条字符串是前端契约（`reason` 字段），改名即破坏界面判据
         assert_eq!(
-            capture_support_decision(NativeArch::Other, false).1,
+            capture_support_decision(NativeArch::Other, false, true).1,
             Some("arch_unsupported")
+        );
+        assert_eq!(
+            capture_support_decision(NativeArch::X64, true, false).1,
+            Some("admin_required")
         );
     }
 

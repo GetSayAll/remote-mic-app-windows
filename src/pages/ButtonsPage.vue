@@ -2033,7 +2033,9 @@ const triKeyCaptureHint = computed(() =>
 );
 const triKeyGatedTitle = computed(() =>
   captureUnsupported.value
-    ? t("返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。")
+    ? captureSupport.value?.reason === "admin_required"
+      ? t("返回 / 音量+ / 音量−需要全按键支持；全按键支持需要管理员账户登录后开启。")
+      : t("返回 / 音量+ / 音量−需要全按键支持；这台电脑暂不支持全按键支持，新版本支持后可配置。")
     : t("{hint}，开启后恢复正常", { hint: triKeyCaptureHint.value }),
 );
 
@@ -2043,10 +2045,14 @@ const triKeyGatedTitle = computed(() =>
  * 用户可见文案的规范来源是 docs/product-copy.md（§2 名称表 / §7 决定索引）。
  */
 const captureUnsupportedTitle = computed(() =>
-  t("全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。"),
+  captureSupport.value?.reason === "admin_required"
+    ? t("全按键支持需要管理员账户；请用管理员账户登录这台电脑后再开启。")
+    : t("全按键支持在这台电脑上暂不可用；新版本支持后会恢复正常。"),
 );
 const captureUnsupportedNote = computed(() =>
-  t("这台电脑暂不支持全按键支持，其他按键不受影响。"),
+  captureSupport.value?.reason === "admin_required"
+    ? t("当前登录的账号不是管理员；全按键支持需要管理员账户登录后开启，基础语音与其他按键不受影响。")
+    : t("这台电脑暂不支持全按键支持，其他按键不受影响。"),
 );
 /**
  * 失败文案（2026-10-10 Andy 定稿）：只有失败才显示；其余情况一个字都不显示。

@@ -43,6 +43,8 @@ export interface SidePanelContext {
   captureEnabled: boolean;
   /** 本机能否使用「全按键支持」（ARM64 等不可用时置灰开关）。 */
   captureAvailable: boolean;
+  /** 不可用原因是否「需要管理员账户」（2026-11-26）：文案不能再说“暂不支持”。 */
+  captureAdminRequired?: boolean;
   vokieRunning: boolean;
   voicePhase: VoiceAttemptState;
   voiceTerminalCode: string | null;
@@ -94,7 +96,14 @@ export function buildSidePanel(step: OnboardingStep, ctx: SidePanelContext): Sid
                 state: ctx.captureEnabled ? "ok" : "pending",
               },
             ]
-          : [{ label: t("这台电脑暂不支持全按键支持"), state: "warn" }],
+          : [
+              {
+                label: ctx.captureAdminRequired
+                  ? t("全按键支持需要管理员账户登录后开启")
+                  : t("这台电脑暂不支持全按键支持"),
+                state: "warn",
+              },
+            ],
       };
 
     case "audio":
