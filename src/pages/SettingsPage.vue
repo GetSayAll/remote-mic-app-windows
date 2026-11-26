@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type {
   AppIconIdentifier,
   AppLanguagePreference,
@@ -17,6 +17,7 @@ import {
 } from "../lib/bridge";
 import DiagnosticsSection from "./settings/DiagnosticsSection.vue";
 import PermissionsSection from "./settings/PermissionsSection.vue";
+import HelpQrDialog from "../components/HelpQrDialog.vue";
 import { appUpdateProgressText, useAppUpdate } from "../lib/app-update";
 import { useTheme } from "../lib/theme";
 import { useLanguage } from "../lib/language";
@@ -161,6 +162,15 @@ const appIconPreview = computed(
 /** 首次设置：重新运行向导（只重置向导进度，不清除设备/映射/音频/其他设置）。 */
 const onboardingBusy = ref(false);
 const onboardingError = ref("");
+
+/** 「配置有问题？」二维码入口：低强调文字链，关闭后把焦点还给入口。 */
+const helpDialogOpen = ref(false);
+const helpEntryRef = ref<HTMLButtonElement | null>(null);
+
+function closeHelpDialog(): void {
+  helpDialogOpen.value = false;
+  void nextTick(() => helpEntryRef.value?.focus());
+}
 
 async function runOnboardingWizard(): Promise<void> {
   if (onboardingBusy.value) return;
@@ -650,11 +660,30 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
           </button>
         </div>
         <p v-if="onboardingError" class="error-text" role="alert">{{ t(onboardingError) }}</p>
+        <button
+          ref="helpEntryRef"
+          class="settings-help-link"
+          type="button"
+          aria-haspopup="dialog"
+          @click="helpDialogOpen = true"
+        >
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2M20 14v2M14 20h6v-2M18 18h2"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <span>{{ t("配置有问题？扫码关注抖音、小红书，了解教程") }}</span>
+        </button>
       </div>
     </section>
 
     <!-- 诊断与日志（2026-10-31 从侧栏「权限」页并入；问题反馈同属这个分类）。 -->
     <DiagnosticsSection />
+    <HelpQrDialog v-if="helpDialogOpen" @close="closeHelpDialog" />
   </section>
 </template>
 
@@ -718,6 +747,33 @@ const ROW_ICONS: Record<string, { strokes: string[]; fills?: string[] }> = {
 .settings-row-text p { margin: 3px 0 0; font-size: 13px; }
 /* 行内错误与行内说明共用左缩进，读起来仍属于上一行。 */
 .settings-group > .error-text { margin: 0 0 8px 50px; }
+
+/* 「配置有问题？」教程入口（2026-11-26）：首次设置卡底部的低强调文字链。
+   不加重申按钮/底色，只保留行内图标与悬停强调，避免和「重新运行向导」抢层级。 */
+.settings-help-link {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-help-link:hover {
+  color: var(--accent-text);
+}
+.settings-help-link svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  margin-top: 2px;
+}
 
 /* 启动行为：对齐 Mac `settings.general.launch_behavior` 右侧两组「文字在上、开关在下」，
    两组之间一条竖分隔线；窗口窄时允许折行，但不挤压左侧说明。 */

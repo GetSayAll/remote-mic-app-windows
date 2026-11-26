@@ -3832,6 +3832,37 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     page.unmount();
   });
 
+  it("标准用户（admin_required）：说需要管理员账户，不说成「这台电脑不支持」", async () => {
+    // 2026-11-26 客户现场：域内标准用户，提权必须输别的管理员凭据，而任务
+    // 绑定被提权账户的登录会话，起不来。界面必须置灰并给出真实原因。
+    vi.mocked(getCaptureSupport).mockResolvedValue({
+      nativeArch: "x64",
+      helperExpected: "sayall-helper.exe",
+      available: false,
+      reason: "admin_required",
+    });
+    const page = await mountPage("rc003");
+    await flushPromises();
+
+    const row = captureRow(page)!;
+    const checkbox = row.find('input[type="checkbox"]');
+    expect((checkbox.element as HTMLInputElement).disabled, "标准用户必须置灰").toBe(true);
+    expect(row.attributes("title")).toBe(
+      "全按键支持需要管理员账户；请用管理员账户登录这台电脑后再开启。",
+    );
+    const note = unavailableNote(page);
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toContain(
+      "当前登录的账号不是管理员；全按键支持需要管理员账户登录后开启，基础语音与其他按键不受影响。",
+    );
+    // 合成事件同样不得弹确认、不得动 IPC。
+    await checkbox.trigger("change");
+    await flushPromises();
+    expect(confirmDialog(page)).toBeUndefined();
+    expect(vi.mocked(enableRc003Capture)).not.toHaveBeenCalled();
+    page.unmount();
+  });
+
   it("三键卡片与格子置灰，悬停提示说清原因（不再写「开启后恢复正常」）", async () => {
     vi.mocked(getCaptureSupport).mockResolvedValue(UNSUPPORTED_CAPTURE);
     const page = await mountPage("rc003");

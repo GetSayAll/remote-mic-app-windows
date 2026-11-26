@@ -82,6 +82,7 @@ import {
 } from "../onboarding/remote-state";
 import { layoutLogDetail, measureOnboardingLayout } from "../onboarding/layout-snapshot";
 import StepSide from "../components/onboarding/StepSide.vue";
+import HelpQrDialog from "../components/HelpQrDialog.vue";
 import {
   createVoiceAttemptTracker,
   isTornVoiceEndFrame,
@@ -107,6 +108,8 @@ const emit = defineEmits<{ completed: [] }>();
 const step = ref<OnboardingStep>("welcome");
 const stateReadFailed = ref(false);
 const saveMessage = ref("");
+// 「配置有问题？」二维码弹窗：只在本页打开/关闭，不写任何状态。
+const helpDialogOpen = ref(false);
 const wizardStartedAt = Math.round(performance.now());
 const completing = ref(false);
 
@@ -539,6 +542,7 @@ const sidePanel = computed(() => {
     hotkeyReady: tool !== null && (tool !== "other" || otherKeys.value !== null),
     captureEnabled: rc003Status.value?.enabled === true,
     captureAvailable: captureSupport.value?.available !== false,
+    captureAdminRequired: captureSupport.value?.reason === "admin_required",
     vokieRunning: vokie.value?.running === true,
     voicePhase: voicePhase.value,
     voiceTerminalCode: voiceStepTerminalCode.value,
@@ -2597,6 +2601,14 @@ async function retryVoiceTest(): Promise<void> {
             >
               {{ logDirectoryButtonText }}
             </button>
+            <button
+              class="onboarding-diagnostics-button"
+              type="button"
+              aria-haspopup="dialog"
+              @click="helpDialogOpen = true"
+            >
+              {{ t("配置有问题？扫码关注抖音、小红书，了解教程") }}
+            </button>
             <span
               v-if="logDirectoryMessage"
               class="onboarding-diagnostics-message"
@@ -2632,6 +2644,7 @@ async function retryVoiceTest(): Promise<void> {
       @confirm="confirmCaptureDialog"
       @close="closeCaptureDialog"
     />
+    <HelpQrDialog v-if="helpDialogOpen" @close="helpDialogOpen = false" />
   </div>
 </template>
 

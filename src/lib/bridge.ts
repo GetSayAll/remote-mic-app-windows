@@ -1518,7 +1518,11 @@ export async function disableRc003Capture(): Promise<Rc003TaskStatus> {
 }
 
 /** 本机无法使用「全按键支持」的原因（`available` 为 false 时一定有值）。 */
-export type CaptureUnsupportedReason = "arch_unsupported" | "helper_missing";
+export type CaptureUnsupportedReason =
+  | "arch_unsupported"
+  | "helper_missing"
+  /** 当前登录账号是标准用户：提权要输别的管理员凭据，而任务绑定那个账户的登录会话，起不来（2026-11-26）。 */
+  | "admin_required";
 
 /**
  * 「全按键支持」在这台电脑上是否可用（2026-10-07 issue #206）。

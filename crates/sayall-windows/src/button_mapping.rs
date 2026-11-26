@@ -806,6 +806,12 @@ pub struct FiredGesture {
     pub trigger: ButtonTrigger,
 }
 
+/// 门控死亡时写入 `last_error` 的固定文案；门控恢复后由 [`snapshot`] 清除。
+///
+/// 只清这一条：其他错误（注入失败、组合动作启动失败等）有各自的重试/处置
+/// 路径，不能因为门控恰好活着就被静默抹掉。
+const GATE_NOT_ALIVE_ERROR: &str = "按键映射门控未运行，已保持观察模式（不注入，避免双输入）";
+
 /// 按键映射运行时快照（UI 状态与诊断）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1155,10 +1161,15 @@ impl ButtonMappingRuntime {
     }
 
     pub fn snapshot(&self) -> ButtonMappingSnapshot {
-        let state = lock_state(&self.state);
-        ButtonMappingSnapshot {
+        let gate_active = key_gate::is_gate_thread_alive();
+        let mut state = lock_state(&self.state);
+        let cleared = gate_active && state.last_error.as_deref() == Some(GATE_NOT_ALIVE_ERROR);
+        if cleared {
+            state.last_error = None;
+        }
+        let snapshot = ButtonMappingSnapshot {
             enabled: read_lock(&self.mappings).enabled,
-            gate_active: key_gate::is_gate_thread_alive(),
+            gate_active,
             listener_active: key_gate::listener_active(),
             swallowed_edges: key_gate::swallowed_edge_count(),
             leaked_downs: key_gate::leaked_down_count(),
@@ -1166,7 +1177,12 @@ impl ButtonMappingRuntime {
             last_fired: state.last_fired,
             last_error: state.last_error.clone(),
             last_focus: self.injector.focus_report(),
+        };
+        drop(state);
+        if cleared {
+            crate::ble::gatt_note("map_error action=cleared reason=gate_recovered".to_owned());
         }
+        snapshot
     }
 
     /// UI「测试」按钮：走与手势分发相同的注入器路径（异步受理，结果见快照）。
@@ -2700,8 +2716,7 @@ fn fire_gesture(
                 mappings.enabled, button, trigger
             ));
             let mut state = lock_state(state);
-            state.last_error =
-                Some("按键映射门控未运行，已保持观察模式（不注入，避免双输入）".to_owned());
+            state.last_error = Some(GATE_NOT_ALIVE_ERROR.to_owned());
         }
         return false;
     }
@@ -4002,6 +4017,61 @@ mod tests {
         assert_eq!(snapshot.active_buttons, Vec::new());
         assert_eq!(snapshot.semantic_edge_count, 2);
         assert_eq!(snapshot.last_button, Some(RemoteButton::Ok));
+    }
+
+    /// 门控恢复后，旧的 `gate_not_alive` 错误必须从快照消失。
+    ///
+    /// 现场（2026-11-26）：按键宿主启动超时，按电源键写入
+    /// `last_error`；之后宿主/门控恢复，页面仍一直显示红字，因为
+    /// `last_error` 没有清除路径。页面同时显示“按键监听已就绪”，
+    /// 形成矛盾状态。
+    #[cfg(windows)]
+    #[test]
+    fn gate_recovery_clears_stale_gate_not_alive_error() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        assert!(
+            !crate::key_gate::is_gate_thread_alive(),
+            "本用例前提是门控未运行"
+        );
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+        );
+        runtime.set_mappings(mappings_with_single(RemoteButton::Ok, KeyCode::Enter));
+
+        let sender = runtime.sender();
+        sender
+            .send(EngineMessage::HidUsages(hid_usages_of(RemoteButton::Ok)))
+            .unwrap();
+        sender
+            .send(EngineMessage::HidUsages(BTreeSet::new()))
+            .unwrap();
+        assert!(
+            wait_until(
+                || runtime.snapshot().last_error.as_deref() == Some(GATE_NOT_ALIVE_ERROR),
+                Duration::from_millis(600)
+            ),
+            "门控死亡时按下应记录 gate_not_alive 错误：{:?}",
+            runtime.snapshot().last_error
+        );
+        assert!(!runtime.snapshot().gate_active);
+
+        // 模拟宿主重试成功、门控钩子重新安装。
+        let gate = crate::key_gate::KeyGate::start();
+        assert!(crate::key_gate::is_gate_thread_alive());
+        let snapshot = runtime.snapshot();
+        assert!(snapshot.gate_active);
+        assert!(
+            snapshot.last_error.is_none(),
+            "门控恢复后旧错误必须清除，实际 {:?}",
+            snapshot.last_error
+        );
+        drop(gate);
     }
 
     /// 切换当前型号立即换用该型号的时间桶，不需要重新写映射。

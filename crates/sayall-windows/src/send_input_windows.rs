@@ -27,12 +27,20 @@ pub struct SendInputRuntime {
     snapshot: Mutex<SendInputSnapshot>,
 }
 
+/// 只读 OS 键态（`GetAsyncKeyState`，不改变状态）。
+///
+/// 供授权前修饰键自检与各类防粘键读回使用；调用方必须在语义上确定"这个键
+/// 是我们可能按下的"--物理按住与注入残留在该 API 上不可区分。
+pub fn key_down(key: KeyCode) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(key.virtual_key())) < 0 }
+}
+
 /// 报告层合成的右 Alt 是否仍在 OS 中保持按下（2026-10-23 语音条卡住现场）。
 ///
 /// 只读 `GetAsyncKeyState`，不改变键态。语音会话结束后用它判定遥控器的 HID
 /// 释放报告是否丢失；调用方只在报告层合成门禁为真时使用，避免误伤物理按键。
 pub fn right_alt_down() -> bool {
-    unsafe { GetAsyncKeyState(i32::from(KeyCode::RightAlt.virtual_key())) < 0 }
+    key_down(KeyCode::RightAlt)
 }
 
 /// 左 Alt 是否仍在系统键态里（应用切换器会话释放后的读回判据）。
@@ -40,7 +48,7 @@ pub fn right_alt_down() -> bool {
 /// 只读 `GetAsyncKeyState`，不改变键态。用 `VK_LMENU` 而不是通用 `VK_MENU`：
 /// 语音键可能按住右 Alt，不能把两者混在一起判断。
 pub fn left_alt_down() -> bool {
-    unsafe { GetAsyncKeyState(i32::from(KeyCode::LeftAlt.virtual_key())) < 0 }
+    key_down(KeyCode::LeftAlt)
 }
 
 impl SendInputRuntime {

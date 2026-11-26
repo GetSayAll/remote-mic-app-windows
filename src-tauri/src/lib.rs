@@ -1875,9 +1875,27 @@ async fn enable_rc003_capture(
     // 尝试与结局都落诊断日志：「UAC 选了否，开关却变成开」这类争议
     // 只能靠这里的记录裁决（2026-09-24 真机争议：日志证明当时 UAC 是
     // 被允许的——任务重建于同一秒，没有日志就只能各说各话）。
-    sayall_windows::gatt_note(
-        "rc003 feature=enhanced-capture action=enable phase=started".to_owned(),
-    );
+    // 提权形态进日志（2026-11-26）：`standard_user` 时下面的 support 检查会
+    // 直接拒绝；这条让"用户点了开关却没弹授权窗口"一次日志可归因。
+    sayall_windows::gatt_note(format!(
+        "rc003 feature=enhanced-capture action=enable phase=started elevation={}",
+        sayall_windows::user_account::elevation_kind().as_str()
+    ));
+    // 授权窗口前的合成键清理（2026-11-26）：提权窗口一旦前台，SendInput 会被
+    // UIPI 丢弃，届时再补发修饰键抬起已经来不及；而修饰键按住会让授权窗口里
+    // 的账号密码输入变成组合键。只在「我们合成的 Alt 补发后仍按着」时中止。
+    if !state.platform.release_stuck_synth_before_elevation() {
+        sayall_windows::gatt_note(
+            "rc003 feature=enhanced-capture action=enable phase=completed terminal_result=failed \
+             error_domain=keyboard_state error_code=synth_key_stuck retryable=true"
+                .to_owned(),
+        );
+        return Err(
+            "键盘的 Alt 键还处于按下状态，系统授权窗口会无法输入。已尝试自动恢复一次；\
+             请再点一次开关，仍不行就退出无线麦后重新打开。"
+                .to_owned(),
+        );
+    }
     // spawn_blocking 带回的是**双层 Result**：外层 JoinError、内层闭包的
     // Result<(), String>。只对外层用 `?` 会把内层错误**静默丢掉**——
     // 真机代价：UAC 取消被正确识别了，命令却照旧报 passed、开关翻成开启
@@ -1933,6 +1951,9 @@ async fn disable_rc003_capture(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<rc003_task::TaskStatus, String> {
+    // 关闭后助手会解除报告层钩子，之后没有任何东西还能改写 HID 报告：
+    // 合成键若仍按着就是永久粘住（修饰键按住 = 键盘打不出字）。先补发一次。
+    state.platform.release_stuck_synth_before_capture_stop();
     // 先恢复旧输入路径，再结束 Helper。即使 Helper 停止失败，其 agent 租约也会
     // fail-open；其它按键不会因为关闭增强能力而跟三键一样变成完全不可用。
     state.platform.set_enhanced_capture_enabled(false);
@@ -8042,6 +8063,23 @@ mod tests {
         }
     }
 
+    /// 2026-11-26 现场：覆盖安装保留旧 WUDFHost Gadget，全键支持永久
+    /// `no_authenticated_agent`；卸载重装（`[TAP] resident=0`）才恢复。
+    /// 安装器必须在覆盖文件后留下升级清理标记，让新助手第一次启动时
+    /// 释放旧宿主/设备环并重建运行时目录。
+    #[test]
+    fn installer_marks_upgrade_for_a_clean_helper_runtime() {
+        let preinstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
+        assert!(
+            preinstall.contains("rc003-upgrade-cleanup"),
+            "覆盖升级必须写 rc003-upgrade-cleanup 标记，和卸载清理走同一条宿主释放路径"
+        );
+        assert!(
+            preinstall.contains("SayAllStopHelper install 0"),
+            "写标记前必须让旧助手退出，避免它继续 attach 旧 tap"
+        );
+    }
+
     /// 2026-10-08 产品决定（用户明确）：**卸载不再弹窗**——删不掉的东西由提权助手先做
     /// 设备环释放锁、再删，仍删不掉的一律安排到重启后自动删除。这条断言防止有人
     /// 再把"未能立即删除"的提示加回来。
@@ -8060,6 +8098,10 @@ mod tests {
         assert!(
             uninstall.contains("--uninstall-cleanup"),
             "卸载必须能拉起提权助手做清理（含需要时的设备环）"
+        );
+        assert!(
+            uninstall.contains("rc003-upgrade-cleanup"),
+            "卸载必须删除一次性的覆盖升级清理标记，避免留给下一次安装"
         );
     }
 

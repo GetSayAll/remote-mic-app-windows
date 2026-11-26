@@ -462,9 +462,16 @@ const captureUnsupported = computed(() => captureSupport.value?.available === fa
  * 本机不可用时的文案（与按键页同一句，名称随本页入口）：
  * 用户可见文案的规范来源是 docs/product-copy.md（§2 名称表 / §7 决定索引）。
  */
-const CAPTURE_UNSUPPORTED_TITLE =
-  "“支持更多输入工具”在这台电脑上暂不可用；新版本支持后会恢复正常。";
-const CAPTURE_UNSUPPORTED_NOTE = "这台电脑暂不支持“支持更多输入工具”，其他按键不受影响。";
+const CAPTURE_UNSUPPORTED_TITLE = computed(() =>
+  captureSupport.value?.reason === "admin_required"
+    ? "“支持更多输入工具”需要管理员账户；请用管理员账户登录这台电脑后再开启。"
+    : "“支持更多输入工具”在这台电脑上暂不可用；新版本支持后会恢复正常。",
+);
+const CAPTURE_UNSUPPORTED_NOTE = computed(() =>
+  captureSupport.value?.reason === "admin_required"
+    ? "当前登录的账号不是管理员；“支持更多输入工具”需要管理员账户登录后开启，基础语音与其他按键不受影响。"
+    : "这台电脑暂不支持“支持更多输入工具”，其他按键不受影响。",
+);
 /** 失败文案里的名称（本页入口名，写法见 docs/product-copy.md §4）。 */
 const CAPTURE_FAILURE_NAME = "“支持更多输入工具”";
 
