@@ -6,6 +6,7 @@
 
 - 鼠标单击/双击参考 AutoHotkey v2 Click 的成对按下/释放行为，不复制其代码或引入依赖；通过 Windows SendInput 单批发送 2/4 个边沿，部分提交时补发释放，不新设双击等待常量。参考： https://www.autohotkey.com/docs/v2/lib/Click.htm 。
 - 鼠标移动使用 Microsoft GetPhysicalCursorPos / SetPhysicalCursorPos；本机 150% 缩放实测发现 DPI-unaware 调用的 37 单位会变成约 56 物理像素，因此为该调用显式设置线程级 PER_MONITOR_AWARE_V2，并用 RAII 恢复原线程上下文。修正后右/左 37、下/上 53 物理像素均通过。参考： https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddpiawarenesscontext 。
+- 连续移动 PoC（issue #407）采用通用的手柄/指针速度积分模型（初速 + 二次缓入 + 亚像素余量），未复制外部实现；会话期间用 Microsoft `timeBeginPeriod` / `timeEndPeriod` 提升计时器精度，最后一帧成对恢复。来源： https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod 。
 - 滚轮动作参考 AutoHotkey v2 的 WheelUp/WheelDown 动作粒度，仅参考行为，不复制实现或依赖 AutoHotkey。来源：`https://github.com/AutoHotkey/AutoHotkeyDocs/blob/v2/docs/lib/Send.htm`。
 - 滚轮使用 Microsoft 公开 SendInput / MOUSEINPUT API：INPUT_MOUSE + MOUSEEVENTF_WHEEL，mouseData 是带符号的滚轮位移；一个刻度为 WHEEL_DELTA（120）。来源：`https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput`。动作是用户可选配置，不绑定固定遥控器按键、不修改默认配置。测试和首按边界见 `Testing/WindowsMouseActions.md`。
 

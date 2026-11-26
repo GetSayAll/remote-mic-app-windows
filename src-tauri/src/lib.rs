@@ -1686,6 +1686,15 @@ fn should_show_main_window_on_startup(
     onboarding_active || completed_update || open_window_at_launch
 }
 
+/// 隐藏（非最小化）窗口也要走 Win32 `SW_RESTORE` 兜底：`window.show()` 只在
+/// tao 缓存可见性有差异时动作；窗口被外部隐藏时缓存仍可能报「可见」，这个调用
+/// 便成为空操作（2026-11-26 现场：托盘点击与二次启动均 `reason=still_hidden`，
+/// `ShowWindow(SW_RESTORE)` 立即恢复）。
+#[cfg(windows)]
+fn needs_win32_restore_after_show(iconic: bool, visible: bool) -> bool {
+    iconic || !visible
+}
+
 /// 把主窗口从「最小化 / 收进托盘」恢复到可见并尝试置前（2026-10-03 用户报障：
 /// 「主窗口最小化到任务栏后，点击托盘图标或者双击快捷键（快捷方式）无法打开」）。
 /// 托盘点击 / 托盘菜单 / 第二个实例的显示请求共用这一个入口。
@@ -1744,7 +1753,21 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
     // 落到屏幕外。仿真构建不做这个动作，保持 CI 的固定窗口尺寸。
     #[cfg(not(feature = "runtime-simulation"))]
     let _ = maximize_main_window_if_work_area_is_small(app, &window, trigger);
-    let _ = window.show();
+    let show_result = window.show();
+    // tao 的 show() 只在缓存可见性有差异时动作；窗口被外部隐藏时缓存可能仍是
+    // 「可见」，show() 变成空操作。按 Win32 真实状态补一次 SW_RESTORE
+    // （2026-11-26 现场：托盘点击/二次启动均报 still_hidden，SW_RESTORE 立即恢复）。
+    let mut win32_restore = "not_needed";
+    if let Some(hwnd) = hwnd {
+        let iconic_after_show = unsafe { IsIconic(hwnd).as_bool() };
+        let visible_after_show = unsafe { IsWindowVisible(hwnd).as_bool() };
+        if needs_win32_restore_after_show(iconic_after_show, visible_after_show) {
+            // ShowWindow 的返回值表示「调用前是否可见」，隐藏窗口必然返回 false，
+            // 不能当成功判据；是否恢复由下面的 Win32 visible_after 决定。
+            let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            win32_restore = "attempted";
+        }
+    }
     let _ = window.set_focus();
 
     // 有界复核：读回 Win32 真实状态（恢复可见是功能判据；前台只是诊断字段）。
@@ -1786,12 +1809,14 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
         None => "unknown",
     };
     sayall_windows::gatt_note(format!(
-        "app_lifecycle event=show_main_window trigger={trigger} phase=completed terminal_result={terminal_result} reason={reason} minimized_before={minimized_before} iconic_before={} visible_before={} iconic_after={} visible_after={} foreground_after={}",
+        "app_lifecycle event=show_main_window trigger={trigger} phase=completed terminal_result={terminal_result} reason={reason} minimized_before={minimized_before} iconic_before={} visible_before={} iconic_after={} visible_after={} foreground_after={} show_ok={} win32_restore={}",
         flag(iconic_before),
         flag(visible_before),
         flag(iconic_after),
         flag(visible_after),
         flag(foreground_after),
+        show_result.is_ok(),
+        win32_restore,
     ));
 }
 
@@ -7354,6 +7379,17 @@ mod tests {
         assert!(!should_show_main_window_on_startup(false, false, false));
         // 已完成向导 + 本次启动前刚完成更新：开关关着也必须显示（Mac 同款）。
         assert!(should_show_main_window_on_startup(false, true, false));
+    }
+
+    /// 外部隐藏（非最小化）后 `window.show()` 可能因 tao 缓存仍报「可见」而空操作；
+    /// 必须用 Win32 `SW_RESTORE` 兜底。2026-11-26 现场：托盘点击与二次启动均
+    /// `reason=still_hidden`，补 `SW_RESTORE` 后恢复可见。
+    #[test]
+    #[cfg(windows)]
+    fn hidden_main_window_needs_win32_restore_even_when_not_iconic() {
+        assert!(needs_win32_restore_after_show(false, false));
+        assert!(needs_win32_restore_after_show(true, true));
+        assert!(!needs_win32_restore_after_show(false, true));
     }
 
     #[test]

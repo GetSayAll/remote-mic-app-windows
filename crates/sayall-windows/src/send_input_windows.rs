@@ -134,48 +134,24 @@ impl SendInputRuntime {
         ));
         let result = (|| {
             let (dx, dy) = direction.offset(distance)?;
-            // Even physical-cursor APIs are virtualized for unaware callers on this host.
-            // Scope DPI awareness to this call and restore the worker thread afterwards.
-            //
-            // 先前上下文必须用 GetThreadDpiAwarenessContext 读取：它与“是否未设置过”
-            // 无关，永远返回有效句柄；而 SetThreadDpiAwarenessContext 的返回值只在
-            // 失败时为 NULL，把它当“先前值”会在该线程从未显式设置过上下文时误判失败。
-            let previous = unsafe { GetThreadDpiAwarenessContext() };
-            if previous.0.is_null() {
-                return Err(SendInputError::Backend(
-                    "cannot read thread DPI awareness context".into(),
-                ));
-            }
-            let switched =
-                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-            if switched.0.is_null() {
-                return Err(SendInputError::Backend(
-                    "cannot establish physical cursor coordinate context".into(),
-                ));
-            }
-            struct DpiGuard(DPI_AWARENESS_CONTEXT);
-            impl Drop for DpiGuard {
-                fn drop(&mut self) {
-                    unsafe {
-                        SetThreadDpiAwarenessContext(self.0);
-                    }
+            with_physical_cursor_context(|| {
+                let mut point = POINT::default();
+                unsafe { GetPhysicalCursorPos(&mut point) }
+                    .map_err(|e| SendInputError::Backend(e.to_string()))?;
+                unsafe {
+                    SetPhysicalCursorPos(point.x.saturating_add(dx), point.y.saturating_add(dy))
                 }
-            }
-            let _dpi = DpiGuard(previous);
-            let mut point = POINT::default();
-            unsafe { GetPhysicalCursorPos(&mut point) }
                 .map_err(|e| SendInputError::Backend(e.to_string()))?;
-            unsafe { SetPhysicalCursorPos(point.x.saturating_add(dx), point.y.saturating_add(dy)) }
-                .map_err(|e| SendInputError::Backend(e.to_string()))?;
-            let mut after = POINT::default();
-            if unsafe { GetPhysicalCursorPos(&mut after) }.is_ok() {
-                crate::ble::gatt_note(format!(
-                    "mouse_move phase=observed moved_x={} moved_y={}",
-                    i64::from(after.x) - i64::from(point.x),
-                    i64::from(after.y) - i64::from(point.y)
-                ));
-            }
-            Ok(1)
+                let mut after = POINT::default();
+                if unsafe { GetPhysicalCursorPos(&mut after) }.is_ok() {
+                    crate::ble::gatt_note(format!(
+                        "mouse_move phase=observed moved_x={} moved_y={}",
+                        i64::from(after.x) - i64::from(point.x),
+                        i64::from(after.y) - i64::from(point.y)
+                    ));
+                }
+                Ok(1)
+            })
         })();
         crate::ble::gatt_note(format!(
             "mouse_move phase=completed direction={direction:?} terminal_result={} elapsed_ms={}",
@@ -187,6 +163,44 @@ impl SendInputRuntime {
             started.elapsed().as_millis()
         ));
         self.record(result, "SetPhysicalCursorPos")
+    }
+
+    /// 连续移动的一帧：按物理像素增量移动光标，返回实际位移。
+    ///
+    /// 与 [`Self::mouse_move`] 共用 DPI 上下文与物理坐标口径，但**不逐帧写日志**
+    /// —— 连续移动的日志由 `button_mapping` 按会话聚合；这里只在失败时通过
+    /// [`Self::record`] 留下快照错误。
+    pub fn mouse_move_by(&self, dx: i32, dy: i32) -> Result<(i32, i32), PlatformError> {
+        if dx == 0 && dy == 0 {
+            return Ok((0, 0));
+        }
+        let result: Result<(i32, i32), SendInputError> = with_physical_cursor_context(|| {
+            let mut point = POINT::default();
+            unsafe { GetPhysicalCursorPos(&mut point) }
+                .map_err(|e| SendInputError::Backend(e.to_string()))?;
+            unsafe { SetPhysicalCursorPos(point.x.saturating_add(dx), point.y.saturating_add(dy)) }
+                .map_err(|e| SendInputError::Backend(e.to_string()))?;
+            let mut after = POINT::default();
+            let observed = if unsafe { GetPhysicalCursorPos(&mut after) }.is_ok() {
+                (
+                    (i64::from(after.x) - i64::from(point.x)) as i32,
+                    (i64::from(after.y) - i64::from(point.y)) as i32,
+                )
+            } else {
+                (dx, dy)
+            };
+            Ok(observed)
+        });
+        match result {
+            Ok(observed) => {
+                self.record(Ok(1), "SetPhysicalCursorPos")?;
+                Ok(observed)
+            }
+            Err(error) => match self.record(Err(error), "SetPhysicalCursorPos") {
+                Ok(_) => unreachable!("record(Err) returned Ok"),
+                Err(platform_error) => Err(platform_error),
+            },
+        }
     }
 
     /// 把物理光标移到指定点并左键单击一次（「按记录位置聚焦」用）。
@@ -350,6 +364,39 @@ impl Default for SendInputRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 在 Per-Monitor V2 物理坐标上下文里执行一次光标操作，结束后恢复线程上下文。
+///
+/// 先前上下文必须用 `GetThreadDpiAwarenessContext` 读取：它与“是否未设置过”
+/// 无关，永远返回有效句柄；而 `SetThreadDpiAwarenessContext` 的返回值只在失败
+/// 时为 NULL，把它当“先前值”会在该线程从未显式设置过上下文时误判失败。
+fn with_physical_cursor_context<T>(
+    action: impl FnOnce() -> Result<T, SendInputError>,
+) -> Result<T, SendInputError> {
+    let previous = unsafe { GetThreadDpiAwarenessContext() };
+    if previous.0.is_null() {
+        return Err(SendInputError::Backend(
+            "cannot read thread DPI awareness context".into(),
+        ));
+    }
+    let switched =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    if switched.0.is_null() {
+        return Err(SendInputError::Backend(
+            "cannot establish physical cursor coordinate context".into(),
+        ));
+    }
+    struct DpiGuard(DPI_AWARENESS_CONTEXT);
+    impl Drop for DpiGuard {
+        fn drop(&mut self) {
+            unsafe {
+                SetThreadDpiAwarenessContext(self.0);
+            }
+        }
+    }
+    let _dpi = DpiGuard(previous);
+    action()
 }
 
 fn real_send_input_batch(events: &[PlannedKeyEvent]) -> Result<usize, String> {

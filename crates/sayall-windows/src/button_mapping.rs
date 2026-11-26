@@ -36,6 +36,9 @@ use serde::Serialize;
 use crate::app_switcher::{self, AppSwitcherCommand, AppSwitcherIo, AppSwitcherSession, EndReason};
 use crate::button_gestures::GestureRecognizer;
 use crate::key_gate;
+use crate::pointer_motion::{
+    self, MotionBegin, MotionEnd, MotionProgress, MotionStart, MotionTickOutcome, PointerMotion,
+};
 use crate::raw_input::{
     ButtonEdge, ButtonStateMerger, RawInputSnapshot, RawKeyboardEvent, RemoteButton,
 };
@@ -262,6 +265,12 @@ pub trait MappingInjector: Send + Sync {
     }
     fn mouse_click(&self, kind: MouseClickKind) -> Result<(), String>;
     fn mouse_move(&self, direction: MoveDirection, distance: u16) -> Result<(), String>;
+    /// 连续移动的一帧：按物理像素增量移动并返回实际位移。
+    ///
+    /// 默认实现失败：不支持增量移动的平台不得静默降级为整步移动。
+    fn mouse_move_by(&self, _dx: i32, _dy: i32) -> Result<(i32, i32), String> {
+        Err("当前平台不支持连续鼠标移动".to_owned())
+    }
     /// 打开/激活预设应用（生产实现调用 app_launcher）。
     fn launch_app(&self, target: &str) -> Result<(), String>;
     /// 聚焦当前前台应用的可编辑输入框。
@@ -439,6 +448,12 @@ impl MappingInjector for SendInputInjector {
         self.runtime
             .mouse_move(direction, distance)
             .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn mouse_move_by(&self, dx: i32, dy: i32) -> Result<(i32, i32), String> {
+        self.runtime
+            .mouse_move_by(dx, dy)
             .map_err(|error| error.to_string())
     }
 
@@ -942,6 +957,29 @@ impl ButtonMappingRuntime {
         snapshot: Arc<Mutex<RawInputSnapshot>>,
         macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
     ) -> Self {
+        Self::new_inner(injector, usage, snapshot, macro_runtime, None)
+    }
+
+    /// 测试专用：显式开启/关闭指针连续移动 PoC，绕过环境变量与 `cfg(test)`
+    /// 的默认关闭（否则无法验证「按住 → 多帧移动 → 松手停止」的引擎接线）。
+    #[cfg(test)]
+    fn new_with_pointer_motion(
+        injector: Arc<dyn MappingInjector>,
+        usage: Arc<UsageCounters>,
+        snapshot: Arc<Mutex<RawInputSnapshot>>,
+        macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
+        enabled: bool,
+    ) -> Self {
+        Self::new_inner(injector, usage, snapshot, macro_runtime, Some(enabled))
+    }
+
+    fn new_inner(
+        injector: Arc<dyn MappingInjector>,
+        usage: Arc<UsageCounters>,
+        snapshot: Arc<Mutex<RawInputSnapshot>>,
+        macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
+        pointer_motion_override: Option<bool>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         // 门控把被吞键盘边沿直接投递到引擎通道（钩子线程闭包投递，无阻塞）。
         key_gate::set_edge_sink(Arc::new({
@@ -1010,6 +1048,7 @@ impl ButtonMappingRuntime {
                         injector,
                         usage,
                         macro_runtime,
+                        pointer_motion_override,
                     )
                 }
             })
@@ -1313,6 +1352,100 @@ fn finish_all_repeat_runs(repeat_runs: &mut RepeatRuns, reason: &str) {
     }
 }
 
+/// 连续移动 PoC 的会话日志。逐帧 tick 不写日志，只落开始/结束/每秒进度/错误，
+/// 避免 8ms 级调用把诊断文件刷爆（`gatt_note` 每次重开文件）。
+fn note_motion_start(start: &MotionStart) {
+    crate::ble::gatt_note(format!(
+        "mouse_motion phase=start source=poc button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} fine_ms={} accel_ms={} tick_ms={}",
+        start.button,
+        start.direction,
+        start.distance,
+        start.base_speed,
+        start.max_speed,
+        start.fine.as_millis(),
+        start.accel.as_millis(),
+        start.tick.as_millis()
+    ));
+    if start.timer_started {
+        match &start.timer_result {
+            Some(error) => crate::ble::gatt_note(format!(
+                "mouse_motion timer=begin period_ms=1 result=failed reason={error}"
+            )),
+            None => {
+                crate::ble::gatt_note("mouse_motion timer=begin period_ms=1 result=ok".to_owned())
+            }
+        }
+    }
+}
+
+fn note_motion_end(end: &MotionEnd) {
+    let error = end
+        .error
+        .as_ref()
+        .map(|error| format!(" error_domain=send_input error={error}"))
+        .unwrap_or_default();
+    crate::ble::gatt_note(format!(
+        "mouse_motion phase=end source=poc button={:?} direction={:?} reason={} duration_ms={} ticks={} requested_px={:.1} observed_px={:.1} peak_px_s={:.1} dropped_ms={} errors={} moved={}{}",
+        end.button,
+        end.direction,
+        end.reason,
+        end.duration.as_millis(),
+        end.ticks,
+        end.requested_px,
+        end.observed_px,
+        end.peak_speed,
+        end.dropped_ms,
+        end.errors,
+        end.moved,
+        error
+    ));
+    if end.timer_ended {
+        crate::ble::gatt_note("mouse_motion timer=end period_ms=1 result=ok".to_owned());
+    }
+}
+
+fn note_motion_progress(progress: &MotionProgress) {
+    crate::ble::gatt_note(format!(
+        "mouse_motion phase=progress source=poc button={:?} direction={:?} duration_ms={} ticks={} speed_px_s={:.1} requested_px={:.1} observed_px={:.1}",
+        progress.button,
+        progress.direction,
+        progress.elapsed.as_millis(),
+        progress.ticks,
+        progress.speed,
+        progress.requested_px,
+        progress.observed_px
+    ));
+}
+
+fn note_motion_outcome(outcome: MotionTickOutcome) {
+    for progress in &outcome.progress {
+        note_motion_progress(progress);
+    }
+    for end in &outcome.ended {
+        note_motion_end(end);
+    }
+}
+
+fn note_motion_ends(ends: &[MotionEnd]) {
+    for end in ends {
+        note_motion_end(end);
+    }
+}
+
+/// 收口连续移动会话（断连、睡眠、退出、配置变化等路径共用）。
+fn stop_pointer_motion(
+    pointer_motion: &mut PointerMotion,
+    injector: &Arc<dyn MappingInjector>,
+    reason: &'static str,
+) {
+    let ends = pointer_motion.release_all(
+        Instant::now(),
+        |dx, dy| injector.mouse_move_by(dx, dy),
+        reason,
+    );
+    note_motion_ends(&ends);
+}
+
 /// 应用切换器会话收尾：写终态日志、清门控遮蔽，并在 Alt 未释放时留下错误状态。
 ///
 /// 每次引擎调用会话后都要调用一次；`EndReport` 每个终态只产生一次。
@@ -1418,6 +1551,7 @@ fn engine_worker(
     injector: Arc<dyn MappingInjector>,
     usage: Arc<UsageCounters>,
     macro_runtime: Arc<crate::macro_runtime::MacroRuntime>,
+    pointer_motion_override: Option<bool>,
 ) {
     let mut merger = ButtonStateMerger::default();
     let mut recognizer = GestureRecognizer::new();
@@ -1443,11 +1577,44 @@ fn engine_worker(
     // 方向键按住：按下/释放/长按阈值都由本表配对，配置变化与设备移除统一补释放。
     let mut directional_holds = DirectionalHolds::default();
     directional_holds.set_long_press(initial_timing.long_press_threshold());
+    // 鼠标连续移动 PoC（issue #407）：默认关闭，SAYALL_POINTER_MOTION=1 启用。
+    // 只接管方向键的 mouse_move + 已开启连续执行的路径；其余行为不变。
+    // 单测里强制关闭：避免开发者环境变量让引擎用例走真实计时/注入分支。
+    let pointer_motion_enabled = pointer_motion_override
+        .unwrap_or_else(|| !cfg!(test) && pointer_motion::poc_enabled_from_env());
+    let mut pointer_motion = PointerMotion::new(pointer_motion_enabled);
+    crate::ble::gatt_note(format!(
+        "mouse_motion config source=poc enabled={} tick_ms={} base_px_s_per_unit={:.1} max_multiplier={:.1} max_px_s={:.1} fine_ms={} accel_ms={} max_session_ms={}",
+        pointer_motion.enabled(),
+        pointer_motion::TICK.as_millis(),
+        pointer_motion::BASE_SPEED_PER_UNIT,
+        pointer_motion::MAX_SPEED_MULTIPLIER,
+        pointer_motion::MAX_SPEED,
+        pointer_motion::FINE.as_millis(),
+        pointer_motion::ACCEL.as_millis(),
+        pointer_motion::MAX_SESSION.as_millis()
+    ));
 
     loop {
         // 消息密集时 recv_timeout 可能一直不超时；在每条消息前补一次会话心跳，
         // 保证 15 秒自动取消与切换器存在性轮询不会因为消息不断而饿死。
         let now = Instant::now();
+        // 门控线程消失时释放沿可能不再到达；与 `fire_gesture` 的注入护栏一致，
+        // 立即结束连续移动，避免光标继续跑。
+        if pointer_motion.has_active() && !key_gate::is_gate_thread_alive() {
+            stop_pointer_motion(&mut pointer_motion, &injector, "gate_not_alive");
+        }
+        // 连续移动的计时器与消息无关：每条消息前先补拍，消息密集时不饿死。
+        if pointer_motion
+            .next_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            let outcome = pointer_motion.tick(now, |dx, dy| injector.mouse_move_by(dx, dy));
+            if outcome.moved {
+                last_remote_move_at = Some(now);
+            }
+            note_motion_outcome(outcome);
+        }
         if app_switcher
             .next_deadline()
             .is_some_and(|deadline| deadline <= now)
@@ -1467,6 +1634,7 @@ fn engine_worker(
             recognizer.next_deadline(),
             app_switcher.next_deadline(),
             directional_holds.next_deadline(),
+            pointer_motion.next_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -1490,6 +1658,8 @@ fn engine_worker(
                     let (fired, ticks) = recognizer.advance_with_ticks(now);
                     note_advance_ticks(&mut repeat_runs, ticks);
                     for (button, trigger) in fired {
+                        let continuous = recognizer.is_pressed(button)
+                            && recognizer.repeats_slot(button, trigger);
                         if fire_gesture(
                             button,
                             trigger,
@@ -1501,6 +1671,8 @@ fn engine_worker(
                             &injector,
                             &mut native_pending,
                             &mut last_remote_move_at,
+                            &mut pointer_motion,
+                            continuous,
                             &macro_runtime,
                             &mut app_switcher,
                         ) {
@@ -1518,6 +1690,8 @@ fn engine_worker(
                                 &snapshot,
                                 &edge_callbacks,
                                 &mut native_pending,
+                                &injector,
+                                &mut pointer_motion,
                             );
                             break;
                         }
@@ -1547,6 +1721,7 @@ fn engine_worker(
                         &state,
                         "engine_stopped",
                     );
+                    stop_pointer_motion(&mut pointer_motion, &injector, "engine_stopped");
                     finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                     break;
                 }
@@ -1564,6 +1739,7 @@ fn engine_worker(
                         &state,
                         "engine_stopped",
                     );
+                    stop_pointer_motion(&mut pointer_motion, &injector, "engine_stopped");
                     finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                     break;
                 }
@@ -1600,6 +1776,7 @@ fn engine_worker(
                     &macro_runtime,
                     &mut app_switcher,
                     &mut directional_holds,
+                    &mut pointer_motion,
                 );
             }
             EngineMessage::HidUsages(usages) => {
@@ -1625,6 +1802,7 @@ fn engine_worker(
                     &macro_runtime,
                     &mut app_switcher,
                     &mut directional_holds,
+                    &mut pointer_motion,
                 );
             }
             EngineMessage::GateEdge(edge) => {
@@ -1654,6 +1832,7 @@ fn engine_worker(
                     &macro_runtime,
                     &mut app_switcher,
                     &mut directional_holds,
+                    &mut pointer_motion,
                 );
             }
             EngineMessage::ListenerStopped | EngineMessage::DeviceRemoved => {
@@ -1682,6 +1861,8 @@ fn engine_worker(
                     &state,
                     reason,
                 );
+                stop_pointer_motion(&mut pointer_motion, &injector, reason);
+                last_remote_move_at = None;
                 // 释放全部按住状态：取消所有手势计时，不触发动作。
                 recognizer.release_all();
                 let edges = merger.release_all();
@@ -1708,6 +1889,7 @@ fn engine_worker(
                     &macro_runtime,
                     &mut app_switcher,
                     &mut directional_holds,
+                    &mut pointer_motion,
                 );
                 // 认领集合无需在此显式清理：被认领的按住都在上面 release_all
                 // 产生的释放边沿里配对消费并移出（见 handle_edges 释放分支）。
@@ -1732,6 +1914,7 @@ fn engine_worker(
                     &state,
                     "reconfigure",
                 );
+                stop_pointer_motion(&mut pointer_motion, &injector, "reconfigure");
                 recognizer.configure_with_timing(&merged, timing);
                 directional_holds.set_long_press(timing.long_press_threshold());
                 // 配置变化重置全部手势状态：挂起的泄漏对冲标记一并失效。
@@ -1766,6 +1949,8 @@ fn engine_worker(
                         &state,
                         "suspended",
                     );
+                    stop_pointer_motion(&mut pointer_motion, &injector, "suspended");
+                    last_remote_move_at = None;
                 }
                 // 暂挂边界必须丢弃手势计时。否则学习最后一下若被识别为单击，
                 // 双击窗会在解除暂挂后补发一次单击（2026-11-24 现场：学完长按
@@ -1780,6 +1965,9 @@ fn engine_worker(
                 if app_switcher.cancel(EndReason::VoiceStarted, Instant::now(), &io) {
                     drain_app_switcher_end(&mut app_switcher, &state);
                 }
+                // 按住方向键的同时开始语音时停止光标移动，避免说话时指针乱跑；
+                // 释放沿仍由 handle_edges 幂等消费。
+                stop_pointer_motion(&mut pointer_motion, &injector, "voice_started");
             }
             EngineMessage::StartAppSwitcher => {
                 if lock_state(&state).suspended {
@@ -1843,6 +2031,7 @@ fn engine_worker(
                     &state,
                     "shutdown",
                 );
+                stop_pointer_motion(&mut pointer_motion, &injector, "shutdown");
                 // 显式关闭同样要补齐进行中的连续触发聚合日志（评审发现 2）。
                 finish_all_repeat_runs(&mut repeat_runs, "shutdown");
                 break;
@@ -2159,6 +2348,7 @@ fn handle_edges(
     macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
     app_switcher: &mut AppSwitcherSession,
     directional_holds: &mut DirectionalHolds,
+    pointer_motion: &mut PointerMotion,
 ) {
     if edges.is_empty() {
         return;
@@ -2329,6 +2519,19 @@ fn handle_edges(
                 }
             }
         } else {
+            // PoC：释放沿先停连续移动，且必须在任何 continue 之前配对，
+            // 避免被切换器/方向键按住/常用语面板消费后留下移动会话。
+            if let Some(end) = pointer_motion.release(
+                edge.button,
+                now,
+                |dx, dy| injector.mouse_move_by(dx, dy),
+                "release",
+            ) {
+                if end.moved {
+                    *last_remote_move_at = Some(now);
+                }
+                note_motion_end(&end);
+            }
             // 释放沿：应用切换器会话认领过的按下必须配对消费（即使会话已在
             // 按下沿结束，例如 OK 确认 / 返回取消）。
             if directional_holds.contains(edge.button) {
@@ -2367,6 +2570,9 @@ fn handle_edges(
             finish_repeat_run(repeat_runs, edge.button, "release");
         }
         for trigger in fired {
+            let continuous = edge.is_pressed
+                && recognizer.is_pressed(edge.button)
+                && recognizer.repeats_slot(edge.button, trigger);
             if fire_gesture(
                 edge.button,
                 trigger,
@@ -2378,6 +2584,8 @@ fn handle_edges(
                 injector,
                 native_pending,
                 last_remote_move_at,
+                pointer_motion,
+                continuous,
                 macro_runtime,
                 app_switcher,
             ) {
@@ -2395,6 +2603,8 @@ fn handle_edges(
                     snapshot,
                     edge_callbacks,
                     native_pending,
+                    injector,
+                    pointer_motion,
                 );
                 return;
             }
@@ -2413,7 +2623,16 @@ fn reset_after_terminal_action(
     snapshot: &Arc<Mutex<RawInputSnapshot>>,
     edge_callbacks: &Arc<RwLock<Vec<ButtonEdgeCallback>>>,
     native_pending: &mut BTreeSet<RemoteButton>,
+    injector: &Arc<dyn MappingInjector>,
+    pointer_motion: &mut PointerMotion,
 ) {
+    // 终端动作（如锁屏）先停连续移动，迟到的释放沿只作幂等输入。
+    let motion_ends = pointer_motion.release_all(
+        Instant::now(),
+        |dx, dy| injector.mouse_move_by(dx, dy),
+        "terminal_action",
+    );
+    note_motion_ends(&motion_ends);
     recognizer.release_all();
     let releases = merger.release_all();
     native_pending.clear();
@@ -2468,6 +2687,8 @@ fn fire_gesture(
     injector: &Arc<dyn MappingInjector>,
     native_pending: &mut BTreeSet<RemoteButton>,
     last_remote_move_at: &mut Option<Instant>,
+    pointer_motion: &mut PointerMotion,
+    continuous: bool,
     macro_runtime: &Arc<crate::macro_runtime::MacroRuntime>,
     app_switcher: &mut AppSwitcherSession,
 ) -> bool {
@@ -2650,6 +2871,19 @@ fn fire_gesture(
             direction,
             distance,
         } => {
+            // PoC：方向键 + 已开启连续执行时，按住过程交给速度积分管理器；
+            // 首次触发建立会话，后续重复拍直接忽略（会话自己的 8ms ticker 在跑）。
+            if continuous && pointer_motion::is_direction_button(button) {
+                match pointer_motion.begin(button, direction, distance, now) {
+                    MotionBegin::Started(start) => {
+                        note_motion_start(&start);
+                        return false;
+                    }
+                    MotionBegin::AlreadyActive | MotionBegin::Suppressed => return false,
+                    // PoC 未启用：回退旧行为（下面照常落 map_fire + 单步移动）。
+                    MotionBegin::Disabled => {}
+                }
+            }
             crate::ble::gatt_note(format!(
                 "map_fire button={button:?} trigger={trigger:?} action=mouse_move direction={direction:?} distance={distance}"
             ));
@@ -3025,6 +3259,7 @@ mod tests {
         scrolls: StdMutex<Vec<(ScrollDirection, u16)>>,
         clicks: StdMutex<Vec<MouseClickKind>>,
         moves: StdMutex<Vec<(MoveDirection, u16)>>,
+        moves_by: StdMutex<Vec<(i32, i32)>>,
         focus_requests: StdMutex<Vec<FocusCall>>,
         learn_results: StdMutex<Vec<Result<crate::focus::RecordedFocusTarget, String>>>,
         /// 常用语组件槽：测试独立注入，不碰进程级槽位（避免用例间互相污染）。
@@ -3086,6 +3321,14 @@ mod tests {
             }
             self.moves.lock().unwrap().push((direction, distance));
             Ok(())
+        }
+
+        fn mouse_move_by(&self, dx: i32, dy: i32) -> Result<(i32, i32), String> {
+            if self.fail {
+                return Err("mouse move by failed (test)".to_owned());
+            }
+            self.moves_by.lock().unwrap().push((dx, dy));
+            Ok((dx, dy))
         }
 
         fn tap(&self, chord: &KeyChord) -> Result<(), String> {
@@ -5151,6 +5394,65 @@ mod tests {
 
         drop(runtime);
         drop(gate);
+    }
+
+    #[test]
+    fn direction_mouse_move_ticks_until_release() {
+        let _gate_lock = crate::key_gate::lock_gate_tests();
+        let _gate = crate::key_gate::KeyGate::start();
+        let injector = Arc::new(RecordingInjector::default());
+        let runtime = ButtonMappingRuntime::new_with_pointer_motion(
+            Arc::clone(&injector) as Arc<dyn MappingInjector>,
+            Arc::new(UsageCounters::default()),
+            Arc::new(StdMutex::new(RawInputSnapshot::default())),
+            Arc::new(crate::macro_runtime::MacroRuntime::new(Arc::new(
+                crate::macro_runtime::UnsupportedStepperSource,
+            ))),
+            true,
+        );
+        let mut mappings = ButtonMappings::default();
+        mappings.actions.insert(
+            RemoteButton::Right,
+            ButtonActions {
+                single: ButtonAction::MouseMove {
+                    direction: MoveDirection::Right,
+                    distance: 20,
+                },
+                hold_repeat: Some(ButtonTrigger::Single),
+                ..ButtonActions::default()
+            },
+        );
+        runtime.set_mappings(mappings);
+        let sender = runtime.sender();
+        let moved = || injector.moves_by.lock().unwrap().clone();
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Right,
+                is_pressed: true,
+            }))
+            .unwrap();
+        assert!(
+            wait_until(|| moved().len() >= 3, Duration::from_millis(2000)),
+            "按住方向键应产生多帧连续移动，实际 {:?}",
+            moved()
+        );
+        let total_x: i32 = moved().iter().map(|(dx, _)| *dx).sum();
+        assert!(total_x > 0, "向右移动的 dx 必须为正，实际 {:?}", moved());
+        assert!(
+            injector.moves.lock().unwrap().is_empty(),
+            "PoC 路径不应再走旧的单步 mouse_move"
+        );
+
+        sender
+            .send(EngineMessage::GateEdge(ButtonEdge {
+                button: RemoteButton::Right,
+                is_pressed: false,
+            }))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let after_release = moved().len();
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(moved().len(), after_release, "释放后不得再移动");
     }
 
     #[test]
