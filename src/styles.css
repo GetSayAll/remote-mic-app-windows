@@ -878,3 +878,174 @@ html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); co
   .status-dot,
   .anchor-dot { forced-color-adjust: none; }
 }
+
+/* ---- 按键映射页布局补丁（2026-11-26，#417 遗漏的公开样式） ----
+   公开 PR #417 把按键页新结构与完整按键名、按住摘要带进了 main，但当时只提交了
+   Vue/测试，没有带 styles.css 的对应规则；1.9.8 安装版因此出现卡片相互重叠、
+   按住摘要变成大按钮、底部编辑栏被裁切。本块只包含公开页面样式，不含键位方案
+   私有作用域/弹窗样式。 */
+.buttons-page.mapping-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.mapping-fixed-top {
+  flex: 0 0 auto;
+  z-index: 5;
+  padding-bottom: 6px;
+  background: var(--surface-canvas);
+  box-shadow: 0 10px 10px -10px rgba(0, 0, 0, 0.18);
+}
+.mapping-scroll-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 6px;
+  padding-bottom: 0;
+}
+.mapping-header-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 20px;
+  align-items: center;
+}
+.mapping-page .page-header { margin-bottom: 0; }
+.mapping-header-copy > h1 { grid-column: 1; grid-row: 1; }
+.mapping-header-copy > .page-subtitle { grid-column: 1 / -1; grid-row: 2; }
+.mapping-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  grid-column: 2;
+  grid-row: 1;
+  margin-top: 0;
+}
+@media (max-width: 760px) {
+  .mapping-header-copy { display: block; }
+  .mapping-toggle-row { margin-top: 8px; }
+}
+.remote-info-card.connected { border-color: var(--accent-border); background: var(--accent-surface); }
+.remote-info-subtitle {
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mapping-canvas { margin-bottom: calc(-570px * (1 - var(--map-scale)) + 5px); }
+.mapping-card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  height: 78px;
+  padding: 4px 8px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  cursor: pointer;
+}
+html[data-theme="dark"] .mapping-card { background: var(--card); }
+.mapping-card-title { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; min-width: 0; }
+.mapping-card-title strong { flex: none; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.mapping-hold-chip {
+  display: -webkit-box;
+  min-width: 0;
+  max-width: 66%;
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--mapping-neutral);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  text-align: right;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  cursor: pointer;
+}
+.mapping-hold-chip:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-primary); }
+.mapping-hold-chip:disabled { cursor: default; opacity: 0.5; }
+html[lang="en"] .mapping-card { padding: 4px 7px; }
+html[lang="en"] .mapping-card-title { gap: 4px; margin-bottom: 2px; }
+html[lang="en"] .mapping-card-title strong { font-size: 12px; }
+html[lang="en"] .mapping-hold-chip {
+  display: -webkit-box;
+  max-width: 66%;
+  font-size: 10px;
+  line-height: 1.1;
+  white-space: normal;
+  text-align: right;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+html[lang="en"] .mapping-cell { padding: 2px 3px; }
+html[lang="en"] .mapping-cell small { font-size: 10px; line-height: 1.1; }
+html[lang="en"] .mapping-cell span {
+  display: -webkit-box;
+  font-size: 10px;
+  line-height: 1.1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  text-overflow: clip;
+}
+.mapping-cells { display: grid; flex: 1; min-height: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.mapping-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 2px 3px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--mapping-neutral);
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.mapping-cell small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); line-height: 1.1; }
+.mapping-cell span {
+  display: -webkit-box;
+  font-size: 10.5px;
+  line-height: 1.15;
+  color: var(--muted);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+.voice-card { cursor: default; justify-content: center; }
+.mapping-footer {
+  margin-top: 6px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+html[data-theme="dark"] .mapping-footer { background: var(--card); }
