@@ -542,6 +542,7 @@ const sidePanel = computed(() => {
     hotkeyReady: tool !== null && (tool !== "other" || otherKeys.value !== null),
     captureEnabled: rc003Status.value?.enabled === true,
     captureAvailable: captureSupport.value?.available !== false,
+    captureAdminRequired: captureSupport.value?.reason === "admin_required",
     vokieRunning: vokie.value?.running === true,
     voicePhase: voicePhase.value,
     voiceTerminalCode: voiceStepTerminalCode.value,

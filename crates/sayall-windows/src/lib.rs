@@ -146,6 +146,8 @@ pub mod transcript_capture;
 #[cfg(windows)]
 pub mod transcript_capture_windows;
 pub mod tray_icons;
+/// 当前账号能否完成「全按键支持」的提权授权（标准用户 → 不可用，2026-11-26）。
+pub mod user_account;
 #[cfg(windows)]
 pub mod voice_priority;
 /// Vokie 安装检测（2026-10-01）：连接页“选择输入工具”用它决定是否显示官网入口。
@@ -925,6 +927,37 @@ pub(crate) fn apply_shortcut_capture_suspension(
     ));
 }
 
+/// 弹系统授权窗口前是否应该补发合成修饰键抬起（纯判定，单测覆盖）。
+///
+/// 为什么必须赶在授权窗口之前（2026-11-26 客户反馈）：UAC 一旦前台，普通
+/// 权限进程的 `SendInput` 会被 UIPI 丢弃，届时再补发已经晚了；而修饰键
+/// 处于按下态时，授权窗口里的账号密码输入会被当成组合键——用户看到的就是
+/// "无法输入账号密码"。
+///
+/// `synth_intended` = 报告层合成已生效，或当前「按住说话快捷键」本来就会
+/// 走报告层合成（单键 Alt）。后者覆盖"应用刚启动、助手还没 ACK"的窗口。
+/// `voice_idle` 保证不打断正在进行的语音会话。
+pub fn should_release_synth_before_elevation(
+    synth_intended: bool,
+    voice_idle: bool,
+    key_down: bool,
+) -> bool {
+    synth_intended && voice_idle && key_down
+}
+
+#[cfg(test)]
+mod synth_preflight_tests {
+    use super::should_release_synth_before_elevation;
+
+    #[test]
+    fn releases_only_when_synth_is_intended_idle_and_key_down() {
+        assert!(should_release_synth_before_elevation(true, true, true));
+        assert!(!should_release_synth_before_elevation(false, true, true));
+        assert!(!should_release_synth_before_elevation(true, false, true));
+        assert!(!should_release_synth_before_elevation(true, true, false));
+    }
+}
+
 /// 运行时快照单次耗时的慢调用阈值（2026-11-25）。
 ///
 /// 前端语音测试每 200 ms 轮询一次 `get_runtime_snapshot`；主线程被阻塞时
@@ -1000,6 +1033,9 @@ impl WindowsPlatform {
     /// （见 `graceful_exit` 模块头部的证据）。
     #[cfg(windows)]
     pub fn shutdown_ble_for_exit(&self, timeout: std::time::Duration) -> Result<(), PlatformError> {
+        // 退出前先抬起可能仍按着的合成修饰键：助手会随应用退出（`--follow-app`），
+        // 报告层解除钩子后没有任何通道还能改写 HID 报告（2026-11-26）。
+        self.release_stuck_synth_before_capture_stop();
         // 先恢复被「语音优先」改过的键鼠参数，再关闭 BLE 会话；两步各自有界。
         // 恢复最多等 800 ms；即使工作线程正忙，进程退出关闭句柄也会让 HID 栈
         // 回到默认参数（2026-11-22 实测），不占用 BLE 清理的预算。
@@ -1105,6 +1141,82 @@ impl WindowsPlatform {
                 self.rc003_bridge.set_voice_synth(synth_to);
             }
         }
+    }
+
+    /// 弹系统授权窗口前的合成键清理（Windows）。
+    ///
+    /// 返回 `false` 只表示「报告层合成的 Alt 在补发后仍按着」——这种状态会让
+    /// UAC 窗口无法输入账号密码，调用方应中止本次提权并提示用户。物理键按住
+    /// 或其它通道残留只记录、不阻断（`synth_active=false` 时恒返回 `true`）。
+    ///
+    /// 必须在 `ShellExecuteExW(runas)` **之前**调用：提权窗口前台时
+    /// `SendInput` 会被 UIPI 丢弃，事后补发无效。
+    #[cfg(windows)]
+    pub fn release_stuck_synth_before_elevation(&self) -> bool {
+        self.release_stuck_synth("enable_capture", true)
+    }
+
+    #[cfg(not(windows))]
+    pub fn release_stuck_synth_before_elevation(&self) -> bool {
+        true
+    }
+
+    /// 关闭「全按键支持」前的合成键清理（Windows）。
+    ///
+    /// 关闭会先让助手解除报告层钩子，之后没有任何东西还能改写 HID 报告；
+    /// 若此时合成键仍按下，它就会永久留在 OS 键态。这里不要求会话空闲
+    /// （关闭是显式停止，正在进行的会话马上也会被结束）。
+    #[cfg(windows)]
+    pub fn release_stuck_synth_before_capture_stop(&self) {
+        let _ = self.release_stuck_synth("disable_capture", false);
+    }
+
+    #[cfg(not(windows))]
+    pub fn release_stuck_synth_before_capture_stop(&self) {}
+
+    #[cfg(windows)]
+    fn release_stuck_synth(&self, trigger: &str, require_idle: bool) -> bool {
+        let synth_active = rc003_bridge::Rc003Bridge::voice_synth_active();
+        let synth_intended = synth_active
+            || self
+                .voice_hold_hotkey()
+                .is_some_and(|chord| rc003_bridge::voice_synth_target(&chord).is_some());
+        let voice_idle = matches!(
+            self.connection_snapshot().voice_state,
+            VoiceSessionState::Idle
+        );
+        let right_before = send_input_windows::right_alt_down();
+        let left_before = send_input_windows::left_alt_down();
+        let allowed = |key_down: bool| {
+            if require_idle {
+                should_release_synth_before_elevation(synth_intended, voice_idle, key_down)
+            } else {
+                synth_intended && key_down
+            }
+        };
+        let mut released = false;
+        for (key, key_down) in [
+            (send_input::KeyCode::RightAlt, right_before),
+            (send_input::KeyCode::LeftAlt, left_before),
+        ] {
+            if !allowed(key_down) {
+                continue;
+            }
+            released = true;
+            let _ = self
+                .send_input
+                .release(&send_input::KeyChord { keys: vec![key] });
+        }
+        let right_after = send_input_windows::right_alt_down();
+        let left_after = send_input_windows::left_alt_down();
+        // 只有「我们自己合成的键还按着」才算不安全：物理按住（合成未生效）
+        // 属于用户操作，不阻断授权。
+        let safe = !(synth_active && (right_after || left_after));
+        gatt_note(format!(
+            "voice_synth_preflight trigger={trigger} require_idle={require_idle} synth_active={synth_active} synth_intended={synth_intended} voice_idle={voice_idle} down_before=right:{right_before},left:{left_before} released={released} down_after=right:{right_after},left:{left_after} terminal_result={}",
+            if safe { "passed" } else { "failed" }
+        ));
+        safe
     }
 
     /// 启动/迁移恢复「你在用的输入工具」：只恢复按下语音键时的兜底切换目标，
