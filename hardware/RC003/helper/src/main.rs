@@ -4464,6 +4464,23 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             .join("rc003-uninstall-cleanup")
     }
 
+    /// 覆盖升级清理标记（与卸载标记同目录，`%LOCALAPPDATA%\SayAll\rc003-upgrade-cleanup`）。
+    ///
+    /// 现场 2026-11-26：旧版覆盖安装后，WUDFHost 里还挂着上一代 Gadget，助手
+    /// `[TAP] resident=1` → `no_authenticated_agent`；同一版本全新卸载重装
+    /// （`[TAP] resident=0` → `[PREP] copied`）才恢复。覆盖安装不会走卸载清理，
+    /// 所以安装器在 PREINSTALL 写这个标记，由新助手在第一次正常启动时消费：
+    /// 释放旧宿主/设备环、删掉旧运行时目录，再按全新安装路径重新注入。
+    fn upgrade_cleanup_signal_path() -> PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+            format!("{home}\\AppData\\Local")
+        });
+        PathBuf::from(base)
+            .join("SayAll")
+            .join("rc003-upgrade-cleanup")
+    }
+
     /// 卸载清理的逐项计数（一条日志说清结果，别让排查再去数文件）。
     struct CleanupReport {
         files_deleted: usize,
@@ -6561,6 +6578,65 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
     // ============================================================ 主流程
 
+    /// 释放旧宿主/设备环并把运行时目录删干净；卸载清理与覆盖升级清理共用。
+    ///
+    /// 不在这里 `exit`：卸载路径需要按结果选择退出码，覆盖升级路径需要清完
+    /// 继续走正常的全新注入流程。
+    fn perform_runtime_cleanup(args: &Args, logger: &Logger) -> CleanupReport {
+        let mut report = cleanup_runtime_dir(&args.runtime_dir, logger);
+        // 判据必须是**目录还在不在**，不能是 `report.is_clean()`：`is_clean` 只看 failures，
+        // 被宿主锁住的文件会被记成 `files_pending_reboot`（不是失败），旧判据因此直接跳过
+        // 设备环。2026-10-08 真机复测实证：那次卸载里设备环一次都没跑，两个 dll 仍留在
+        // 目录里等重启（日志 `files_pending_reboot=2 failures=-` 紧跟着
+        // 「已清理运行时目录（删除 0 个目录 / 0 个文件）」）。
+        if host_release_still_needed(&args.runtime_dir, &report) {
+            // 2026-10-08 方案 B（用户要求：不把"断开遥控器"推给用户，也不弹窗）：
+            // 宿主进程映射着 Gadget 时文件删不掉——由提权助手结束**持有注入且独占 RC003**
+            // 的宿主，把映射随进程放掉，再重试删除；共享宿主或任一失败都自动回退到
+            // 「安排到重启删除」（仍然不弹窗）。
+            //
+            // SeDebugPrivilege（2026-10-14 现场）：释放宿主要先枚举它——宿主是 session 0
+            // 的 SYSTEM 进程，没有 SeDebug 时 `enum_modules` 直接 err=5 → "跳过释放" →
+            // 宿主带着旧 Gadget 留下（重装后首次启用必撞 STALE-TAP、语音键恢复窗口内全失败）。
+            // 本分支在正常流程的 `enable_se_debug()` 之前就 exit，必须自己先启用。
+            // 失败不中止清理：仍会回退到"安排到重启删除"（本分支的另一半职责），
+            // 但日志里要把"为什么没释放"说明白。
+            if let Err(reason) = enable_se_debug() {
+                logger.kv(
+                    "[CLEANUP]",
+                    &[
+                        ("sedebug", "not_enabled".into()),
+                        ("reason", reason),
+                        (
+                            "note",
+                            "无法枚举 session 0 宿主；宿主释放可能被跳过，转为安排到重启删除"
+                                .into(),
+                        ),
+                    ],
+                );
+            }
+            if let Ok(scan) = enum_hosts() {
+                if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
+                    let pid = entry.pid;
+                    let members = scan.entries.iter().filter(|item| item.pid == pid).count();
+                    let rc003_members = scan
+                        .entries
+                        .iter()
+                        .filter(|item| item.pid == pid && item.is_rc003)
+                        .count();
+                    if release_injected_host(pid, members, rc003_members, logger) {
+                        report = cleanup_runtime_dir(&args.runtime_dir, logger);
+                        // 删除只需要映射消失；设备节点的恢复放在删除之后做（要跑 pnputil，慢一拍）。
+                        if let Some(instance) = entry.rc003_instance_id.clone() {
+                            recover_device_nodes(&instance, logger);
+                        }
+                    }
+                }
+            }
+        }
+        report
+    }
+
     pub fn run() {
         // 最先安顿 stdout/stderr（见 `bootstrap_console`）：必须早于任何打印，
         // 包括参数错误时的 usage 输出。手动运行接父控制台；后台拉起接 NUL，
@@ -6679,57 +6755,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                 );
                 std::process::exit(0);
             }
-            let mut report = cleanup_runtime_dir(&args.runtime_dir, &logger);
-            // 判据必须是**目录还在不在**，不能是 `report.is_clean()`：`is_clean` 只看 failures，
-            // 被宿主锁住的文件会被记成 `files_pending_reboot`（不是失败），旧判据因此直接跳过
-            // 设备环。2026-10-08 真机复测实证：那次卸载里设备环一次都没跑，两个 dll 仍留在
-            // 目录里等重启（日志 `files_pending_reboot=2 failures=-` 紧跟着
-            // 「已清理运行时目录（删除 0 个目录 / 0 个文件）」）。
-            if host_release_still_needed(&args.runtime_dir, &report) {
-                // 2026-10-08 方案 B（用户要求：不把"断开遥控器"推给用户，也不弹窗）：
-                // 宿主进程映射着 Gadget 时文件删不掉——由提权助手结束**持有注入且独占 RC003**
-                // 的宿主，把映射随进程放掉，再重试删除；共享宿主或任一失败都自动回退到
-                // 「安排到重启删除」（仍然不弹窗）。
-                //
-                // SeDebugPrivilege（2026-10-14 现场）：释放宿主要先枚举它——宿主是 session 0
-                // 的 SYSTEM 进程，没有 SeDebug 时 `enum_modules` 直接 err=5 → "跳过释放" →
-                // 宿主带着旧 Gadget 留下（重装后首次启用必撞 STALE-TAP、语音键恢复窗口内全失败）。
-                // 本分支在正常流程的 `enable_se_debug()` 之前就 exit，必须自己先启用。
-                // 失败不中止清理：仍会回退到"安排到重启删除"（本分支的另一半职责），
-                // 但日志里要把"为什么没释放"说明白。
-                if let Err(reason) = enable_se_debug() {
-                    logger.kv(
-                        "[CLEANUP]",
-                        &[
-                            ("sedebug", "not_enabled".into()),
-                            ("reason", reason),
-                            (
-                                "note",
-                                "无法枚举 session 0 宿主；宿主释放可能被跳过，转为安排到重启删除"
-                                    .into(),
-                            ),
-                        ],
-                    );
-                }
-                if let Ok(scan) = enum_hosts() {
-                    if let Some(entry) = scan.entries.iter().find(|entry| entry.is_rc003) {
-                        let pid = entry.pid;
-                        let members = scan.entries.iter().filter(|item| item.pid == pid).count();
-                        let rc003_members = scan
-                            .entries
-                            .iter()
-                            .filter(|item| item.pid == pid && item.is_rc003)
-                            .count();
-                        if release_injected_host(pid, members, rc003_members, &logger) {
-                            report = cleanup_runtime_dir(&args.runtime_dir, &logger);
-                            // 删除只需要映射消失；设备节点的恢复放在删除之后做（要跑 pnputil，慢一拍）。
-                            if let Some(instance) = entry.rc003_instance_id.clone() {
-                                recover_device_nodes(&instance, &logger);
-                            }
-                        }
-                    }
-                }
-            }
+            let report = perform_runtime_cleanup(&args, &logger);
             if report.is_clean() {
                 logger.line(&format!(
                     "[CLEANUP] 已清理运行时目录（删除 {} 个目录 / {} 个文件）",
@@ -6758,6 +6784,73 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         if args.task_status || args.install_task || args.remove_task {
             let ok = manage_scheduled_task(&args, &logger);
             std::process::exit(if ok { 0 } else { 1 });
+        }
+
+        // ---- 覆盖升级清理：只在正常捕获启动时消费，一次性 ----
+        // 安装器 PREINSTALL 写标记；这里先释放旧宿主/设备环、删旧运行时目录，
+        // 再继续走全新注入。否则覆盖安装会保留上一代 Gadget，出现
+        // `[TAP] resident=1` → `no_authenticated_agent` 的永久循环。
+        if !args.dry_run {
+            let upgrade_marker = upgrade_cleanup_signal_path();
+            if upgrade_marker.exists() {
+                logger.kv(
+                    "[CLEANUP]",
+                    &[
+                        ("event", "upgrade_cleanup".into()),
+                        ("dir", normalize_display(&args.runtime_dir)),
+                        ("elevated", is_elevated().to_string()),
+                    ],
+                );
+                if is_elevated() {
+                    let report = if args.runtime_dir.exists() {
+                        perform_runtime_cleanup(&args, &logger)
+                    } else {
+                        CleanupReport {
+                            files_deleted: 0,
+                            files_pending_reboot: 0,
+                            dirs_deleted: 0,
+                            failures: Vec::new(),
+                        }
+                    };
+                    logger.kv(
+                        "[CLEANUP]",
+                        &[
+                            ("event", "upgrade_cleanup".into()),
+                            ("files_deleted", report.files_deleted.to_string()),
+                            (
+                                "files_pending_reboot",
+                                report.files_pending_reboot.to_string(),
+                            ),
+                            ("dirs_deleted", report.dirs_deleted.to_string()),
+                            ("failures", report.failures.len().to_string()),
+                        ],
+                    );
+                    let complete = !args.runtime_dir.exists() && report.is_clean();
+                    if complete {
+                        let _ = fs::remove_file(&upgrade_marker);
+                    } else {
+                        logger.kv(
+                            "[CLEANUP]",
+                            &[
+                                ("event", "upgrade_cleanup".into()),
+                                ("result", "incomplete".into()),
+                                ("note", "保留标记，等待重启/下一轮重试".into()),
+                            ],
+                        );
+                        // 带着旧运行时继续注入必然回到 resident=1；让应用按桥接
+                        // 快照判失败并重试，而不是把“启动成功”报给用户。
+                        std::process::exit(3);
+                    }
+                } else {
+                    logger.kv(
+                        "[CLEANUP]",
+                        &[
+                            ("event", "upgrade_cleanup".into()),
+                            ("result", "deferred_not_elevated".into()),
+                        ],
+                    );
+                }
+            }
         }
 
         // dry-run 承诺「不需要提权」；SeDebug 启用属于真正运行的准备，
@@ -10408,6 +10501,12 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             uninstall_cleanup_signal_path()
                 .ends_with(std::path::Path::new("SayAll").join("rc003-uninstall-cleanup")),
             format!("{}", uninstall_cleanup_signal_path().display()),
+        );
+        check(
+            "覆盖升级清理标记路径与安装器侧约定一致",
+            upgrade_cleanup_signal_path()
+                .ends_with(std::path::Path::new("SayAll").join("rc003-upgrade-cleanup")),
+            format!("{}", upgrade_cleanup_signal_path().display()),
         );
         let cleanup_root = std::env::temp_dir().join(format!(
             "rc003-helper-cleanup-selftest-{}",

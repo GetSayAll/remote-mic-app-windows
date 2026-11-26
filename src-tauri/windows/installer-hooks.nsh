@@ -203,6 +203,20 @@
   ; 「无法打开要写入的文件」（2026-09-24 真机复现：跑了一天的旧助手
   ; 锁住 exe，主程序的优雅退出对它无效）。
   !insertmacro SayAllStopHelper install 0
+
+  ; 覆盖升级清理标记（2026-11-26 现场）：覆盖安装不走卸载清理，旧
+  ; %PROGRAMDATA%\SayAll\rc003-helper 与 WUDFHost 里的旧 Gadget 会被保留，
+  ; 新助手一直 attach 到旧 tap（no_authenticated_agent），全键支持起不来。
+  ; 新助手第一次正常启动时消费这个标记：释放旧宿主/设备环、删旧运行时目录，
+  ; 再按全新安装路径重新注入。路径与 upgrade_cleanup_signal_path() 逐字符一致。
+  Push $0
+  CreateDirectory "$LOCALAPPDATA\SayAll"
+  FileOpen $0 "$LOCALAPPDATA\SayAll\rc003-upgrade-cleanup" w
+  ${If} $0 != 0
+    FileWrite $0 "cleanup"
+    FileClose $0
+  ${EndIf}
+  Pop $0
   ; ── 授权语义（2026-09-28 Andy 拍板；同日二次定稿补维护模式）──────────
   ; 开关的持久化意图在 AppSettings（app_config_dir），跨升级/重装幸存；
   ; 授权本体是提权创建的计划任务（普通权限删不掉，跨安装幸存）。撤销的
@@ -582,6 +596,8 @@
   ; 没在跑就会留在这里。卸载完不该留下它们——残留的停用信号会让重装后的助手一启动就退出。
   Delete "$LOCALAPPDATA\SayAll\rc003-uninstall-cleanup"
   Delete "$LOCALAPPDATA\SayAll\rc003-capture-stop"
+  ; 覆盖升级标记同样是一次性投递文件：卸载后不得留给下一次安装。
+  Delete "$LOCALAPPDATA\SayAll\rc003-upgrade-cleanup"
 
   ; ── 授权不跨卸载保留（2026-09-24 产品决策）────────────────────────
   ; 卸载即撤销增强捕获的授权：删除计划任务，重装/升级后打开开关需要
