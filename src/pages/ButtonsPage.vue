@@ -2003,7 +2003,7 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
     ...mappings.value,
     actions: { ...mappings.value.actions, [target.button]: actions },
   };
-  void persist(
+  const message =
     choice === "off"
       ? t("已关闭“按住时连续执行”")
       : choice === "long"
@@ -2012,8 +2012,15 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
           ? t("已开启：按住不放会保持方向键按下")
           : choice === "longHold"
             ? t("已开启：长按后不松手会保持方向键按下")
-            : t("已开启：按住不放会连续执行"),
-  );
+            : t("已开启：按住不放会连续执行");
+  const save = (): void => {
+    setEditorSaveOutcome("saving");
+    void persist(message).then((ok) => {
+      if (ok) setEditorSaveOutcome("saved");
+      else setEditorSaveOutcome("failed", save);
+    });
+  };
+  save();
 }
 
 /**

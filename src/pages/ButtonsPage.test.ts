@@ -4068,6 +4068,25 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     const saved = vi.mocked(saveButtonMappings).mock.lastCall![0];
     expect(saved.actions.left!.directionalHold).toBe("single");
     expect(saved.actions.left!.holdRepeat).toBeUndefined();
+    expect(wrapper.find(".mapping-hold-panel .editor-save-status").text()).toBe(
+      "自动保存成功",
+    );
+
+    const clear = wrapper
+      .findAll(".mapping-hold-panel button")
+      .find((button) => button.text() === "清除设置")!;
+    expect(clear.attributes("disabled")).toBeUndefined();
+    await clear.trigger("click");
+    await vi.waitFor(() => expect(saveButtonMappings).toHaveBeenCalledTimes(2));
+    await flushPromises();
+    const cleared = vi.mocked(saveButtonMappings).mock.lastCall![0];
+    expect(cleared.actions.left!.directionalHold).toBeUndefined();
+    expect(cleared.actions.left!.holdRepeat).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(wrapper.find(".mapping-hold-panel .editor-save-status").text()).toBe(
+        "自动保存成功",
+      ),
+    );
   });
 
   it("按键速度：按遥控器机型读取各自的桶", async () => {
