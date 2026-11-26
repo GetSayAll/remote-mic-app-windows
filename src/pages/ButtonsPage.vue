@@ -2259,18 +2259,17 @@ function selectHoldRepeat(choice: HoldRepeatChoice): void {
   }
   if (repeatChoice.value === choice) return;
   if (profileScope && profileScopeSelected.value) {
-    void profileScope
-      .writeHold(target.button, choice === "off" ? null : choice)
-      .then(() => {
-        statusMessage.value = t("自动保存成功");
-      })
-      .catch((reason) => {
-        statusMessage.value = operationErrorText(
-          "profile hold save failed",
-          reason,
-          "保存失败，请重试。",
-        );
-      });
+    const save = (): void => {
+      setEditorSaveOutcome("saving");
+      void profileScope
+        .writeHold(target.button, choice === "off" ? null : choice)
+        .then(() => setEditorSaveOutcome("saved"))
+        .catch((reason) => {
+          console.warn("profile hold save failed", reason);
+          setEditorSaveOutcome("failed", save);
+        });
+    };
+    save();
     return;
   }
   const actions = { ...actionsOf(target.button) };
