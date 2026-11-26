@@ -284,6 +284,13 @@ USB 2.0 接口后稳定。随附日志（`sayall-diagnostic-20261123T235023073Z-
 - `pnpm exec vue-tsc --noEmit`：`passed`。
 - `pnpm build`：`passed`。
 - `scripts/ci-preflight.ps1`：`passed`（7/7）。
+- 代码提交：`b259ca1dc273c10a726b54b7e382232fe612cdf4`
+  （`feat(connection): 重连排查提示 USB 2.0 接口`）。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.8_x64-setup.exe`
+  （13,606,677 字节，SHA-256
+  `1c45b8ddc80a38e1deac0657a2db44d61fb0afdb6e748119b77001233af82ed0`）；
+  裸 exe 内嵌 `source_revision=b259ca1dc273c10a726b54b7e382232fe612cdf4`；
+  `verify-frontend-embedded.ps1` 18/18 `passed`。本地测试签名不可发布。
 - 界面真实 Windows 渲染与安装包内点击：`deferred`（需要在本机或真机安装后目视；
   本机当前已有运行中的安装版，未覆盖安装）。
 - `usb_hint` 真实日志行：`deferred`（单元路径已验证；需要下一次 Windows 运行采样）。
