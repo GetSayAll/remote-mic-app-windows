@@ -23,6 +23,89 @@ vi.mock("../lib/frontend-diagnostics", async (importOriginal) => {
   };
 });
 
+type ProfileBindingState = "inherit" | "explicit" | "disabled" | "unavailable";
+type ProfileScopeState = {
+  available: boolean;
+  loading: boolean;
+  error: string | null;
+  access: "unavailable" | "requiresPlus" | "temporarilyOffline" | "allowed";
+  profiles: Array<{ id: string; name: string }>;
+  activeProfileId: string | null;
+  selectedProfileId: string | null;
+  editing: boolean;
+  saveState: "idle" | "saving" | "saved" | "failed";
+};
+
+const profileMock = vi.hoisted(() => ({
+  state: null as unknown as { value: ProfileScopeState },
+  bindingStates: new Map<string, ProfileBindingState>(),
+  scope: null as unknown as Record<string, unknown>,
+  clearAction: null as unknown as ReturnType<typeof vi.fn>,
+  writeAction: null as unknown as ReturnType<typeof vi.fn>,
+  clearRejects: false,
+}));
+
+function bindingKey(button: string, trigger: string): string {
+  return `${button}.${trigger}`;
+}
+
+function emptyProfileState(): ProfileScopeState {
+  return {
+    available: false,
+    loading: false,
+    error: null,
+    access: "unavailable",
+    profiles: [],
+    activeProfileId: null,
+    selectedProfileId: null,
+    editing: false,
+    saveState: "idle",
+  };
+}
+
+vi.mock("../private/windows-button-profiles", async () => {
+  const { reactive, ref } = await import("vue");
+  const state = ref<ProfileScopeState>(emptyProfileState());
+  const bindingStates = reactive(new Map<string, ProfileBindingState>());
+  profileMock.bindingStates = bindingStates as unknown as Map<string, ProfileBindingState>;
+  const clearAction = vi.fn(async (button: string, trigger: string) => {
+    if (profileMock.clearRejects) throw new Error("clear failed");
+    bindingStates.set(bindingKey(button, trigger), "inherit");
+  });
+  const writeAction = vi.fn(async () => undefined);
+  const scope = {
+    state,
+    load: vi.fn(async () => undefined),
+    select: vi.fn((profileId: string | null) => {
+      state.value.selectedProfileId = profileId;
+      state.value.editing = profileId !== null;
+    }),
+    beginEdit: vi.fn(() => true),
+    endEdit: vi.fn(),
+    supportsButton: vi.fn(() => true),
+    displayActions: vi.fn((_button: string, base: unknown) => base),
+    bindingState: vi.fn(
+      (button: string, trigger: string) =>
+        bindingStates.get(bindingKey(button, trigger)) ?? "inherit",
+    ),
+    writeAction,
+    clearAction,
+    writeHold: vi.fn(async () => undefined),
+    createFromBase: vi.fn(async () => "p-new"),
+    copyProfile: vi.fn(async () => "p-copy"),
+  };
+  profileMock.state = state;
+  profileMock.scope = scope;
+  profileMock.clearAction = clearAction;
+  profileMock.writeAction = writeAction;
+  return {
+    COMPONENT_MARKER: "windows-button-profiles/test",
+    profilePageComponent: () => null,
+    accessDecision: () => "unavailable",
+    createButtonProfileScope: () => scope,
+  };
+});
+
 vi.mock("../lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/bridge")>();
   return {
@@ -367,6 +450,11 @@ beforeEach(() => {
   edgeHandler = null;
   gestureHandler = null;
   shortcutCaptureHandler = null;
+  profileMock.state.value = emptyProfileState();
+  profileMock.bindingStates.clear();
+  profileMock.clearRejects = false;
+  profileMock.clearAction.mockClear();
+  profileMock.writeAction.mockClear();
   vi.mocked(getButtonMappings).mockClear();
   vi.mocked(subscribeButtonEdges).mockClear();
   vi.mocked(subscribeButtonGestures).mockClear();
@@ -4325,6 +4413,96 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     expect(wrapper.find(".action-filter-chip.selected").text()).toBe("按键速度");
     expect(wrapper.find(".mapping-speed-panel").exists()).toBe(true);
     expect(wrapper.findAll(".mapping-speed-panel input[type='range']")).toHaveLength(2);
+  });
+
+  async function enableProfileScope(
+    overrides: Partial<ProfileScopeState> = {},
+  ): Promise<void> {
+    profileMock.state.value = {
+      available: true,
+      loading: false,
+      error: null,
+      access: "allowed",
+      profiles: [{ id: "p1", name: "工作" }],
+      activeProfileId: "p1",
+      selectedProfileId: "p1",
+      editing: true,
+      saveState: "idle",
+      ...overrides,
+    };
+  }
+
+  async function openUpSingleEditor(wrapper: VueWrapper): Promise<void> {
+    const upCard = wrapper
+      .findAll(".mapping-card")
+      .find((card) => card.find(".mapping-card-title strong").text() === "上键")!;
+    await upCard.findAll(".mapping-cell")[0]!.trigger("click");
+    await flushPromises();
+  }
+
+  it("按键页方案作用域：继承显示来源，恢复后回到继承并提示自动保存", async () => {
+    await enableProfileScope();
+    profileMock.bindingStates.set("up.single", "inherit");
+    const wrapper = await mountPage();
+
+    expect(wrapper.find(".profile-scope-bar").exists()).toBe(true);
+    expect(wrapper.find(".profile-scope-bar").text()).toContain("工作");
+
+    await openUpSingleEditor(wrapper);
+    expect(wrapper.find(".profile-binding-source").text()).toContain("继承默认方案：");
+    expect(wrapper.find(".profile-binding-source .link-button").exists()).toBe(false);
+
+    profileMock.bindingStates.set("up.single", "explicit");
+    await flushPromises();
+    expect(wrapper.find(".profile-binding-source").text()).toContain("本方案 ·");
+    const restore = wrapper.find(".profile-binding-source .link-button");
+    expect(restore.exists()).toBe(true);
+    expect(restore.text()).toBe("恢复继承默认");
+
+    await restore.trigger("click");
+    await flushPromises();
+    expect(profileMock.clearAction).toHaveBeenCalledWith("up", "single");
+    expect(wrapper.find(".profile-binding-source").text()).toContain("继承默认方案：");
+    expect(wrapper.find(".editor-save-status").text()).toBe("自动保存成功");
+  });
+
+  it("按键页方案作用域：禁用与只读状态不误报可编辑", async () => {
+    await enableProfileScope();
+    profileMock.bindingStates.set("up.single", "disabled");
+    const wrapper = await mountPage();
+
+    await openUpSingleEditor(wrapper);
+    expect(wrapper.find(".profile-binding-source").text()).toContain("本方案禁用");
+    expect(wrapper.find(".profile-binding-source .link-button").text()).toBe("恢复继承默认");
+
+    profileMock.state.value = {
+      ...profileMock.state.value,
+      access: "requiresPlus",
+    };
+    await flushPromises();
+    expect(wrapper.find(".editor-save-status").text()).toBe("只读");
+    expect(
+      wrapper.find(".profile-binding-source .link-button").attributes("disabled"),
+    ).toBeDefined();
+  });
+
+  it("按键页方案作用域：恢复失败显示保存失败，重试成功后回到继承", async () => {
+    await enableProfileScope();
+    profileMock.bindingStates.set("up.single", "explicit");
+    profileMock.clearRejects = true;
+    const wrapper = await mountPage();
+
+    await openUpSingleEditor(wrapper);
+    await wrapper.find(".profile-binding-source .link-button").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".editor-save-status").text()).toBe("保存失败");
+
+    profileMock.clearRejects = false;
+    await wrapper.find(".editor-save-retry").trigger("click");
+    await flushPromises();
+    expect(profileMock.clearAction).toHaveBeenCalledTimes(2);
+    expect(wrapper.find(".profile-binding-source").text()).toContain("继承默认方案：");
+    expect(wrapper.find(".editor-save-status").text()).toBe("自动保存成功");
   });
 });
 
