@@ -116,6 +116,8 @@ mod lock_open_with_guard;
 pub mod macro_runtime;
 /// 本机的原生系统架构（x64 / arm64），与"本进程的仿真架构"区分开。
 pub mod os_arch;
+/// 鼠标连续移动 PoC（issue #407）：方向键按住时的速度积分状态机。
+pub mod pointer_motion;
 #[cfg(windows)]
 mod power;
 pub mod raw_input;

@@ -404,7 +404,20 @@ impl GestureRecognizer {
         }
     }
 
-    #[allow(dead_code)]
+    /// 该键的指定触发槽位是否配置了连续触发。
+    ///
+    /// 只读配置，不依赖当前按压状态；引擎据此判断 MouseMove 是否应进入
+    /// 连续移动而不是单步移动。`Double` 永远不连续。
+    pub fn repeats_slot(&self, button: RemoteButton, trigger: ButtonTrigger) -> bool {
+        self.buttons
+            .get(&button)
+            .is_some_and(|(config, _)| match trigger {
+                ButtonTrigger::Single => config.repeat_single.is_some(),
+                ButtonTrigger::Long => config.repeat_long.is_some(),
+                ButtonTrigger::Double => false,
+            })
+    }
+
     pub fn is_pressed(&self, button: RemoteButton) -> bool {
         self.buttons
             .get(&button)
