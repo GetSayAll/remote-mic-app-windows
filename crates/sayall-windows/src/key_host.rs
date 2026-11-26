@@ -45,6 +45,13 @@ pub const KEY_HOST_FLAG: &str = "--sayall-key-host";
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_WINDOW: Duration = Duration::from_secs(5);
+/// 首次启动失败后的有界重试间隔（第 2..=6 次尝试）；总预算约 45 秒。
+/// 现场（2026-11-26）：宿主子进程未在首个 5 秒窗口内连回，单次尝试失败后
+/// 整个会话门控死亡，映射按键全部跳过注入。冷启动/安全软件扫描可能只延迟
+/// 首个进程，不能把一次 accept_timeout 当成永久失败。
+const START_RETRY_DELAYS_MS: [u64; 5] = [500, 1_000, 2_000, 4_000, 8_000];
+const START_MAX_START_ATTEMPTS: u32 = 1 + START_RETRY_DELAYS_MS.len() as u32;
+const START_RETRY_THREAD_NAME: &str = "sayall-key-host-retry";
 /// 同步询问的有界等待：主进程决策内部最多再等 60ms（F5 武装等待），总预算
 /// 200ms < Windows LL 钩子超时（默认约 300ms），超时按放行（fail-open）。
 const ASK_TIMEOUT: Duration = Duration::from_millis(200);
@@ -473,6 +480,13 @@ fn parse_verdict(rest: &str) -> Option<(u64, bool)> {
 /// 失败即退出（不驻留）：连接不上主进程（5s 窗口）→ 2；握手无响应 → 3；
 /// 被主进程拒绝 → 4。正常路径：收到 `BYE` 或主进程 socket EOF → 0。
 pub fn run_host(launch: HostLaunch) -> i32 {
+    // 宿主模式不进入 Tauri 初始化；若进程继承了 SAYALL_GATT_LOG，这条
+    // boot 行与父进程的 child_state 一起区分「没起来 / 起来了没连上」。
+    crate::ble::gatt_note(format!(
+        "key_host action=boot phase=started pid={} port={}",
+        std::process::id(),
+        launch.port
+    ));
     let stream = match connect_with_window(launch.port) {
         Some(stream) => stream,
         None => {
@@ -724,12 +738,13 @@ impl KeyHostHandle {
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("set_nonblocking: {error}"))?;
-        let child = spawn_host(port, &token)?;
+        let mut child = spawn_host(port, &token)?;
 
         let deadline = Instant::now() + HELLO_TIMEOUT;
         let stream = match accept_host_stream(&listener, deadline) {
             Ok(stream) => stream,
             Err(reason) => {
+                log_child_state(&mut child, "accept_timeout");
                 let _ = child_kill(child);
                 return Err(reason);
             }
@@ -744,7 +759,11 @@ impl KeyHostHandle {
                 .map_err(|error| format!("try_clone: {error}"))?,
         );
         let mut writer = stream;
-        handshake_with_host(&mut reader, &mut writer, &token)?;
+        if let Err(reason) = handshake_with_host(&mut reader, &mut writer, &token) {
+            log_child_state(&mut child, "handshake_failed");
+            let _ = child_kill(child);
+            return Err(reason);
+        }
         Ok(KeyHostHandle {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
@@ -980,6 +999,21 @@ fn child_kill(mut child: Child) {
     let _ = child.wait();
 }
 
+/// 记录宿主子进程在失败时刻的状态：`running` 代表它还没退出（更像启动慢/被
+/// 安全软件挂起），`exited_N` 代表它已自行退出（N 为退出码，可区分参数错误、
+/// 连接失败、握手被拒）。只记录状态与退出码，不含路径或命令行。
+fn log_child_state(child: &mut Child, phase: &str) {
+    let pid = child.id();
+    let state = match child.try_wait() {
+        Ok(Some(status)) => format!("exited_{}", status.code().unwrap_or(-1)),
+        Ok(None) => "running".to_owned(),
+        Err(_) => "unknown".to_owned(),
+    };
+    crate::ble::gatt_note(format!(
+        "key_host action=child_state phase={phase} pid={pid} state={state}"
+    ));
+}
+
 fn fresh_token() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1010,29 +1044,73 @@ fn spawn_host(port: u16, token: &str) -> Result<Child, String> {
 }
 
 static KEY_HOST: OnceLock<KeyHostHandle> = OnceLock::new();
+static START_LOCK: Mutex<()> = Mutex::new(());
+static RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// 启动全局按键宿主（幂等；失败仅记录并返回 false，绝不阻塞应用启动）。
-pub fn start_global() -> bool {
-    if let Some(existing) = KEY_HOST.get() {
-        return existing.is_ready();
+/// 第 `attempt` 次启动前的等待时长；`None` 表示不再重试。
+///
+/// 第 1 次是同步启动，不计延迟；第 2..=6 次分别等待 0.5/1/2/4/8 秒。
+fn startup_retry_delay_ms(attempt: u32) -> Option<u64> {
+    let index = attempt.checked_sub(2)? as usize;
+    START_RETRY_DELAYS_MS.get(index).copied()
+}
+
+fn lock_start() -> std::sync::MutexGuard<'static, ()> {
+    START_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn log_start_failure(attempt: u32, reason: &str) {
+    if attempt == 1 {
+        crate::ble::gatt_note(format!(
+            "key_host action=start result=failed reason={}",
+            sanitize_token(reason)
+        ));
+    } else {
+        crate::ble::gatt_note(format!(
+            "key_host action=start result=failed attempt={attempt} reason={}",
+            sanitize_token(reason)
+        ));
     }
-    let handle = match KeyHostHandle::start() {
-        Ok(handle) => handle,
-        Err(reason) => {
-            crate::ble::gatt_note(format!(
-                "key_host action=start result=failed reason={}",
-                sanitize_token(&reason)
-            ));
-            return false;
-        }
-    };
+}
+
+fn log_retry_scheduled(attempt: u32, delay_ms: u64) {
     crate::ble::gatt_note(format!(
-        "key_host action=start result=passed pid={} port={}",
-        handle.child_id().unwrap_or(0),
-        handle.port()
+        "key_host action=retry_scheduled attempt={attempt} delay_ms={delay_ms}"
     ));
+}
+
+/// 安装已握手的宿主；`attempt` 仅用于日志（1 = 首次，>1 = 重试）。
+fn install_global_handle(handle: KeyHostHandle, attempt: u32) -> bool {
     let ready = handle.is_ready();
-    let _ = KEY_HOST.set(handle);
+    let child_id = handle.child_id().unwrap_or(0);
+    let port = handle.port();
+    if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        handle.shutdown();
+        crate::ble::gatt_note(
+            "key_host action=start result=discarded reason=shutdown_requested".to_owned(),
+        );
+        return false;
+    }
+    if let Err(handle) = KEY_HOST.set(handle) {
+        // 另一个启动路径已经赢下；不要留下第二个宿主进程。
+        handle.shutdown();
+        crate::ble::gatt_note(
+            "key_host action=start result=discarded reason=already_started".to_owned(),
+        );
+        return global_ready();
+    }
+    if attempt == 1 {
+        crate::ble::gatt_note(format!(
+            "key_host action=start result=passed pid={child_id} port={port}"
+        ));
+    } else {
+        crate::ble::gatt_note(format!(
+            "key_host action=start result=passed pid={child_id} port={port} attempt={attempt}"
+        ));
+    }
     if let Some(handle) = KEY_HOST.get() {
         std::thread::Builder::new()
             .name("sayall-key-host-reader".to_owned())
@@ -1040,6 +1118,101 @@ pub fn start_global() -> bool {
             .ok();
     }
     ready
+}
+
+/// 启动全局按键宿主（幂等；失败仅记录并返回 false，绝不阻塞应用启动）。
+///
+/// 首次尝试最多阻塞 5 秒（保持既有启动预算）；失败后由一个后台线程按
+/// [`START_RETRY_DELAYS_MS`] 重试。现场 `accept_timeout` 只出现一次就永久
+/// 失去门控——不能把子进程冷启动/安全软件扫描造成的瞬时失败当成终态。
+pub fn start_global() -> bool {
+    if let Some(existing) = KEY_HOST.get() {
+        return existing.is_ready();
+    }
+    let _guard = lock_start();
+    if let Some(existing) = KEY_HOST.get() {
+        return existing.is_ready();
+    }
+    if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        crate::ble::gatt_note(
+            "key_host action=start result=skipped reason=shutdown_requested".to_owned(),
+        );
+        return false;
+    }
+    match KeyHostHandle::start() {
+        Ok(handle) => install_global_handle(handle, 1),
+        Err(reason) => {
+            log_start_failure(1, &reason);
+            schedule_start_retry(2);
+            false
+        }
+    }
+}
+
+fn schedule_start_retry(next_attempt: u32) {
+    let Some(delay_ms) = startup_retry_delay_ms(next_attempt) else {
+        crate::ble::gatt_note(format!(
+            "key_host action=retry result=exhausted attempts={START_MAX_START_ATTEMPTS}"
+        ));
+        return;
+    };
+    if RETRY_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    log_retry_scheduled(next_attempt, delay_ms);
+    let spawned = std::thread::Builder::new()
+        .name(START_RETRY_THREAD_NAME.to_owned())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            run_start_retries(next_attempt);
+        });
+    if let Err(error) = spawned {
+        RETRY_RUNNING.store(false, Ordering::SeqCst);
+        crate::ble::gatt_note(format!(
+            "key_host action=retry result=failed reason=spawn_thread_failed detail={}",
+            sanitize_token(&error.to_string())
+        ));
+    }
+}
+
+fn run_start_retries(mut attempt: u32) {
+    loop {
+        if KEY_HOST.get().is_some() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            break;
+        }
+        let started = {
+            let _guard = lock_start();
+            if KEY_HOST.get().is_some() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                break;
+            }
+            KeyHostHandle::start()
+        };
+        match started {
+            Ok(handle) => {
+                let _guard = lock_start();
+                if KEY_HOST.get().is_some() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    handle.shutdown();
+                    break;
+                }
+                install_global_handle(handle, attempt);
+                break;
+            }
+            Err(reason) => log_start_failure(attempt, &reason),
+        }
+        attempt += 1;
+        let Some(delay_ms) = startup_retry_delay_ms(attempt) else {
+            crate::ble::gatt_note(format!(
+                "key_host action=retry result=exhausted attempts={START_MAX_START_ATTEMPTS}"
+            ));
+            break;
+        };
+        log_retry_scheduled(attempt, delay_ms);
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+    RETRY_RUNNING.store(false, Ordering::SeqCst);
 }
 
 /// 全局宿主是否就绪（吞键能力以此判定；未就绪即 fail-open 路径）。
@@ -1061,6 +1234,8 @@ pub(crate) fn bump_suppressor_hook() {
 
 /// 关闭全局宿主（应用退出路径调用；幂等）。未启动时无操作。
 pub fn shutdown_global() {
+    // 阻止后台重试在退出过程中再拉起子进程。
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     if let Some(handle) = KEY_HOST.get() {
         handle.shutdown();
         crate::ble::gatt_note("key_host action=exit reason=shutdown_requested".to_owned());
@@ -1363,5 +1538,23 @@ mod tests {
         reader.read_line(&mut line).unwrap();
         stream.write_all(b"DENY\n").unwrap();
         assert_eq!(4, host.join().unwrap());
+    }
+
+    #[test]
+    fn startup_retry_schedule_is_bounded_and_backs_off() {
+        assert_eq!(startup_retry_delay_ms(1), None);
+        assert_eq!(startup_retry_delay_ms(2), Some(500));
+        assert_eq!(startup_retry_delay_ms(3), Some(1_000));
+        assert_eq!(startup_retry_delay_ms(4), Some(2_000));
+        assert_eq!(startup_retry_delay_ms(5), Some(4_000));
+        assert_eq!(
+            startup_retry_delay_ms(START_MAX_START_ATTEMPTS),
+            Some(8_000)
+        );
+        assert_eq!(
+            startup_retry_delay_ms(START_MAX_START_ATTEMPTS + 1),
+            None,
+            "重试必须在有界次数后停止，不能无限拉起子进程"
+        );
     }
 }
