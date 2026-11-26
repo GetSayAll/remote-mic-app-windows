@@ -30,7 +30,7 @@ pub const TICK: Duration = Duration::from_millis(8);
 /// 200 px/s；100ms 短按约等于旧行为的一次 20px 台阶。
 pub const BASE_SPEED_PER_UNIT: f64 = 10.0;
 /// 最大速度相对初速的倍率（再由 [`MAX_SPEED`] 封顶）。
-pub const MAX_SPEED_MULTIPLIER: f64 = 6.0;
+pub const MAX_SPEED_MULTIPLIER: f64 = 5.0;
 /// 最大速度的绝对上限，避免 `distance = 100` 时飞出去。
 pub const MAX_SPEED: f64 = 2_000.0;
 /// 精细窗口：这段时间保持初速，给短按住留出可控的小幅定位。
@@ -599,9 +599,9 @@ mod tests {
         let end_of_fine = speed_at(20, FINE);
         assert!((end_of_fine - 200.0).abs() < f64::EPSILON);
         let mid = speed_at(20, FINE + ACCEL / 2);
-        assert!(mid > base && mid < 1200.0);
+        assert!(mid > base && mid < 1000.0);
         let full = speed_at(20, FINE + ACCEL);
-        assert!((full - 1200.0).abs() < f64::EPSILON);
+        assert!((full - 1000.0).abs() < f64::EPSILON);
         let capped = speed_at(100, FINE + ACCEL + Duration::from_secs(1));
         assert!((capped - MAX_SPEED).abs() < f64::EPSILON);
     }

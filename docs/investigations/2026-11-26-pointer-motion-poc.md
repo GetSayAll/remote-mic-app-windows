@@ -43,7 +43,7 @@ $env:SAYALL_GATT_LOG = "C:\path\to\gatt.log"
 | tick | 8ms | 目标节拍；实际间隔写进会话日志 |
 | 初速 | `distance × 10 px/s` | `distance=20` → 200 px/s；100ms 短按约 20px |
 | 精细窗口 | 500ms | 这段时间保持初速，给短按住留出可控的小幅定位 |
-| 最大速度倍率 | 6× | 只在精细窗口之后加速 |
+| 最大速度倍率 | 5× | 只在精细窗口之后加速；20px 默认档略快后从 6× 下调 |
 | 最大速度上限 | 2000 px/s | 防止 `distance=100` 时飞出去 |
 | 加速时长 | 700ms | 精细窗口结束后二次缓入到最大速度；总计 1.2s 达到最大 |
 | 单次积分上限 | 32ms | 引擎被阻塞后不允许一次大跳补回来 |
@@ -87,23 +87,33 @@ timer mode=1ms samples=120 min_ms=8.01 avg_ms=8.56 p95_ms=9.37 max_ms=9.51
 `move right 20 600`（真实移动光标，结束后恢复原位置）：
 
 ```text
-motion start button=Right direction=Right distance=20 base_px_s=200.0 max_px_s=1200.0 fine_ms=500 accel_ms=700 tick_ms=8
-motion end reason=probe duration_ms=601 ticks=72 moved_ticks=70 requested_px=120.0 observed_px=120.0 peak_px_s=219.2 tick_avg_ms=8.35 tick_p95_ms=8.68 tick_max_ms=8.81 dropped_ms=0 errors=0
+motion start button=Right direction=Right distance=20 base_px_s=200.0 max_px_s=1000.0 fine_ms=500 accel_ms=700 tick_ms=8
+motion end reason=probe duration_ms=603 ticks=73 moved_ticks=71 requested_px=121.0 observed_px=120.0 peak_px_s=216.1 tick_avg_ms=8.26 tick_p95_ms=8.64 tick_max_ms=8.72 dropped_ms=0 errors=0
+cursor restored matches=true
+```
+
+`move right 20 1900`：
+
+```text
+motion start button=Right direction=Right distance=20 base_px_s=200.0 max_px_s=1000.0 fine_ms=500 accel_ms=700 tick_ms=8
+motion progress duration_ms=1001 ticks=117 speed_px_s=603.0 requested_px=268.0 observed_px=263.0
+motion end reason=probe duration_ms=1902 ticks=224 moved_ticks=222 requested_px=1129.0 observed_px=1124.0 peak_px_s=1000.0 tick_avg_ms=8.49 tick_p95_ms=8.67 tick_max_ms=26.76 dropped_ms=0 errors=0
 cursor restored matches=true
 ```
 
 `move right 30 1300`：
 
 ```text
-motion start button=Right direction=Right distance=30 base_px_s=300.0 max_px_s=1800.0 fine_ms=500 accel_ms=700 tick_ms=8
-motion progress duration_ms=1000 ticks=120 speed_px_s=1055.0 requested_px=428.0 observed_px=428.0
-motion end reason=probe duration_ms=1305 ticks=156 moved_ticks=154 requested_px=900.0 observed_px=900.0 peak_px_s=1800.0 tick_avg_ms=8.37 tick_p95_ms=8.67 tick_max_ms=9.23 dropped_ms=0 errors=0
+motion start button=Right direction=Right distance=30 base_px_s=300.0 max_px_s=1500.0 fine_ms=500 accel_ms=700 tick_ms=8
+motion progress duration_ms=1008 ticks=121 speed_px_s=922.1 requested_px=409.0 observed_px=409.0
+motion end reason=probe duration_ms=1301 ticks=156 moved_ticks=154 requested_px=792.0 observed_px=792.0 peak_px_s=1500.0 tick_avg_ms=8.34 tick_p95_ms=8.65 tick_max_ms=9.09 dropped_ms=0 errors=0
 cursor restored matches=true
 ```
 
-`requested_px` 与 `observed_px` 一致，说明真实光标按积分位移移动；`tick_avg_ms`
-约 8.3ms，说明 `timeBeginPeriod(1)` 生效。600ms 的 20px 档只移动 120px，
-1300ms 的 30px 档移动 900px；同样输入在旧的单段曲线下分别约 389px 和 1857px。
+`requested_px` 与 `observed_px` 基本一致，说明真实光标按积分位移移动；`tick_avg_ms`
+约 8.3ms，说明 `timeBeginPeriod(1)` 生效。600ms 的 20px 档只移动 120px；
+1900ms 的 20px 档移动 1129px（旧的单段曲线约 1328px）；1300ms 的 30px 档
+移动 792px（旧的单段曲线约 1857px）。
 
 ## 2026-11-26 用户试按：单段曲线偏快
 
@@ -113,12 +123,11 @@ cursor restored matches=true
 - 1.867s 移动段（`distance=20`）：请求 1907px，实际 1907px；
 - 短按仍能小幅移动，但长按很容易过冲，精细定位不如旧行为。
 
-结论：单段「500ms 加速到 6×」对精细控制太激进。改为「500ms 精细窗口 +
-700ms 加速」的两段曲线；长按 1.3s 的位移从约 1857px 降到约 900px，同时保留
-长按加速。
-
-用户复测两段曲线后反馈「体验还行」（左/右 20px、上/下 30px）。暂按
-500ms / 700ms 冻结；是否默认开启、是否暴露设置仍待产品决定。
+结论：单段「500ms 加速到 6×」对精细控制太激进。先改为「500ms 精细窗口 +
+700ms 加速」的两段曲线，长按 1.3s 从约 1857px 降到约 900px。用户复测两段
+曲线后反馈「体验还行」，但随后指出默认 20px 档仍略快；最大倍率再从 6× 降到
+5×，同一 1.3s 的 30px 档约 792px，20px 档 1.9s 约 1129px。该 5× 版本待用户
+再次复测。是否默认开启、是否暴露设置仍待产品决定。
 
 ## 日志
 
