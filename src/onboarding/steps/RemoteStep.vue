@@ -20,6 +20,7 @@ import {
   isGenericRemoteName,
   shouldShowResetGuidance,
 } from "../reset-guidance";
+import { reportUsbPortHintShown, USB_PORT_HINT_TEXT } from "../../lib/usb-port-hint";
 
 const props = defineProps<{
   runtime: RuntimeSnapshot | null;
@@ -130,6 +131,21 @@ const showReconnectGuidance = computed(() =>
     rawInputPhase: props.runtime?.platform.rawInput.phase ?? "stopped",
     buttonObserved: props.buttonObserved,
   }),
+);
+
+// 排查卡含 USB 接口建议：只在首次出现时记一条，support 能区分“用户看到过提示”
+// 和“用户没等到提示就离开”。只记 stable token，不含设备身份。
+watch(
+  showReconnectGuidance,
+  (shown, previous) => {
+    if (!shown || previous === true) return;
+    reportUsbPortHintShown(
+      "onboarding",
+      reconnectAttempt.value,
+      props.runtime?.platform.rawInput.phase ?? "stopped",
+    );
+  },
+  { immediate: true },
 );
 const modelLabel = computed(() =>
   remoteModelLabel(props.runtime?.platform.connection.remoteModel ?? "unknown"),
@@ -464,6 +480,12 @@ watch(
           <span class="onboarding-num">3</span>
           <span>
             {{ t("仍无反应：同时长按「主页」+「菜单」重置遥控器，在 Windows 蓝牙设置里删除这支遥控器，再按「TV」键约 3 秒重新配对；回来后点「重新扫描」。") }}
+          </span>
+        </li>
+        <li>
+          <span class="onboarding-num">4</span>
+          <span>
+            {{ t(USB_PORT_HINT_TEXT) }}
           </span>
         </li>
       </ul>

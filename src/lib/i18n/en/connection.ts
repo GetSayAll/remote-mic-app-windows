@@ -65,6 +65,9 @@ export default {
 
   // 遥控器连接
   "最近一次语音可能不完整": "The last voice session may have been incomplete",
+  "可以换一个 USB 接口再试": "Try another USB port",
+  "如果遥控器是通过外接 USB 蓝牙适配器连接的，换一个 USB 2.0 接口再试（通常是黑色接口）；部分 USB 3.0 接口会干扰蓝牙。换好后重新插拔适配器，应用会继续自动重试。":
+    "If the remote uses an external USB Bluetooth adapter, try a USB 2.0 port (usually black). Some USB 3.0 ports can interfere with Bluetooth. Reconnect the adapter and SayAll will keep retrying.",
   "连接": "Connect",
   "遥控器连接": "Remote connection",
   "扫描中…": "Scanning…",

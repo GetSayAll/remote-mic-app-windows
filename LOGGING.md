@@ -256,6 +256,20 @@ Windows 链路/ATT/配对层」。连接失败段补三类只读日志；都不�
     厂商驱动内部日志。需要这些证据时走 Windows 事件日志、USBView 或厂商工具，
     并仍然只保留分类与计数。
 
+### USB 接口建议曝光（2026-11-26）
+
+连接页/向导在“连续 5 次重连且 HID 接口仍 `awaiting`”时显示一条条件式建议：
+如果使用外接 USB 蓝牙适配器，可换一个 USB 2.0 接口再试。它**不是** USB 3.0 检测；
+应用当前不读取物理接口代际。
+
+- `frontend event=usb_hint phase=shown result=unknown reason=scope_<connection|onboarding>_attempt_<n>_hid_<phase>`：
+  提示首次出现。`scope` 区分连接页/向导，`attempt` 与 `ble_connect` 对齐，`hid` 是
+  `awaiting|ready|...`。
+- `frontend event=usb_hint phase=dismissed result=unknown reason=scope_connection_attempt_<n>_user_dismissed`：
+  用户点“忽略此提醒”；只用于判断提示是否打扰，不代表问题已解决。
+- 不记录适配器名称、USB 路径、接口编号或用户选择；换口后恢复仍以 `ble_connect`、
+  `ble_link` 和 `raw_input` 为准。空口/适配器事实见 `ble_adv` 与 `ble_adapter`。
+
 ## 隐私红线
 
 不得记录语音或转写正文、用户输入、剪贴板、用户名/邮箱/手机号、完整路径、窗口标题、蓝牙 MAC/UUID/序列号、HID 路径、IP、Token/API Key/密码/私钥/证书、第三方 App 私有状态或原始音频字节。不要用敏感值的稳定哈希替代脱敏。允许记录稳定产品分类、布尔结果、错误 domain/code、采样率、帧数、耗时和脱敏计数。

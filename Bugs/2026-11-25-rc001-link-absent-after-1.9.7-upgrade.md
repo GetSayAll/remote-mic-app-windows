@@ -200,6 +200,44 @@
   不作为判据。
 - 不覆盖 USB Hub 供电、2.4 GHz 干扰和厂商驱动内部状态；这些仍是 `deferred`。
 
+## 2026-11-26 USB 2.0 接口 A/B 与条件提示（本分支）
+
+用户在同一台机器、同一只 RC001 上报告：适配器接 USB 3.0 接口时反复重连；换到
+USB 2.0 接口后稳定。随附日志（`sayall-diagnostic-20261123T235023073Z-p18744.zip`，
+本地时间 = UTC+8）覆盖 11-19 至 11-26，关键时间线：
+
+| 时间（本地） | 版本 | 观察 |
+| --- | --- | --- |
+| 11-23 09:55–11-24 11:14 | 1.9.3 | 约 25 小时稳定：1 次连接成功、无重连失败，HID 接口出现 |
+| 11-24 11:19–11-25 09:58 | 1.9.3 | 303 次尝试 / 302 次失败，全部 `gatt_unreachable` |
+| 11-25 10:31–17:34 | 1.9.7 | 691 次尝试 / 689 次失败；2 次短暂连上约 6 秒又掉 |
+| 11-26 08:39–08:48 | 1.9.7 | 18/18 失败；HID 接口不在场；`ble_scan found_count=1` |
+| 11-26 08:49–08:54 | 1.9.7 | 用户换口/重启后：HID 已到场，设备创建时链路已 `connected`；服务发现 352 ms、连接 944 ms，之后 5.5 分钟无重连 |
+
+证据边界：
+
+- 失败仍在链路层：`service_discovery` 阶段、`link_status=disconnected`、
+  `gatt_unreachable`；不是 ATVV/GATT 路径选择或权限问题。
+- 1.9.3 在 11-24 已有 302 次同类失败，**不是 1.9.7 回归**。
+- 08:49 的成功与换 USB 接口、应用重启、适配器重新枚举、遥控器/HID 唤醒同时发生；
+  日志不记录 USB 接口代际，无法单独证明 USB 3.0 是根因。11-23 的 25 小时稳定期
+  也说明“USB 3.0 必然失败”不成立；若该稳定期同样在 USB 3.0 接口，则 USB 3.0 更像
+  间歇性放大器。
+- 这批日志是官方 1.9.7 `98fd2a24`，早于本分支诊断：没有 `ble_adv`、`bus_type`、
+  `power_state`，不能回答空口是否收到广告或适配器是否被挂起。
+
+本轮因此只做两件事：
+
+1. 在长时间重连、HID 接口缺席时增加**条件式 USB 2.0 接口建议**：向导重连排查卡
+   增加第 4 步，连接页在连续 5 次重连且 `raw_input phase=awaiting` 时显示可忽略的
+   提示。文案是“如果使用外接 USB 蓝牙适配器……”的条件句，不声称已检测到 USB 3.0；
+   用户文案避免使用「端口」等机制词。
+2. 增加 `frontend event=usb_hint phase=shown|dismissed`：只记录 `scope`、`attempt`、
+   `hid` 阶段和用户是否忽略，用于确认提示是否真的到达用户、是否在提示后恢复。
+   空口/适配器事实继续由 #420/#421 的 `ble_adv`、`ble_adapter bus_type/power_state`、
+   `raw_input scan` 和 `ble_link session_ms/phase` 提供；这些日志仍不能分辨 USB 2.0/3.0
+   接口代际。若后续要自动判断，需要另加 USB Hub 端口速率探针（当前不实现）。
+
 ## 下一步
 
 1. 用户侧 A/B（按顺序，先做只读项）：
@@ -211,15 +249,16 @@
      不作为常规解法。
    - 换一个 USB 口/另一台电脑测试同一只遥控器；另一台正常则重点查本机适配器
      与 Windows BLE 栈，仍失败则重点查遥控器。
-2. 应用侧（未改动，待产品决策）：
-   - 把 `reconnect-guidance` 卡复用到连接页（连续 60 s 或 ≥5 次重连、且 HID
-     仍 `awaiting` 时显示）。
+2. 应用侧：
+   - 向导重连排查卡增加 USB 2.0 接口建议；连接页增加可忽略的条件提示
+     （本分支实现，见上节）。
    - `BleSession::connect` 结束前复查 `ConnectionStatus`，不在已断开时写
-     `passed`。
+     `passed`（仍未改）。
 3. 机器侧取证（下次报障）：运行 `scripts/collect-bluetooth-adapter.ps1`，并对照
    Windows `Microsoft-Windows-Bluetooth-BthLEEnum` Operational 事件；脚本已覆盖
    物理适配器、选择性挂起、驱动版本、蓝牙/PnP/电源事件计数。应用日志现在也会
-   给出 `bus_type`/`power_state`。应用日志只能证明链路不在，不能区分上述候选。
+   给出 `bus_type`/`power_state`、`ble_adv` 和 `usb_hint`。应用日志只能证明链路
+   不在，不能区分上述候选；USB 2.0/3.0 接口代际仍需用户说明或另加端口速率探针。
 
 ## 验证
 
@@ -237,6 +276,24 @@
   pubkey 不匹配，属预期；该包与 `.sig` 不可发布。
 - 安装/升级/启动：`deferred`（未在本机覆盖安装；需用户机器验证）。
 - RC001/RC003 真机复现：`deferred`（需要用户机器与遥控器在失败态）。
+
+## 2026-11-26 条件提示与日志验证
+
+- `pnpm test`：`passed`（752 passed / 10 skipped；新增 `usb-port-hint` 5 例，
+  `RemoteStep` 与 `ConnectionPage` 各补充 USB 提示用例）。
+- `pnpm exec vue-tsc --noEmit`：`passed`。
+- `pnpm build`：`passed`。
+- `scripts/ci-preflight.ps1`：`passed`（7/7）。
+- 代码提交：`b259ca1dc273c10a726b54b7e382232fe612cdf4`
+  （`feat(connection): 重连排查提示 USB 2.0 接口`）。
+- 本地测试包：`target/release/bundle/nsis/无线麦 SayAll_1.9.8_x64-setup.exe`
+  （13,606,677 字节，SHA-256
+  `1c45b8ddc80a38e1deac0657a2db44d61fb0afdb6e748119b77001233af82ed0`）；
+  裸 exe 内嵌 `source_revision=b259ca1dc273c10a726b54b7e382232fe612cdf4`；
+  `verify-frontend-embedded.ps1` 18/18 `passed`。本地测试签名不可发布。
+- 界面真实 Windows 渲染与安装包内点击：`deferred`（需要在本机或真机安装后目视；
+  本机当前已有运行中的安装版，未覆盖安装）。
+- `usb_hint` 真实日志行：`deferred`（单元路径已验证；需要下一次 Windows 运行采样）。
 
 ## 隐私检查
 
