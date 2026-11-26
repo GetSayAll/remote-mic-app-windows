@@ -1757,12 +1757,15 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
     // tao 的 show() 只在缓存可见性有差异时动作；窗口被外部隐藏时缓存可能仍是
     // 「可见」，show() 变成空操作。按 Win32 真实状态补一次 SW_RESTORE
     // （2026-11-26 现场：托盘点击/二次启动均报 still_hidden，SW_RESTORE 立即恢复）。
-    let mut win32_restore = None;
+    let mut win32_restore = "not_needed";
     if let Some(hwnd) = hwnd {
         let iconic_after_show = unsafe { IsIconic(hwnd).as_bool() };
         let visible_after_show = unsafe { IsWindowVisible(hwnd).as_bool() };
         if needs_win32_restore_after_show(iconic_after_show, visible_after_show) {
-            win32_restore = Some(unsafe { ShowWindow(hwnd, SW_RESTORE).as_bool() });
+            // ShowWindow 的返回值表示「调用前是否可见」，隐藏窗口必然返回 false，
+            // 不能当成功判据；是否恢复由下面的 Win32 visible_after 决定。
+            let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            win32_restore = "attempted";
         }
     }
     let _ = window.set_focus();
@@ -1813,11 +1816,7 @@ fn show_main_window(app: &tauri::AppHandle, trigger: &str) {
         flag(visible_after),
         flag(foreground_after),
         show_result.is_ok(),
-        match win32_restore {
-            Some(true) => "passed",
-            Some(false) => "failed",
-            None => "not_needed",
-        },
+        win32_restore,
     ));
 }
 
