@@ -1240,6 +1240,31 @@ describe("Onboarding log directory entry", () => {
   });
 });
 
+describe("Onboarding troubleshooting QR entry", () => {
+  installWizardHooks();
+
+  it("opens the Douyin / Xiaohongshu QR dialog from the footer and closes it", async () => {
+    mocks.getOnboardingState.mockResolvedValue(activeState("remote"));
+    const wrapper = await mountWizard(runtimeWith());
+
+    const entry = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "配置有问题？扫码关注抖音、小红书，了解教程");
+    expect(entry).toBeTruthy();
+    expect(wrapper.find(".help-qr-dialog").exists()).toBe(false);
+
+    await entry!.trigger("click");
+    expect(wrapper.find(".help-qr-dialog").exists()).toBe(true);
+    expect(wrapper.findAll(".help-qr-card img").map((img) => img.attributes("src"))).toEqual([
+      "/douyin-qr.png",
+      "/xhs-qr.png",
+    ]);
+
+    await wrapper.get(".help-qr-footer button").trigger("click");
+    expect(wrapper.find(".help-qr-dialog").exists()).toBe(false);
+  });
+});
+
 describe("Onboarding input tool step", () => {
   installWizardHooks();
 

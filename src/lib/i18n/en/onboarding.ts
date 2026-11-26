@@ -329,6 +329,19 @@ export default {
   "有设置不再可用，回到对应步骤修复后再完成。":
     "A setting is no longer available. Return to the affected step, fix it, then finish.",
 
+  // ---- Help / tutorials (2026-11-26) ----
+  "配置有问题？扫码关注抖音、小红书，了解教程":
+    "Trouble with setup? Scan to follow Douyin or Xiaohongshu for tutorials",
+  "配置有问题？": "Trouble with setup?",
+  "扫码关注抖音或小红书，查看设置教程。":
+    "Scan to follow Douyin or Xiaohongshu and view setup tutorials.",
+  "抖音 · 无线麦 SayAll.App": "Douyin · SayAll",
+  "小红书 · 无线麦 App": "Xiaohongshu · SayAll",
+  "用抖音扫一扫": "Scan with Douyin",
+  "用小红书扫一扫": "Scan with Xiaohongshu",
+  "抖音「无线麦 SayAll.App」二维码": "QR code for the SayAll Douyin account",
+  "小红书「无线麦 App」二维码": "QR code for the SayAll Xiaohongshu account",
+
   // ---- Side panel ----
   "无线说话，也能随手控制": "Speak wirelessly. Control instantly.",
   "连接检查": "Connection Check",
