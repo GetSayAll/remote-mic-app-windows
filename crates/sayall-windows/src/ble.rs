@@ -1370,16 +1370,19 @@ fn worker_loop(
                     gatt_note(format!("chord_retry skipped reason=stale epoch={epoch}"));
                     continue;
                 }
-                let (verdict, evidence, mic) = wetype_reaction(baseline, marker_baseline);
+                let capture = crate::wetype_revive::wetype_capture_evidence();
+                let (verdict, evidence, mic, capture) =
+                    wetype_reaction(baseline, marker_baseline, capture, true);
                 if verdict != WetypeReaction::NotReacted {
                     gatt_note(format!(
-                        "chord_retry skipped reason={} evidence={evidence} mic={} attempt={attempt} epoch={epoch}",
+                        "chord_retry skipped reason={} evidence={evidence} mic={} capture={} attempt={attempt} epoch={epoch}",
                         if verdict == WetypeReaction::Reacted {
                             "wetype_alive"
                         } else {
                             "observation_unavailable"
                         },
-                        mic.as_log_str()
+                        mic.as_log_str(),
+                        capture.as_log_str()
                     ));
                     continue;
                 }
@@ -3275,6 +3278,7 @@ fn handle_control(
                     verify_baseline,
                     f5_baseline,
                     marker_baseline,
+                    std::sync::Arc::clone(state),
                     heal,
                 );
             }
@@ -4727,6 +4731,13 @@ fn format_utc_timestamp(duration: std::time::Duration) -> String {
 ///     下一轮检测；两轮重试都未响应才提示人工（打开微信输入法界面）。
 /// 全程落 gatt_note 日志（含 attempt 轮次）；检测线程尽力而为，绝不
 /// 阻塞语音会话。
+///
+/// 2026-11-26（WeType 3.0.3.x 现场）：`0xFC` 标记与 ConsentStore 两条判据同时
+/// 失明，旧逻辑把"观测不到"当成"没响应"，每约 2.5s 重放一次和弦，把正在进行的
+/// 按住说话反复拆掉。现在增加第三条**与版本解耦**的正面判据：默认录音端点上的
+/// WASAPI 会话（见 `wetype_revive::wetype_capture_evidence`）。录音会话从按下
+/// 到 Active 约 1s，因此 700ms 首次采样只记录，稳定点（2.5s）才允许判未响应；
+/// 所有判据都读不到时只记日志、不重发按键、不切输入法。
 const WETYPE_CHECK_DELAY_MS: u64 = 700;
 /// 每轮重注入距上一轮 cycle 完成的等待。实测依据（2026-09-05 20:15-20:27
 /// 七次发作 + 16:44-17:35 七次，sayall-diag.log/kb-live 解码）：复活延迟
@@ -4737,35 +4748,39 @@ const WETYPE_RETRY_SETTLE_MS: [u64; 3] = [2000, 3000, 5000];
 /// 最大重注入轮次（检测共 attempt 0..=3 四轮）。
 const WETYPE_RETRY_MAX_ATTEMPT: u32 = 3;
 
-/// 合并微信输入法"本次按住是否已被触发"的两个独立判据，返回
-/// （裁决，证据来源，开麦判据结果）。
+/// 合并微信输入法"本次按住是否已被触发"的独立判据，返回
+/// （裁决，证据来源，开麦判据结果，录音会话判据结果）。
 ///
 /// 证据来源只用于日志归因：`marker` = 钩子层看到微信输入法自注入的存活标记
-/// （0xFC break key，与版本解耦）；`mic` = ConsentStore 开麦观测；`unavailable`
-/// = 观测不可用；`none` = 两个判据都确认未触发（可执行恢复阶梯）。
+/// （0xFC break key）；`mic` = ConsentStore 开麦观测；`capture` = WASAPI 录音
+/// 会话（2026-11-26 新增，与版本解耦）；`unavailable` = 观测不可用；
+/// `none` = 判据确认未触发（可执行恢复阶梯）。
 ///
-/// 第三个返回值**始终**记录开麦判据自身的结果：`evidence=marker mic=not_observed`
-/// 就是 issue #118 的盲判形态（微信输入法在录音但 ConsentStore 没写），
-/// 而 `evidence=marker mic=observed` 说明两条通道同时命中——修复是否承重，
-/// 靠这一个字段即可在复现窗口判定。
-///
-/// 背景（2026-09-23 issue #118）：微信输入法 2.1.4.6 起录音不再写 ConsentStore，
-/// 单靠开麦观测会把"其实已在录音"判成未响应，随后重放和弦拆掉进行中的会话。
-/// 存活标记是正面证据，出现即否决恢复；判据缺失时退化为原行为，不比现状更差。
+/// 开麦/录音会话判据**始终**记录自身结果：`evidence=marker mic=not_observed
+/// capture=inactive` 就是"标记单独承重"的盲判形态；`evidence=capture
+/// mic=not_observed` 是 2026-11-26 的现场形态（新版本两条旧判据都失明）。
 fn wetype_reaction(
     baseline: Option<MicObservation>,
     marker_baseline: u64,
-) -> (WetypeReaction, &'static str, MicResponse) {
+    capture: crate::wetype_revive::CaptureEvidence,
+    capture_settled: bool,
+) -> (
+    WetypeReaction,
+    &'static str,
+    MicResponse,
+    crate::wetype_revive::CaptureEvidence,
+) {
     let mic = response_since(baseline, wetype_mic_observation());
     let marker_now = crate::key_suppressor::wetype_marker_count();
-    let verdict = reaction_verdict(mic, marker_baseline, marker_now);
+    let verdict = reaction_verdict(mic, marker_baseline, marker_now, capture, capture_settled);
     let evidence = match verdict {
         WetypeReaction::Reacted if marker_now > marker_baseline => "marker",
-        WetypeReaction::Reacted => "mic",
+        WetypeReaction::Reacted if mic == MicResponse::Observed => "mic",
+        WetypeReaction::Reacted => "capture",
         WetypeReaction::Unknown => "unavailable",
         WetypeReaction::NotReacted => "none",
     };
-    (verdict, evidence, mic)
+    (verdict, evidence, mic, capture)
 }
 
 fn spawn_wetype_check(
@@ -4786,49 +4801,89 @@ fn spawn_wetype_check(
     std::thread::Builder::new()
         .name("sayall-wetype-check".to_owned())
         .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(WETYPE_CHECK_DELAY_MS));
-            let (still_streaming, same_session) = {
-                let snapshot = lock(&state);
-                (
-                    snapshot.voice_state == VoiceSessionState::Streaming,
-                    epoch_ref.load(Ordering::SeqCst) == epoch,
-                )
-            };
-            if !still_streaming || !same_session {
-                // 会话已结束或已被新会话替换：无需验证/唤醒（避免误判与
-                // 误伤——旧阶梯释放/重按新会话的和弦会打断其听写）。
-                gatt_note(if same_session {
-                    "wetype_check skipped reason=session_ended".to_owned()
-                } else {
-                    format!("wetype_check skipped reason=session_replaced epoch={epoch}")
-                });
-                return;
-            }
-            match wetype_reaction(baseline, marker_baseline) {
-                (WetypeReaction::Reacted, evidence, mic) => {
+            let started = std::time::Instant::now();
+            let mut outcome: Option<(
+                WetypeReaction,
+                &'static str,
+                MicResponse,
+                crate::wetype_revive::CaptureEvidence,
+            )> = None;
+            for delay in [
+                WETYPE_CHECK_DELAY_MS,
+                crate::wetype_revive::CAPTURE_SETTLE_MS,
+            ] {
+                let elapsed = started.elapsed().as_millis() as u64;
+                if elapsed < delay {
+                    std::thread::sleep(std::time::Duration::from_millis(delay - elapsed));
+                }
+                let (still_streaming, same_session) = {
+                    let snapshot = lock(&state);
+                    (
+                        snapshot.voice_state == VoiceSessionState::Streaming,
+                        epoch_ref.load(Ordering::SeqCst) == epoch,
+                    )
+                };
+                if !still_streaming || !same_session {
+                    // 会话已结束或已被新会话替换：无需验证/唤醒（避免误判与
+                    // 误伤——旧阶梯释放/重按新会话的和弦会打断其听写）。
+                    gatt_note(if same_session {
+                        "wetype_check skipped reason=session_ended".to_owned()
+                    } else {
+                        format!("wetype_check skipped reason=session_replaced epoch={epoch}")
+                    });
+                    return;
+                }
+                let capture = crate::wetype_revive::wetype_capture_evidence();
+                let settled = delay >= crate::wetype_revive::CAPTURE_SETTLE_MS;
+                let current = wetype_reaction(baseline, marker_baseline, capture, settled);
+                outcome = Some(current);
+                let (verdict, evidence, mic, capture) = current;
+                if verdict == WetypeReaction::Reacted {
                     // marker_extra 是目标程序自定义的魔数（WeType = "WTYP"），
-                    // 只用于真机归因，不含用户数据。mic= 记录开麦判据自身结果，
-                    // 用于区分"盲判"与"两条通道同时命中"。
+                    // 只用于真机归因，不含用户数据。mic= / capture= 记录各判据
+                    // 自身结果，用于区分盲判与多通道同时命中。
                     gatt_note(format!(
-                        "wetype_check reacted=true attempt={attempt} epoch={epoch} evidence={evidence} mic={} marker_extra={:#X}",
+                        "wetype_check reacted=true attempt={attempt} epoch={epoch} evidence={evidence} mic={} capture={} marker_extra={:#X}",
                         mic.as_log_str(),
+                        capture.as_log_str(),
                         crate::key_suppressor::wetype_marker_last_extra()
                     ));
                     return;
                 }
-                (WetypeReaction::Unknown, _, mic) => {
+                if delay == WETYPE_CHECK_DELAY_MS {
+                    if verdict == WetypeReaction::NotReacted {
+                        // 非微信工具（NotApplicable）的旧语义：无需等待录音
+                        // 会话稳定点，直接走恢复阶梯。
+                        break;
+                    }
+                    // 微信输入法：录音会话从按下到 Active 约 1s（2026-11-26
+                    // 本机实测 1.02s）；700ms 的“没有会话”不能当未响应证据，
+                    // 要等到 2.5s 稳定点。
                     gatt_note(format!(
-                        "wetype_check skipped reason=observation_unavailable attempt={attempt} epoch={epoch} mic={}",
-                        mic.as_log_str()
+                        "wetype_check pending attempt={attempt} epoch={epoch} mic={} capture={} note=wait_capture_settle",
+                        mic.as_log_str(),
+                        capture.as_log_str()
                     ));
-                    return;
                 }
-                (WetypeReaction::NotReacted, _, _) => {}
+            }
+            let Some((verdict, _evidence, mic, capture)) = outcome else {
+                return;
+            };
+            if verdict == WetypeReaction::Unknown {
+                // 所有判据都读不到：不重发按键、不切输入法。宁可这次不自动
+                // 唤醒，也不拆掉可能正在进行的录音（2026-11-26 报告诉求）。
+                gatt_note(format!(
+                    "wetype_check skipped reason=observation_unavailable attempt={attempt} epoch={epoch} mic={} capture={}",
+                    mic.as_log_str(),
+                    capture.as_log_str()
+                ));
+                return;
             }
             if attempt >= WETYPE_RETRY_MAX_ATTEMPT {
                 // 最后一轮仍未响应：放弃自动恢复，提示人工（唯一兜底）。
                 gatt_note(format!(
-                    "wetype_check final=not_reacted attempts={WETYPE_RETRY_MAX_ATTEMPT}"
+                    "wetype_check final=not_reacted attempts={WETYPE_RETRY_MAX_ATTEMPT} capture={}",
+                    capture.as_log_str()
                 ));
                 lock(&state).last_error = Some(
                     "微信输入法热键休眠，自动唤醒重试后仍未响应。可打开一次微信输入法的任意界面（如设置页）恢复其监听后重试"
@@ -4837,7 +4892,8 @@ fn spawn_wetype_check(
                 return;
             }
             gatt_note(format!(
-                "wetype_check reacted=false attempt={attempt} epoch={epoch} reviving"
+                "wetype_check reacted=false attempt={attempt} epoch={epoch} capture={} reviving",
+                capture.as_log_str()
             ));
             let revive = crate::ime::cycle_wetype_profile();
             gatt_note(format!(
@@ -4864,16 +4920,19 @@ fn spawn_wetype_check(
                 });
                 return;
             }
-            let (verdict, evidence, mic) = wetype_reaction(baseline, marker_baseline);
+            let capture = crate::wetype_revive::wetype_capture_evidence();
+            let (verdict, evidence, mic, capture) =
+                wetype_reaction(baseline, marker_baseline, capture, true);
             if verdict != WetypeReaction::NotReacted {
                 gatt_note(format!(
-                    "wetype_check skipped_retry reason={} evidence={evidence} mic={} attempt={attempt} epoch={epoch}",
+                    "wetype_check skipped_retry reason={} evidence={evidence} mic={} capture={} attempt={attempt} epoch={epoch}",
                     if verdict == WetypeReaction::Reacted {
                         "wetype_alive"
                     } else {
                         "observation_unavailable"
                     },
-                    mic.as_log_str()
+                    mic.as_log_str(),
+                    capture.as_log_str()
                 ));
                 return;
             }
