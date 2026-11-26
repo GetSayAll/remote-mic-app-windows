@@ -8006,6 +8006,23 @@ mod tests {
         }
     }
 
+    /// 2026-11-26 现场：覆盖安装保留旧 WUDFHost Gadget，全键支持永久
+    /// `no_authenticated_agent`；卸载重装（`[TAP] resident=0`）才恢复。
+    /// 安装器必须在覆盖文件后留下升级清理标记，让新助手第一次启动时
+    /// 释放旧宿主/设备环并重建运行时目录。
+    #[test]
+    fn installer_marks_upgrade_for_a_clean_helper_runtime() {
+        let preinstall = macro_body(INSTALLER_HOOKS, "NSIS_HOOK_PREINSTALL");
+        assert!(
+            preinstall.contains("rc003-upgrade-cleanup"),
+            "覆盖升级必须写 rc003-upgrade-cleanup 标记，和卸载清理走同一条宿主释放路径"
+        );
+        assert!(
+            preinstall.contains("SayAllStopHelper install 0"),
+            "写标记前必须让旧助手退出，避免它继续 attach 旧 tap"
+        );
+    }
+
     /// 2026-10-08 产品决定（用户明确）：**卸载不再弹窗**——删不掉的东西由提权助手先做
     /// 设备环释放锁、再删，仍删不掉的一律安排到重启后自动删除。这条断言防止有人
     /// 再把"未能立即删除"的提示加回来。
@@ -8024,6 +8041,10 @@ mod tests {
         assert!(
             uninstall.contains("--uninstall-cleanup"),
             "卸载必须能拉起提权助手做清理（含需要时的设备环）"
+        );
+        assert!(
+            uninstall.contains("rc003-upgrade-cleanup"),
+            "卸载必须删除一次性的覆盖升级清理标记，避免留给下一次安装"
         );
     }
 

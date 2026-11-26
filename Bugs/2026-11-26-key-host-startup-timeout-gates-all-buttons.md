@@ -96,6 +96,17 @@
 - 若 boot 行存在但 connect 失败，说明需要把 key host IPC 从 TCP loopback 改为命名管道；若 boot 行也不存在，说明子进程在进入 Rust `main/run_host` 前就被拦住，需从进程启动/安全软件方向查。
 - 同一现场 RC003 helper 仍反复 `agent_never_acked` / `no_authenticated_agent`，属于 agent→helper 的另一条 TCP loopback 路径，不能用 key host 重连修复；它与 [2026-09-29-helper-scheduled-task-loopback-refused.md](2026-09-29-helper-scheduled-task-loopback-refused.md) 的 WFP/TUN 形状相符，需单独处理。
 
+## 后续现场（2026-11-26 log 17：覆盖安装 vs 全新安装）
+
+同一日志里，覆盖安装的应用 `pid=19864`（`source_revision=89c57ed…`）在 06:46:08–06:46:49 完成 6 次重试，每次都记录 `child_state phase=accept_timeout state=running`，最终 `retry result=exhausted attempts=6`，`gate_active=0`。随后卸载并全新安装到另一个安装路径的应用 `pid=21584` 在 06:53:55 首次 `key_host action=start result=passed`。旧包没有子进程侧 `key_host action=boot` / connect 失败行，因此仍不能区分“子进程未进入 `run_host`”与“进入后 TCP 回连被改写/拒绝”。
+
+同轮全键支持的根因已由日志确认是**旧 RC003 运行时/旧 Gadget 被覆盖安装保留**（见 [2026-11-26-overwrite-upgrade-keeps-stale-rc003-tap.md](2026-11-26-overwrite-upgrade-keeps-stale-rc003-tap.md)）。开发机用带升级清理标记的新包做真实覆盖安装后，`key_host action=start result=passed`，说明覆盖安装路径本身不再必然触发该超时；但用户现场同时更换了安装路径，不能据此把 key host 失败归因于旧运行时。
+
+下一步：在受影响机器用本包（`SayAll_1.9.8_x64-setup_upgrade-cleanup-r2.exe`，SHA-256 `8b818f11…`）做**同路径覆盖安装**，抓取子进程 `key_host action=boot` 与 `key_host action=connect result=failed`：
+
+- 有 boot、无 connect 成功 ⇒ 把 key host IPC 从 TCP loopback 改为命名管道（与 RC003 桥接同款传输），不再依赖 loopback。
+- 无 boot ⇒ 查子进程启动前被安全软件/加载器拦截的路径。
+
 ## 隐私检查
 
 未包含蓝牙地址、HID 路径、设备身份、语音内容或用户目录；仅保留时间戳、事件名、状态与退出码。
