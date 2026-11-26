@@ -50,7 +50,7 @@
 - `cargo test --manifest-path hardware/RC003/helper/Cargo.toml`：92 passed / 0 failed（2026-11-26，`passed`）。
 - `cargo test -p sayall-windows-app --lib installer_marks_upgrade_for_a_clean_helper_runtime`：1 passed（`passed`）。
 - `cargo fmt --all -- --check`、`cargo fmt --manifest-path hardware/RC003/helper/Cargo.toml -- --check`：`passed`。
-- 开发机真实覆盖升级（安装包 `SayAll_1.9.8_x64-setup_upgrade-cleanup-r2.exe`，SHA-256 `8b818f11…`，覆盖到已有旧运行时的 `%LOCALAPPDATA%\无线麦 SayAll`）：`passed`。
+- 开发机真实覆盖升级（安装包 `SayAll_1.9.8_x64-setup_upgrade-cleanup-r3.exe`，SHA-256 `0bfbcf10…`，内嵌修订号 `c9bd6d25`，覆盖到已有旧运行时的 `%LOCALAPPDATA%\无线麦 SayAll`）：`passed`。
   - 安装器退出码 0，并写出 `%LOCALAPPDATA%\SayAll\rc003-upgrade-cleanup`；
   - 应用下一次启动后日志依次出现：
     `[CLEANUP] event=upgrade_cleanup elevated=true` →

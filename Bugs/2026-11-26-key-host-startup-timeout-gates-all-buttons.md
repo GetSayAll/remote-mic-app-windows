@@ -102,7 +102,7 @@
 
 同轮全键支持的根因已由日志确认是**旧 RC003 运行时/旧 Gadget 被覆盖安装保留**（见 [2026-11-26-overwrite-upgrade-keeps-stale-rc003-tap.md](2026-11-26-overwrite-upgrade-keeps-stale-rc003-tap.md)）。开发机用带升级清理标记的新包做真实覆盖安装后，`key_host action=start result=passed`，说明覆盖安装路径本身不再必然触发该超时；但用户现场同时更换了安装路径，不能据此把 key host 失败归因于旧运行时。
 
-下一步：在受影响机器用本包（`SayAll_1.9.8_x64-setup_upgrade-cleanup-r2.exe`，SHA-256 `8b818f11…`）做**同路径覆盖安装**，抓取子进程 `key_host action=boot` 与 `key_host action=connect result=failed`：
+下一步：在受影响机器用本包（`SayAll_1.9.8_x64-setup_upgrade-cleanup-r3.exe`，SHA-256 `0bfbcf10…`，内嵌修订号 `c9bd6d25`）做**同路径覆盖安装**，抓取子进程 `key_host action=boot` 与 `key_host action=connect result=failed`：
 
 - 有 boot、无 connect 成功 ⇒ 把 key host IPC 从 TCP loopback 改为命名管道（与 RC003 桥接同款传输），不再依赖 loopback。
 - 无 boot ⇒ 查子进程启动前被安全软件/加载器拦截的路径。
