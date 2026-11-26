@@ -24,15 +24,19 @@
   ConsentStore；两条旧判据同时失明时，`reaction_verdict` 把“看不到”判成
   “未响应”，`chord_retry` 每约 2.5 秒释放并重按一次和弦，把按住说话反复拆掉。
 - [x] 修复：增加与版本解耦的 WASAPI 录音会话判据（`wetype_capture_evidence`）；
-  录音会话 Active 即判已响应；稳定采样点（2 s）确认无会话才允许恢复；所有判据
+  录音会话 Active 即判已响应；稳定采样点（2.5 s）确认无会话才允许恢复；所有判据
   都读不到时只记日志、不重发按键、不切输入法。`voice_verify` 与 `wetype_check`
   日志增加 `capture=`。
 - [x] 自动化 passed：`cargo test -p sayall-windows --lib` **639 passed / 22 ignored**；
   本机 `capture_session_probe` 与产品函数实测：微信输入法录音期间返回 `Active`，
   停止后返回 `Inactive`。
-- [ ] 原报障机器（WeType 3.0.3.x + RC001）长按 15 秒、闲置首用、真休眠恢复：
-  `deferred`；测试手册 `Testing/WindowsWeTypeCaptureSession.md`，记录见
-  `Bugs/2026-11-26-wetype-marker-blind-chord-retry-breaks-voice.md`。
+- [x] 原报障机器 1.9.8 真机复测 passed（2026-11-26，WeType 3.0.3.x + RC001）：
+  升级后 5 次会话全部 `reacted=true evidence=capture`（`marker_baseline=0`，
+  标记仍失明），0 次 `chord_retry` / `wetype_revive` / `voice_heal`；最长 11.3 秒、
+  全部 `voice_audio_rate result=full`。原始日志 `sayall-diagnostic(11).log`，
+  记录见 `Bugs/2026-11-26-wetype-marker-blind-chord-retry-breaks-voice.md`。
+- [ ] 该次日志未覆盖 15 秒整长按、闲置 10 分钟后首用、自然真休眠恢复与 RC003：
+  `deferred`；测试手册 `Testing/WindowsWeTypeCaptureSession.md`。
 
 ## 蓝牙共存提示（2026-11-22 用户反馈）
 
