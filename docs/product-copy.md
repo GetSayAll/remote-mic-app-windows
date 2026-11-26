@@ -898,3 +898,9 @@ ATVV、GATT / BLE / 无线电、内核 / 驱动、进程 / 端口 / 边沿、会
   落点：`src/components/onboarding/StepSide.vue`、`src/onboarding/control-buttons.ts`、
   `src/onboarding/steps/ControlsStep.vue`、`src/pages/OnboardingPage.vue`；
   验收手册 `Testing/WindowsOnboardingWizard.md` 同步。
+- 2026-11-26（USB 接口排查建议，现场 A/B）：向导重连排查卡第 4 步和连接页可忽略
+  提示增加条件句“如果使用外接 USB 蓝牙适配器，可换一个 USB 2.0 接口再试；部分
+  USB 3.0 接口会干扰蓝牙”。不声称应用检测到 USB 3.0，不使用「端口」等机制词；
+  只在连续重连且按键接口缺席时出现。落点：`src/lib/usb-port-hint.ts`、
+  `src/onboarding/steps/RemoteStep.vue`、`src/pages/ConnectionPage.vue`、
+  `src/lib/i18n/en/connection.ts`；日志见 `LOGGING.md` 的 `usb_hint`。

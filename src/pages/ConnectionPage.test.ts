@@ -1305,6 +1305,30 @@ describe("connection page rc003 capture switch", () => {
     wrapper.unmount();
   });
 
+  it("重连 5 次且 HID 缺席时提示尝试 USB 2.0 接口，并可忽略", async () => {
+    mocks.getConnectionSnapshot.mockResolvedValue({
+      ...emptyConnection,
+      phase: "reconnecting",
+      reconnectAttempt: 5,
+    });
+    const reconnectingRuntime: RuntimeSnapshot = {
+      ...runtime,
+      platform: {
+        ...runtime.platform,
+        rawInput: { ...runtime.platform.rawInput, phase: "awaiting", matchedDeviceCount: 0 },
+      },
+    };
+    const wrapper = mount(ConnectionPage, { props: { runtime: reconnectingRuntime } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("可以换一个 USB 接口再试");
+    expect(wrapper.text()).toContain("USB 2.0");
+
+    await wrapper.find(".usb-port-hint-dismiss").trigger("click");
+    expect(wrapper.text()).not.toContain("可以换一个 USB 接口再试");
+    wrapper.unmount();
+  });
+
   it("启动对账把开关关掉时说明原因（2026-10-15，issue #264 附加观察甲）", async () => {
     // 开关关闭态 + 后端报了回落原因 ⇒ 开关旁一句解释（本页名称是「支持更多输入工具」）。
     mocks.getRc003TaskStatus.mockResolvedValue(taskStatus({ enabled: false }));

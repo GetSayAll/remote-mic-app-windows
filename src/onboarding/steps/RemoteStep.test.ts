@@ -67,6 +67,8 @@ describe("RemoteStep 长时间重连指引", () => {
     expect(wrapper.text()).toContain("遥控器还没有真正连上");
     expect(wrapper.text()).toContain("手机或电视");
     expect(wrapper.text()).toContain("删除这支遥控器");
+    expect(wrapper.text()).toContain("USB 2.0");
+    expect(wrapper.text()).toContain("外接 USB 蓝牙适配器");
     expect(wrapper.findAll("button").map((node) => node.text())).toEqual(
       expect.arrayContaining(["打开蓝牙设置", "重新扫描"]),
     );

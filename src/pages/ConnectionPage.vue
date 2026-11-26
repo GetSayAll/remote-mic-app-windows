@@ -20,6 +20,13 @@ import {
   shouldShowVoiceAudioDegraded,
   voiceAudioDegradedText,
 } from "../lib/voice-audio-health";
+import {
+  reportUsbPortHintDismissed,
+  reportUsbPortHintShown,
+  shouldShowUsbPortHint,
+  USB_PORT_HINT_TEXT,
+  USB_PORT_HINT_TITLE,
+} from "../lib/usb-port-hint";
 import type {
   AudioEndpoint,
   AudioSnapshot,
@@ -947,6 +954,44 @@ function dismissVoiceAudioDegradedNote(): void {
   voiceAudioDegradedDismissed.value = true;
 }
 
+/**
+ * 长时间重连 + HID 接口缺席时的 USB 接口建议（2026-11-26）。
+ *
+ * 它不是 USB 3.0 检测：应用只看到蓝牙链路和 HID 是否在场，无法判断物理接口代际。
+ * 文案是条件句；换口后连接恢复即可，不改变任何重连策略。
+ */
+const usbPortHintDismissed = ref(false);
+watch(
+  () => connection.value.phase,
+  (phase) => {
+    if (phase !== "reconnecting") {
+      usbPortHintDismissed.value = false;
+    }
+  },
+);
+const showUsbPortHint = computed(
+  () =>
+    !usbPortHintDismissed.value &&
+    shouldShowUsbPortHint({
+      reconnecting: connection.value.phase === "reconnecting",
+      reconnectAttempt: connection.value.reconnectAttempt,
+      rawInputPhase: props.runtime?.platform.rawInput.phase ?? "stopped",
+      matchedDeviceCount: props.runtime?.platform.rawInput.matchedDeviceCount ?? 0,
+    }),
+);
+watch(showUsbPortHint, (shown, previous) => {
+  if (!shown || previous === true) return;
+  reportUsbPortHintShown(
+    "connection",
+    connection.value.reconnectAttempt,
+    props.runtime?.platform.rawInput.phase ?? "stopped",
+  );
+});
+function dismissUsbPortHint(): void {
+  usbPortHintDismissed.value = true;
+  reportUsbPortHintDismissed("connection", connection.value.reconnectAttempt);
+}
+
 const phaseTone = computed(() => {
   if (connection.value.phase === "failed") return "error";
   if (connection.value.phase === "streaming") return "active";
@@ -1275,6 +1320,24 @@ onUnmounted(() => {
 
         <p v-if="scanMessage" class="muted scan-summary">{{ scanMessage }}</p>
         <p v-if="operationMessage" class="operation-message">{{ operationMessage }}</p>
+
+        <div
+          v-if="showUsbPortHint"
+          class="info-callout warning callout-small usb-port-hint"
+          role="status"
+        >
+          <strong>{{ t(USB_PORT_HINT_TITLE) }}</strong>
+          <p>
+            {{ t(USB_PORT_HINT_TEXT) }}
+          </p>
+          <button
+            class="usb-port-hint-dismiss"
+            type="button"
+            @click="dismissUsbPortHint"
+          >
+            {{ t("忽略此提醒") }}
+          </button>
+        </div>
 
         <ul v-if="devices.length" class="device-list">
           <li v-for="device in devices" :key="device.id">
