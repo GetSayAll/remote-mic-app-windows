@@ -26,7 +26,7 @@ PoC 把按住过程改为**速度积分**：8ms 节拍、二次缓入曲线、�
 ```powershell
 $env:SAYALL_POINTER_MOTION = "1"
 $env:SAYALL_GATT_LOG = "C:\path\to\gatt.log"
-& "$env:LOCALAPPDATA\SayAll\sayall-windows-app.exe"
+& "$env:LOCALAPPDATA\无线麦 SayAll\sayall-windows-app.exe"
 ```
 
 - 必须是方向键（上/下/左/右）的 `mouse_move`。
@@ -42,9 +42,10 @@ $env:SAYALL_GATT_LOG = "C:\path\to\gatt.log"
 | --- | --- | --- |
 | tick | 8ms | 目标节拍；实际间隔写进会话日志 |
 | 初速 | `distance × 10 px/s` | `distance=20` → 200 px/s；100ms 短按约 20px |
-| 最大速度倍率 | 6× | 先慢后快 |
+| 精细窗口 | 500ms | 这段时间保持初速，给短按住留出可控的小幅定位 |
+| 最大速度倍率 | 6× | 只在精细窗口之后加速 |
 | 最大速度上限 | 2000 px/s | 防止 `distance=100` 时飞出去 |
-| 加速时长 | 500ms | 二次缓入到最大速度 |
+| 加速时长 | 700ms | 精细窗口结束后二次缓入到最大速度；总计 1.2s 达到最大 |
 | 单次积分上限 | 32ms | 引擎被阻塞后不允许一次大跳补回来 |
 | 单次按住上限 | 15s | 释放沿丢失时兜底停止 |
 | 进度日志间隔 | 1s | 长按期间可定位 |
@@ -81,33 +82,49 @@ timer mode=1ms samples=120 min_ms=8.01 avg_ms=8.56 p95_ms=9.37 max_ms=9.51
 （117Hz）。因此会话期间必须提升计时器精度，最后一帧结束立即恢复；否则
 「8ms 积分」实际会变成 15.6ms 一次的大步。
 
-## 真实光标探针
+## 真实光标探针（两段曲线）
 
 `move right 20 600`（真实移动光标，结束后恢复原位置）：
 
 ```text
-motion start button=Right direction=Right distance=20 base_px_s=200.0 max_px_s=1200.0 tick_ms=8
-motion end reason=probe duration_ms=602 ticks=73 moved_ticks=71 requested_px=389.0 observed_px=389.0 peak_px_s=1200.0 tick_avg_ms=8.24 tick_p95_ms=8.61 tick_max_ms=8.67 dropped_ms=0 errors=0
+motion start button=Right direction=Right distance=20 base_px_s=200.0 max_px_s=1200.0 fine_ms=500 accel_ms=700 tick_ms=8
+motion end reason=probe duration_ms=601 ticks=72 moved_ticks=70 requested_px=120.0 observed_px=120.0 peak_px_s=219.2 tick_avg_ms=8.35 tick_p95_ms=8.68 tick_max_ms=8.81 dropped_ms=0 errors=0
 cursor restored matches=true
 ```
 
-左/上方向同样核对过符号：
+`move right 30 1300`：
 
 ```text
-motion end reason=probe duration_ms=303 ticks=37 moved_ticks=35 requested_px=98.0 observed_px=98.0 peak_px_s=558.5 tick_avg_ms=8.20 tick_p95_ms=8.96 tick_max_ms=9.28 dropped_ms=0 errors=0
+motion start button=Right direction=Right distance=30 base_px_s=300.0 max_px_s=1800.0 fine_ms=500 accel_ms=700 tick_ms=8
+motion progress duration_ms=1000 ticks=120 speed_px_s=1055.0 requested_px=428.0 observed_px=428.0
+motion end reason=probe duration_ms=1305 ticks=156 moved_ticks=154 requested_px=900.0 observed_px=900.0 peak_px_s=1800.0 tick_avg_ms=8.37 tick_p95_ms=8.67 tick_max_ms=9.23 dropped_ms=0 errors=0
 cursor restored matches=true
 ```
 
 `requested_px` 与 `observed_px` 一致，说明真实光标按积分位移移动；`tick_avg_ms`
-约 8.2ms，说明 `timeBeginPeriod(1)` 生效。
+约 8.3ms，说明 `timeBeginPeriod(1)` 生效。600ms 的 20px 档只移动 120px，
+1300ms 的 30px 档移动 900px；同样输入在旧的单段曲线下分别约 389px 和 1857px。
+
+## 2026-11-26 用户试按：单段曲线偏快
+
+用户在安装版上实测旧单段曲线（`distance=30`，长按 600ms）：
+
+- 1.309s 移动段：请求 1857px，实际 1857px，已接近 1920px 屏宽；
+- 1.867s 移动段（`distance=20`）：请求 1907px，实际 1907px；
+- 短按仍能小幅移动，但长按很容易过冲，精细定位不如旧行为。
+
+结论：单段「500ms 加速到 6×」对精细控制太激进。改为「500ms 精细窗口 +
+700ms 加速」的两段曲线；长按 1.3s 的位移从约 1857px 降到约 900px，同时保留
+长按加速。
 
 ## 日志
 
 只落会话级日志，逐帧 tick 不写（`gatt_note` 每次重开文件，8ms 级会刷爆）：
 
-- `mouse_motion config source=poc enabled=...`：引擎启动一次。
+- `mouse_motion config source=poc enabled=...`：引擎启动一次，含 `fine_ms` /
+  `accel_ms`。
 - `mouse_motion phase=start source=poc button=... direction=... distance=...
-  base_px_s=... max_px_s=... accel_ms=... tick_ms=...`
+  base_px_s=... max_px_s=... fine_ms=... accel_ms=... tick_ms=...`
 - `mouse_motion timer=begin period_ms=1 result=ok|failed ...`
 - `mouse_motion phase=progress ...`：每 1s 一行。
 - `mouse_motion phase=end ... reason=release|restart|timeout|inject_error|
@@ -126,19 +143,21 @@ cargo test --workspace
 cargo check -p sayall-windows-app --features runtime-simulation
 cargo run -p sayall-windows --example pointer_motion_probe -- timer
 cargo run -p sayall-windows --example pointer_motion_probe -- move right 20 600
+cargo run -p sayall-windows --example pointer_motion_probe -- move right 30 1300
 ```
 
 结果：
 
 - `cargo fmt --all -- --check` passed。
 - `cargo test --workspace` passed：`sayall-windows` 652 passed / 22 ignored，
-  `sayall-windows-app` 233 passed / 2 ignored，其余 crate 全绿。
+  `sayall-windows-app` 234 passed / 2 ignored，其余 crate 全绿。
 - `cargo check -p sayall-windows-app --features runtime-simulation` passed。
 - 引擎接线用例 `button_mapping::tests::direction_mouse_move_ticks_until_release`
   passed：按住产生多帧 `mouse_move_by`、释放后停止、旧单步 `mouse_move` 未被调用。
-- 单元测试覆盖：速度曲线、亚像素余量、短按、释放补位移、重复拍幂等、
-  注入错误抑制、15s 超时、全部收口、计时器只提升一次并配对恢复。
+- 单元测试覆盖：两段速度曲线、精细窗口、亚像素余量、短按、释放补位移、
+  重复拍幂等、注入错误抑制、15s 超时、全部收口、计时器只提升一次并配对恢复。
 - 真实光标探针 passed（见上）；光标位置已恢复。
+- 用户试按数据已记录；两段曲线仍需 RC001 / RC003 真机复测。
 - **RC001 / RC003 真机手感验收 deferred**：需要分别用实体方向键测试短按、
   长按、松手、冷态/闲置首按、断连、睡眠、退出；自动化结果不能替代。
 
@@ -147,9 +166,11 @@ cargo run -p sayall-windows --example pointer_motion_probe -- move right 20 600
 - **开关语义**：PoC 用现有「按住时连续执行」作闸门，不改变产品文档的三态；
   是否让 `mouse_move` 默认「按住即动」需要产品决定。
 - **`distance` 语义**：PoC 继续表示「轻推一档」，100ms 短按约等于旧行为一次
-  台阶；加速时长和倍率未暴露给用户。
+  台阶；精细窗口、加速时长和倍率未暴露给用户，仍由固定常量决定。
+- **两段曲线调参**：500ms 精细窗口和 700ms 加速是首版折中；若真机仍觉得
+  长按过快，可继续延后加速或降低最大倍率，不改变用户配置。
 - **双击/长按**：沿用现有触发点（无双击按下即动；有双击 300ms 确认后动；
-  长按 550ms 起动），不新增时序。
+  长按判定沿用当前设置，默认 550ms，本机用户配置 600ms），不新增时序。
 - **非方向键**：其他按键的 `mouse_move` 仍走旧的 100ms 单步；是否扩展到全部
   按键需要另外评估。
 - **斜向/双方向**：每个按键独立会话，同时按住两个方向会得到两轴合成；未做

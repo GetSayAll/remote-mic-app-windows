@@ -33,8 +33,10 @@ pub const BASE_SPEED_PER_UNIT: f64 = 10.0;
 pub const MAX_SPEED_MULTIPLIER: f64 = 6.0;
 /// 最大速度的绝对上限，避免 `distance = 100` 时飞出去。
 pub const MAX_SPEED: f64 = 2_000.0;
-/// 从初速涨到最大速度的时长（二次缓入，先慢后快）。
-pub const ACCEL: Duration = Duration::from_millis(500);
+/// 精细窗口：这段时间保持初速，给短按住留出可控的小幅定位。
+pub const FINE: Duration = Duration::from_millis(500);
+/// 精细窗口之后从初速涨到最大速度的时长（二次缓入，先慢后快）。
+pub const ACCEL: Duration = Duration::from_millis(700);
 /// 单次 tick 最多积分的时间；引擎被阻塞后不能用一次大跳补回来。
 pub const MAX_STEP: Duration = Duration::from_millis(32);
 /// 单次按住最长时长。释放沿丢失时的兜底，避免光标无限移动。
@@ -89,17 +91,21 @@ fn end_timer_resolution() {}
 
 /// 速度曲线：`t` 时刻的像素/秒。
 ///
-/// 二次缓入：`v = v0 + (vmax - v0) * (t / ACCEL)^2`，到达 `ACCEL` 后保持
-/// `vmax`。`vmax` 同时受倍率和绝对上限约束。
+/// 两段式：先保持 `v0` 一个 [`FINE`] 窗口，便于短按住精确定位；之后在
+/// [`ACCEL`] 内按二次缓入涨到 `vmax`，用于长按快速移动。`vmax` 同时受倍率
+/// 和绝对上限约束。
 pub fn speed_at(distance: u16, elapsed: Duration) -> f64 {
     let base = f64::from(distance) * BASE_SPEED_PER_UNIT;
     let max = (base * MAX_SPEED_MULTIPLIER).min(MAX_SPEED).max(base);
+    let fine = FINE.as_secs_f64();
     let accel = ACCEL.as_secs_f64();
     let elapsed = elapsed.as_secs_f64();
-    if elapsed >= accel {
+    if elapsed <= fine {
+        base
+    } else if elapsed >= fine + accel {
         max
     } else {
-        let progress = (elapsed / accel).clamp(0.0, 1.0);
+        let progress = ((elapsed - fine) / accel).clamp(0.0, 1.0);
         base + (max - base) * progress * progress
     }
 }
@@ -112,6 +118,7 @@ pub struct MotionStart {
     pub distance: u16,
     pub base_speed: f64,
     pub max_speed: f64,
+    pub fine: Duration,
     pub accel: Duration,
     pub tick: Duration,
     /// 本次开始是否真正调用了 `timeBeginPeriod(1)`（同一时间只提升一次）。
@@ -304,6 +311,7 @@ impl PointerMotion {
             distance,
             base_speed,
             max_speed,
+            fine: FINE,
             accel: ACCEL,
             tick: TICK,
             timer_started,
@@ -585,14 +593,16 @@ mod tests {
     }
 
     #[test]
-    fn speed_curve_starts_at_base_and_caps_at_max() {
+    fn speed_curve_holds_base_then_accelerates_and_caps_at_max() {
         let base = speed_at(20, Duration::ZERO);
         assert!((base - 200.0).abs() < f64::EPSILON);
-        let mid = speed_at(20, ACCEL / 2);
+        let end_of_fine = speed_at(20, FINE);
+        assert!((end_of_fine - 200.0).abs() < f64::EPSILON);
+        let mid = speed_at(20, FINE + ACCEL / 2);
         assert!(mid > base && mid < 1200.0);
-        let full = speed_at(20, ACCEL);
+        let full = speed_at(20, FINE + ACCEL);
         assert!((full - 1200.0).abs() < f64::EPSILON);
-        let capped = speed_at(100, Duration::from_secs(2));
+        let capped = speed_at(100, FINE + ACCEL + Duration::from_secs(1));
         assert!((capped - MAX_SPEED).abs() < f64::EPSILON);
     }
 
@@ -627,9 +637,10 @@ mod tests {
         ));
         tick_steps(&mut pointer, &mut sink, start, 125);
         let total: i32 = sink.moves.iter().map(|(dx, _)| *dx).sum();
-        // distance=1 → 初速 10px/s、1 秒加速到 60px/s，累计约 40px；余量不能丢。
+        // distance=1 → 初速 10px/s；前 500ms 精细窗口约 5px，之后 500ms
+        // 仍处于加速段；按 8ms 拍截断后实测约 14px，亚像素余量不能丢。
         assert!(
-            (30..=50).contains(&total),
+            (12..=16).contains(&total),
             "total={total} moves={:?}",
             sink.moves
         );

@@ -95,12 +95,14 @@ fn move_mode(direction: MoveDirection, distance: u16, duration_ms: u64) {
     let started = Instant::now();
     match pointer.begin(RemoteButton::Right, direction, distance, started) {
         MotionBegin::Started(start) => println!(
-            "motion start button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} tick_ms={}",
+            "motion start button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} fine_ms={} accel_ms={} tick_ms={}",
             start.button,
             start.direction,
             start.distance,
             start.base_speed,
             start.max_speed,
+            start.fine.as_millis(),
+            start.accel.as_millis(),
             start.tick.as_millis()
         ),
         other => panic!("motion did not start: {other:?}"),

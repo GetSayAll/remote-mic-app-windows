@@ -1340,12 +1340,13 @@ fn finish_all_repeat_runs(repeat_runs: &mut RepeatRuns, reason: &str) {
 /// 避免 8ms 级调用把诊断文件刷爆（`gatt_note` 每次重开文件）。
 fn note_motion_start(start: &MotionStart) {
     crate::ble::gatt_note(format!(
-        "mouse_motion phase=start source=poc button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} accel_ms={} tick_ms={}",
+        "mouse_motion phase=start source=poc button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} fine_ms={} accel_ms={} tick_ms={}",
         start.button,
         start.direction,
         start.distance,
         start.base_speed,
         start.max_speed,
+        start.fine.as_millis(),
         start.accel.as_millis(),
         start.tick.as_millis()
     ));
@@ -1567,12 +1568,13 @@ fn engine_worker(
         .unwrap_or_else(|| !cfg!(test) && pointer_motion::poc_enabled_from_env());
     let mut pointer_motion = PointerMotion::new(pointer_motion_enabled);
     crate::ble::gatt_note(format!(
-        "mouse_motion config source=poc enabled={} tick_ms={} base_px_s_per_unit={:.1} max_multiplier={:.1} max_px_s={:.1} accel_ms={} max_session_ms={}",
+        "mouse_motion config source=poc enabled={} tick_ms={} base_px_s_per_unit={:.1} max_multiplier={:.1} max_px_s={:.1} fine_ms={} accel_ms={} max_session_ms={}",
         pointer_motion.enabled(),
         pointer_motion::TICK.as_millis(),
         pointer_motion::BASE_SPEED_PER_UNIT,
         pointer_motion::MAX_SPEED_MULTIPLIER,
         pointer_motion::MAX_SPEED,
+        pointer_motion::FINE.as_millis(),
         pointer_motion::ACCEL.as_millis(),
         pointer_motion::MAX_SESSION.as_millis()
     ));
