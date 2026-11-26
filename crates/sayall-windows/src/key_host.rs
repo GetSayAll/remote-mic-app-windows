@@ -28,7 +28,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -801,7 +801,7 @@ impl KeyHostHandle {
     }
 
     /// 协议读循环（专用线程调用；持有读锁直到连接结束）。
-    fn reader_loop(&'static self) {
+    fn reader_loop(self: Arc<Self>) {
         let mut line = String::new();
         loop {
             line.clear();
@@ -813,17 +813,45 @@ impl KeyHostHandle {
             };
             match read {
                 Ok(0) | Err(_) => {
+                    // 只有“当前槽位里的这一代宿主”断开才允许把门控置为
+                    // 失能并安排重连；旧一代被新宿主替换后迟到的 EOF 不得
+                    // 覆盖新一代状态。
+                    let removed = clear_current_handle(&self);
                     self.ready.store(false, Ordering::Relaxed);
-                    // 宿主断开 = 两个钩子都不再运行：门控立即失能（透传，
-                    // fail-open）；F5 抑制器的会话武装随宿主缺席自然无效。
-                    crate::key_gate::report_host_disconnected();
-                    crate::ble::gatt_note(
-                        "key_host action=disconnected result=degraded reason=socket_closed"
-                            .to_owned(),
-                    );
+                    if !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                        self.log_child_exit("reader_eof");
+                    }
+                    if removed {
+                        // 宿主断开 = 两个钩子都不再运行：门控立即失能（透传，
+                        // fail-open）；F5 抑制器的会话武装随宿主缺席自然无效。
+                        crate::key_gate::report_host_disconnected();
+                        crate::ble::gatt_note(
+                            "key_host action=disconnected result=degraded reason=socket_closed"
+                                .to_owned(),
+                        );
+                    } else if !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                        crate::ble::gatt_note(
+                            "key_host action=disconnected result=stale reason=socket_closed"
+                                .to_owned(),
+                        );
+                    }
+                    self.shutdown();
+                    if removed && !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                        crate::ble::gatt_note(
+                            "key_host action=reconnect_scheduled reason=host_disconnected"
+                                .to_owned(),
+                        );
+                        schedule_start_retry(2);
+                    }
                     return;
                 }
                 Ok(_) => {
+                    // 旧一代连接可能在新宿主安装后才读到残留帧；不得让
+                    // 它的 HOOK/VERDICT 改写新一代门控状态。
+                    if !is_current_handle(&self) {
+                        self.shutdown();
+                        return;
+                    }
                     let command = line.trim();
                     if let Some(rest) = command.strip_prefix("ASK ") {
                         if let Some((id, swallow)) = self.handle_ask(rest) {
@@ -878,6 +906,40 @@ impl KeyHostHandle {
             } => crate::key_gate::handle_host_event(vk, make, flags, down),
         };
         Some((id, swallow))
+    }
+
+    /// 记录读线程看到 socket 关闭时子进程的状态：`exited_N` 说明宿主自己退出
+    /// （退出码可区分正常退出、连接失败、崩溃）；`running` 说明 socket 先断而
+    /// 子进程还在，问题更偏向传输/句柄而不是宿主逻辑。
+    fn log_child_exit(&self, phase: &str) {
+        let Ok(mut guard) = self.child.lock() else {
+            return;
+        };
+        let Some(child) = guard.as_mut() else {
+            return;
+        };
+        let pid = child.id();
+        // socket 先关闭时子进程可能还有几十毫秒才完成退出；短暂等待可把
+        // “宿主自己退出（退出码可见）”和“宿主仍在运行（传输/句柄问题）”
+        // 区分开，同时不超过重连预算。
+        let mut state = None;
+        for _ in 0..10 {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    state = Some(format!("exited_{}", status.code().unwrap_or(-1)));
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => {
+                    state = Some("unknown".to_owned());
+                    break;
+                }
+            }
+        }
+        let state = state.unwrap_or_else(|| "running".to_owned());
+        crate::ble::gatt_note(format!(
+            "key_host action=child_exit phase={phase} pid={pid} state={state}"
+        ));
     }
 
     /// 优雅关闭：发 `BYE`，短暂等待子进程，超时强杀。幂等。
@@ -1043,10 +1105,50 @@ fn spawn_host(port: u16, token: &str) -> Result<Child, String> {
     command.spawn().map_err(|error| format!("spawn: {error}"))
 }
 
-static KEY_HOST: OnceLock<KeyHostHandle> = OnceLock::new();
+/// 当前宿主槽位。用 `RwLock<Option<Arc<_>>>` 而不是 `OnceLock`：宿主建立后
+/// 仍可能因自身崩溃/被系统终止而 socket 关闭，必须允许换一代宿主；旧读线程
+/// 通过 `Arc::ptr_eq` 判断自己是否仍是当前代，迟到 EOF 不得覆盖新代门控。
+static KEY_HOST: RwLock<Option<Arc<KeyHostHandle>>> = RwLock::new(None);
 static START_LOCK: Mutex<()> = Mutex::new(());
 static RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
+static RETRY_PENDING: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+fn host_read() -> std::sync::RwLockReadGuard<'static, Option<Arc<KeyHostHandle>>> {
+    KEY_HOST
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn host_write() -> std::sync::RwLockWriteGuard<'static, Option<Arc<KeyHostHandle>>> {
+    KEY_HOST
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn current_handle() -> Option<Arc<KeyHostHandle>> {
+    host_read().as_ref().cloned()
+}
+
+fn is_current_handle(handle: &Arc<KeyHostHandle>) -> bool {
+    host_read()
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, handle))
+}
+
+/// 仅当槽位仍指向 `handle` 时清空；返回是否由本次调用清空。
+fn clear_current_handle(handle: &Arc<KeyHostHandle>) -> bool {
+    let mut slot = host_write();
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, handle))
+    {
+        *slot = None;
+        true
+    } else {
+        false
+    }
+}
 
 /// 第 `attempt` 次启动前的等待时长；`None` 表示不再重试。
 ///
@@ -1082,11 +1184,12 @@ fn log_retry_scheduled(attempt: u32, delay_ms: u64) {
     ));
 }
 
-/// 安装已握手的宿主；`attempt` 仅用于日志（1 = 首次，>1 = 重试）。
+/// 安装已握手的宿主；`attempt` 仅用于日志（1 = 首次，>1 = 重试/重连）。
 fn install_global_handle(handle: KeyHostHandle, attempt: u32) -> bool {
     let ready = handle.is_ready();
     let child_id = handle.child_id().unwrap_or(0);
     let port = handle.port();
+    let handle = Arc::new(handle);
     if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         handle.shutdown();
         crate::ble::gatt_note(
@@ -1094,13 +1197,22 @@ fn install_global_handle(handle: KeyHostHandle, attempt: u32) -> bool {
         );
         return false;
     }
-    if let Err(handle) = KEY_HOST.set(handle) {
-        // 另一个启动路径已经赢下；不要留下第二个宿主进程。
-        handle.shutdown();
-        crate::ble::gatt_note(
-            "key_host action=start result=discarded reason=already_started".to_owned(),
-        );
-        return global_ready();
+    let replaced = {
+        let mut slot = host_write();
+        if slot.as_ref().is_some_and(|existing| existing.is_ready()) {
+            drop(slot);
+            // 另一个启动路径已经赢下；不要留下第二个宿主进程。
+            handle.shutdown();
+            crate::ble::gatt_note(
+                "key_host action=start result=discarded reason=already_started".to_owned(),
+            );
+            return global_ready();
+        }
+        slot.replace(Arc::clone(&handle))
+    };
+    if let Some(old) = replaced {
+        // 旧一代已停止但读线程可能还没处理 EOF；先回收旧子进程。
+        old.shutdown();
     }
     if attempt == 1 {
         crate::ble::gatt_note(format!(
@@ -1111,27 +1223,26 @@ fn install_global_handle(handle: KeyHostHandle, attempt: u32) -> bool {
             "key_host action=start result=passed pid={child_id} port={port} attempt={attempt}"
         ));
     }
-    if let Some(handle) = KEY_HOST.get() {
-        std::thread::Builder::new()
-            .name("sayall-key-host-reader".to_owned())
-            .spawn(move || handle.reader_loop())
-            .ok();
-    }
+    let reader = Arc::clone(&handle);
+    std::thread::Builder::new()
+        .name("sayall-key-host-reader".to_owned())
+        .spawn(move || reader.reader_loop())
+        .ok();
     ready
 }
 
 /// 启动全局按键宿主（幂等；失败仅记录并返回 false，绝不阻塞应用启动）。
 ///
 /// 首次尝试最多阻塞 5 秒（保持既有启动预算）；失败后由一个后台线程按
-/// [`START_RETRY_DELAYS_MS`] 重试。现场 `accept_timeout` 只出现一次就永久
-/// 失去门控——不能把子进程冷启动/安全软件扫描造成的瞬时失败当成终态。
+/// [`START_RETRY_DELAYS_MS`] 重试。宿主**已建立后断开**同样会清空槽位并
+/// 走同一重试序列，不把一次 socket 关闭当成永久终态。
 pub fn start_global() -> bool {
-    if let Some(existing) = KEY_HOST.get() {
-        return existing.is_ready();
+    if global_ready() {
+        return true;
     }
     let _guard = lock_start();
-    if let Some(existing) = KEY_HOST.get() {
-        return existing.is_ready();
+    if global_ready() {
+        return true;
     }
     if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         crate::ble::gatt_note(
@@ -1160,6 +1271,9 @@ fn schedule_start_retry(next_attempt: u32) {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        // 当前一轮可能正要结束；置位 pending，让它在收起 RETRY_RUNNING 后
+        // 再决定是否安排下一轮，避免“宿主刚装好就断开”的窗口丢重连。
+        RETRY_PENDING.store(true, Ordering::SeqCst);
         return;
     }
     log_retry_scheduled(next_attempt, delay_ms);
@@ -1180,12 +1294,12 @@ fn schedule_start_retry(next_attempt: u32) {
 
 fn run_start_retries(mut attempt: u32) {
     loop {
-        if KEY_HOST.get().is_some() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        if global_ready() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
             break;
         }
         let started = {
             let _guard = lock_start();
-            if KEY_HOST.get().is_some() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            if global_ready() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
                 break;
             }
             KeyHostHandle::start()
@@ -1193,7 +1307,7 @@ fn run_start_retries(mut attempt: u32) {
         match started {
             Ok(handle) => {
                 let _guard = lock_start();
-                if KEY_HOST.get().is_some() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                if global_ready() || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
                     handle.shutdown();
                     break;
                 }
@@ -1213,19 +1327,25 @@ fn run_start_retries(mut attempt: u32) {
         std::thread::sleep(Duration::from_millis(delay_ms));
     }
     RETRY_RUNNING.store(false, Ordering::SeqCst);
+    if RETRY_PENDING.swap(false, Ordering::SeqCst)
+        && !global_ready()
+        && !SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+    {
+        crate::ble::gatt_note("key_host action=retry_pending reason=host_still_down".to_owned());
+        schedule_start_retry(2);
+    }
 }
 
 /// 全局宿主是否就绪（吞键能力以此判定；未就绪即 fail-open 路径）。
 pub fn global_ready() -> bool {
-    KEY_HOST
-        .get()
+    current_handle()
         .map(|handle| handle.is_ready())
         .unwrap_or(false)
 }
 
 /// 请求宿主对抑制器钩子做一次链头 bump（会话开始时调用；宿主缺席为 no-op）。
 pub(crate) fn bump_suppressor_hook() {
-    if let Some(handle) = KEY_HOST.get() {
+    if let Some(handle) = current_handle() {
         if handle.is_ready() {
             let _ = handle.send_line("BUMP");
         }
@@ -1236,7 +1356,11 @@ pub(crate) fn bump_suppressor_hook() {
 pub fn shutdown_global() {
     // 阻止后台重试在退出过程中再拉起子进程。
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
-    if let Some(handle) = KEY_HOST.get() {
+    let handle = {
+        let mut slot = host_write();
+        slot.take()
+    };
+    if let Some(handle) = handle {
         handle.shutdown();
         crate::ble::gatt_note("key_host action=exit reason=shutdown_requested".to_owned());
     }

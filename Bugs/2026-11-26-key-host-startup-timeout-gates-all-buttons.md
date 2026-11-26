@@ -1,7 +1,7 @@
 # 按键宿主启动超时后映射按键全部失效且错误红字不消失
 
 - 发现日期：2026-11-26
-- 状态：已修，等待 RC003 真机/现场日志验证
+- 状态：已修，等待 RC003 真机/现场日志验证；运行中断连另见 [2026-11-26-key-host-disconnect-no-reconnect.md](2026-11-26-key-host-disconnect-no-reconnect.md)
 - 影响范围：SayAll Windows 1.9.8；Windows 11 26200；RC003；所有已映射按键与全按键支持
 - 功能点：`key_host` 启动、`key_gate` 门控、`button_mapping` 注入判定、按键页错误提示
 
@@ -27,6 +27,7 @@
 已确认：
 
 - `KeyHostHandle::start()` 在 `accept_timeout` 后直接返回错误；`start_global()` 只记录失败，不重试。`KEY_HOST` 保持未初始化，`gate_active` 在整个应用生命周期内为 0。
+- 同一旧实现的 `OnceLock` 也无法处理“宿主曾经启动成功、之后 socket 关闭”的情况；该独立路径见断连记录。
 - `fire_gesture()` 在 `gate_alive=false` 时按设计跳过注入（避免双输入），并写入固定的 `last_error`。
 - `ButtonMappingSnapshot` 只把 `last_error` 克隆给 UI，没有任何清除路径；因此门控恢复后红字仍然存在。
 - 页面“已就绪”来自 Raw Input 监听器，与按键宿主/门控不是同一条链路，造成“已就绪 + 报错”同时出现。
@@ -40,8 +41,9 @@
 - `crates/sayall-windows/src/key_host.rs`
   - 首次启动失败后由后台线程按 0.5/1/2/4/8 秒间隔重试，最多 6 次尝试；成功即安装并启动读循环，失败有界停止。
   - 启动路径串行化（`START_LOCK`），防止并发重试留下第二个宿主进程；退出时置位 `SHUTDOWN_REQUESTED`，避免退出过程中再拉起子进程。
-  - 超时/握手失败时记录子进程状态与退出码；握手失败立即回收子进程。
-  - 宿主进程启动时记录 `key_host action=boot phase=started pid=... port=...`，便于与父进程的 `child_state` 对齐。
+  - `KEY_HOST` 槽位改为可替换的 `RwLock<Option<Arc<_>>>`：启动成功后的 socket 断开也会清空当前代并重新走重试，不再被 `OnceLock` 钉死。
+  - 超时/握手/运行中断开时记录子进程状态与退出码；握手失败立即回收子进程。
+  - 宿主进程启动时记录 `key_host action=boot phase=started pid=... port=...`，便于与父进程的 `child_state`、`child_exit` 对齐。
 - `crates/sayall-windows/src/button_mapping.rs`
   - 把门控错误文案收敛为 `GATE_NOT_ALIVE_ERROR`。
   - `snapshot()` 发现门控已恢复且 `last_error` 正是该文案时清除，并记录 `map_error action=cleared reason=gate_recovered`；其他错误不因门控存活而被误清。
@@ -63,6 +65,7 @@
     `key_host action=start result=passed ... attempt=2` →
     `key_host action=hook_report detail=HOOKkind=gateinstalled=1`。
     这证明父进程在首次失败后实际拉起了第二代宿主并重新安装门控，而不是只验证了 schedule 纯函数。
+  - 设置 `SAYALL_KEY_HOST_PROBE_FORCE_DISCONNECT=1` 强制宿主握手后 1 秒退出：日志出现 `child_exit phase=reader_eof state=exited_2` → `disconnected result=degraded` → `reconnect_scheduled` → `start result=passed attempt=2` → `gateinstalled=1`，输出 `started=true ready_after_retry=true gate=true`。
 - 真机恢复路径：deferred。需要在受影响机器上看到同样的日志序列，并确认页面红字在 1 秒轮询内消失；本次探针不等同于 RC003 真机验收。
 - 冷启动首用、连续会话、快速连按、断连/睡眠恢复仍需按 `Testing/Windows*.md` 在 RC001/RC003 分别验收；本次自动化结果不能替代真机 passed。
 
