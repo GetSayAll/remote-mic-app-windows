@@ -44,7 +44,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub const KEY_HOST_FLAG: &str = "--sayall-key-host";
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECT_WINDOW: Duration = Duration::from_secs(5);
+/// 子进程回连窗口比父进程 accept 窗口短 1 秒：回环连接正常时是毫秒级；
+/// 失败时让子进程来得及写下 `connect result=failed reason=...`，而不是
+/// 被父进程的 5 秒超时先 kill 掉（现场 2026-11-26：所有 child 都停在
+/// `state=running`，旧构建没有留下任何回连失败原因）。
+const CONNECT_WINDOW: Duration = Duration::from_secs(4);
 /// 首次启动失败后的有界重试间隔（第 2..=6 次尝试）；总预算约 45 秒。
 /// 现场（2026-11-26）：宿主子进程未在首个 5 秒窗口内连回，单次尝试失败后
 /// 整个会话门控死亡，映射按键全部跳过注入。冷启动/安全软件扫描可能只延迟
@@ -488,11 +492,12 @@ pub fn run_host(launch: HostLaunch) -> i32 {
         launch.port
     ));
     let stream = match connect_with_window(launch.port) {
-        Some(stream) => stream,
-        None => {
+        Ok(stream) => stream,
+        Err(reason) => {
             crate::ble::gatt_note(format!(
-                "key_host action=connect result=failed port={}",
-                launch.port
+                "key_host action=connect result=failed port={} reason={}",
+                launch.port,
+                sanitize_tokens(&reason)
             ));
             return 2;
         }
@@ -621,15 +626,15 @@ pub fn run_host(launch: HostLaunch) -> i32 {
     code
 }
 
-fn connect_with_window(port: u16) -> Option<TcpStream> {
+fn connect_with_window(port: u16) -> Result<TcpStream, String> {
     let deadline = Instant::now() + CONNECT_WINDOW;
     loop {
         match TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
-            Ok(stream) => return Some(stream),
+            Ok(stream) => return Ok(stream),
             Err(_) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(_) => return None,
+            Err(error) => return Err(format!("{error}")),
         }
     }
 }
@@ -1096,6 +1101,12 @@ fn spawn_host(port: u16, token: &str) -> Result<Child, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // 让宿主子进程也写主进程同一份诊断日志：没有这一条时，父进程只能看到
+    // child_state=running，无法区分“卡在加载/被安全软件挂起”与“已执行到
+    // connect 但回环连接失败”。路径只经环境变量传递，不写入日志正文。
+    if let Some(path) = crate::ble::diagnostic_log_path() {
+        command.env("SAYALL_GATT_LOG", path);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

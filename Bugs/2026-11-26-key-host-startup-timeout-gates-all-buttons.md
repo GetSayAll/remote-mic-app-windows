@@ -69,6 +69,33 @@
 - 真机恢复路径：deferred。需要在受影响机器上看到同样的日志序列，并确认页面红字在 1 秒轮询内消失；本次探针不等同于 RC003 真机验收。
 - 冷启动首用、连续会话、快速连按、断连/睡眠恢复仍需按 `Testing/Windows*.md` 在 RC001/RC003 分别验收；本次自动化结果不能替代真机 passed。
 
+## 后续现场（2026-11-26 log 16：新包 89c57ed）
+
+用户覆盖安装后，主程序已经是 `source_revision=89c57ed…`，重试路径确实执行了，但 6 次全部失败，且每次都是“子进程还活着”：
+
+```text
+06:46:08.416  child_state phase=accept_timeout pid=24964 state=running
+06:46:13.972  child_state phase=accept_timeout pid=25496 state=running
+06:46:20.034  child_state phase=accept_timeout pid=11376 state=running
+06:46:27.097  child_state phase=accept_timeout pid=19388 state=running
+06:46:36.162  child_state phase=accept_timeout pid=12056 state=running
+06:46:49.217  child_state phase=accept_timeout pid=2600  state=running
+06:46:49.234  key_host action=retry result=exhausted attempts=6
+06:47:23.277  shortcut_capture ... gate_active=0 ...
+```
+
+这说明当前不是“子进程启动即崩溃”，而是子进程存活却没有完成回连。旧日志没有子进程侧日志，无法区分：
+
+1. 子进程没执行到 `run_host`（被安全软件挂起/加载器阻塞/参数异常）；
+2. 子进程执行到了 TCP `connect`，但本机 loopback 被 WFP/TUN/防火墙改写或拒绝。
+
+本次（诊断版）修复：
+
+- `spawn_host` 把主程序诊断日志路径通过 `SAYALL_GATT_LOG` 传给子进程；下一次日志应出现子进程的 `key_host action=boot phase=started`。
+- 子进程回连窗口从 5 秒缩到 4 秒（父进程 accept 仍 5 秒），失败时留出时间写 `key_host action=connect result=failed port=... reason=...`。
+- 若 boot 行存在但 connect 失败，说明需要把 key host IPC 从 TCP loopback 改为命名管道；若 boot 行也不存在，说明子进程在进入 Rust `main/run_host` 前就被拦住，需从进程启动/安全软件方向查。
+- 同一现场 RC003 helper 仍反复 `agent_never_acked` / `no_authenticated_agent`，属于 agent→helper 的另一条 TCP loopback 路径，不能用 key host 重连修复；它与 [2026-09-29-helper-scheduled-task-loopback-refused.md](2026-09-29-helper-scheduled-task-loopback-refused.md) 的 WFP/TUN 形状相符，需单独处理。
+
 ## 隐私检查
 
 未包含蓝牙地址、HID 路径、设备身份、语音内容或用户目录；仅保留时间戳、事件名、状态与退出码。
