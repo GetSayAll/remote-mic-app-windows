@@ -610,6 +610,9 @@ if (typeof ctx.sourceKeyOf === 'function') {
     a === '\\Device\\000000db' && b === a, `a=${a} b=${b}`);
 
   /* 同一设备对象有两个句柄（不同 TLC）：关一个不能提前释放，关最后一个才释放。 */
+  /* 前面 synth 用例按过语音键，白名单已把 'h0' 当成遥控器；本组用多个模拟来源，
+     先清掉标签（白名单本身在 §18 验证）。 */
+  ctx.remoteSource = null;
   ctx.handleCommand(JSON.stringify({
     type: 'targets', generation: 8, report: [0x00f1], clear: [0x00f1],
   }));
@@ -667,6 +670,9 @@ if (typeof ctx.sourceKeyOf === 'function') {
   ctx.releaseEdges('test');
   check('来源归属：强制释放清空合成键状态', ctx.synthHeld === false && ctx.activeSource === null);
 
+  /* 来源白名单（2026-11-27）在 §18 单独验证；这里回到未学习状态，
+     继续验证底层的来源归属逻辑（白名单关闭时的回退路径）。 */
+  ctx.remoteSource = null;
   const foreignAfterVoice = pressOn('other-source', 0x00f1);
   check('来源归属：语音释放后其它设备可重新成为来源',
     ctx.activeSource === 'other-source' && foreignAfterVoice.ptr.buf[3] === 0);
@@ -742,6 +748,8 @@ if (typeof ctx.sourceKeyOf === 'function') {
 {
   ctx.DIAG.maxSources = 64;
   ctx.DIAG.lastFlushAt = 0;
+  /* 前面语音用例会学到白名单；本组用多个模拟来源，先回到未学习状态。 */
+  ctx.remoteSource = null;
 
   /* 两个不同句柄必须是两条来源记录；同句柄累加。 */
   pressOn('diag-a', 0x0028);
@@ -855,6 +863,51 @@ if (typeof ctx.sourceKeyOf === 'function') {
   check('长度门：9 字节报告照常清键', okPtr.buf[3] === 0 && okSelf.cleared === true,
     `buf3=0x${okPtr.buf[3].toString(16)} cleared=${okSelf.cleared}`);
   handlers.onLeave.call(okSelf, 0);
+}
+
+/* ------------- 18. 来源白名单（2026-11-27：键盘宿主） ---------------------- */
+{
+  ctx.remoteSource = null;
+  ctx.handleCommand('{"type":"renew"}');
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 140,
+    report: [0x00f1, 0x0028], clear: [0x00f1, 0x0028],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  /* 语音键只在遥控器上存在：用它给遥控器来源打标签。 */
+  pressOn('whitelist-remote', 0x003e);
+  check('白名单：语音键学习遥控器来源',
+    ctx.remoteSource === 'whitelist-remote', `src=${ctx.remoteSource}`);
+
+  /* 键盘（异源）命中目标 usage：整类忽略——不清键、不出边沿、不抢来源。 */
+  const beforeIgnored = ctx.stat.foreign_source_ignored || 0;
+  const kbd = pressOn('whitelist-kbd', 0x00f1);
+  check('白名单：异源目标键不被清键', kbd.ptr.buf[3] === 0xf1,
+    `buf3=0x${kbd.ptr.buf[3].toString(16)}`);
+  check('白名单：异源目标键不产生边沿', kbd.self.hit === false);
+  check('白名单：异源不抢来源归属', ctx.activeSource === null);
+  check('白名单：异源忽略计数 +1',
+    (ctx.stat.foreign_source_ignored || 0) === beforeIgnored + 1,
+    `ignored=${ctx.stat.foreign_source_ignored}`);
+
+  /* 遥控器来源照常。 */
+  const ok = pressOn('whitelist-remote', 0x00f1);
+  check('白名单：遥控器来源照常清键', ok.ptr.buf[3] === 0,
+    `buf3=0x${ok.ptr.buf[3].toString(16)}`);
+  check('白名单：遥控器来源照常产生边沿', ok.self.hit === true);
+
+  /* 自愈：别的来源也发语音键（遥控器重连换句柄/被偶然污染）→ 立即重学。 */
+  pressOn('whitelist-kbd', 0x003e);
+  check('白名单：语音键换来源时重学', ctx.remoteSource === 'whitelist-kbd',
+    `src=${ctx.remoteSource}`);
+
+  /* 学到的来源关闭 → 清除标签，回到长度门 + 宿主策略的原路径。 */
+  ctx.activeSource = null;
+  ctx.pressed = {};
+  closeHandle('whitelist-kbd');
+  check('白名单：来源关闭后清除标签', ctx.remoteSource === null);
 }
 
 const failed = results.filter((r) => !r.ok);
