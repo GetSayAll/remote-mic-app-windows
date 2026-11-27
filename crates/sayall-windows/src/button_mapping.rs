@@ -2931,14 +2931,11 @@ fn fire_gesture(
             // 成立。这里补上第二层：本进程键钩子宿主看到的注入事件回声
             // （`echo_delta`/`last_*`，见 key_gate::InjectedEcho）。
             //
-            // 2026-11-26：再补第三层——注入前的目标快照（前台/焦点/完整性/
-            // 可见性）。现场"只有一个 App 收不到、音量键却有效"只能靠它判
-            // "打在谁身上、对方什么权限"，注入侧本身不改行为。
-            let target = crate::input_target::probe_foreground();
-            crate::ble::gatt_note(crate::input_target::format_map_target(
-                &target,
-                crate::key_gate::hook_calls_total(),
-            ));
+            // 2026-11-26：再补第三层——目标快照（前台/焦点/完整性/可见性）。
+            // 2026-11-27 起只在**没有回声**时采样：正常路径不查令牌、不写日志；
+            // 注入前只记窗口句柄与 pid（微秒级），保证回声等待期间切前台也不会
+            // 把失败归因到别的窗口。
+            let target_handle = crate::input_target::capture_target();
             let echo_before = crate::key_gate::injected_event_count();
             match injector.tap(&chord) {
                 Ok(()) => {
@@ -2948,17 +2945,26 @@ fn fire_gesture(
                         crate::ble::gatt_note(LOCK_WORKSTATION_INJECT_NOTE.to_owned());
                     } else {
                         let echo = observe_injection_echo(echo_before);
-                        // 2026-11-27 现场（拼多多商家版）：目标以管理员身份运行
-                        // （high IL）时，SendInput 仍返回满数、GetLastError=0，
-                        // 但事件在投递前被 UIPI 丢弃（echo_delta=0）。这里把
-                        // "没回声 + 目标更高完整性"落成确定的终态，而不是让
-                        // 读者从两行日志里自己推。
-                        let uipi_blocked =
-                            echo.count == 0 && crate::input_target::uipi_blocks_injection(&target);
-                        if uipi_blocked {
-                            crate::input_target::record_uipi_blocked();
+                        if echo.count == 0 {
+                            let target = crate::input_target::probe_captured(target_handle);
+                            crate::ble::gatt_note(crate::input_target::format_map_target(
+                                &target,
+                                crate::key_gate::hook_calls_total(),
+                            ));
+                            // 2026-11-27 现场（拼多多商家版）：目标以管理员身份运行
+                            // （high IL）时，SendInput 仍返回满数、GetLastError=0，
+                            // 但事件在投递前被 UIPI 丢弃（echo_delta=0）。这里把
+                            // "没回声 + 目标更高完整性"落成确定的终态。
+                            let uipi_blocked = crate::input_target::uipi_blocks_injection(&target);
+                            if uipi_blocked {
+                                crate::input_target::record_uipi_blocked();
+                            }
+                            crate::ble::gatt_note(shortcut_injection_note(echo, uipi_blocked));
+                        } else {
+                            // 成功一次即清零：提示只表达"最近一次映射注入被拦"。
+                            crate::input_target::clear_uipi_blocked();
+                            crate::ble::gatt_note(shortcut_injection_note(echo, false));
                         }
-                        crate::ble::gatt_note(shortcut_injection_note(echo, uipi_blocked));
                     }
                     return terminal_action;
                 }

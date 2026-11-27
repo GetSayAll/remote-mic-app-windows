@@ -111,7 +111,7 @@ pub struct ButtonMappingDiagnostic {
     pub swallowed_edges: u64,
     pub leaked_downs: u64,
     pub fired_gestures: u64,
-    /// 目标窗口完整性高于本进程（UIPI）而没送达的映射注入次数（schema v5）。
+    /// 目标窗口完整性高于本进程（UIPI）而没送达的映射注入次数（schema v5；成功一次即清零）。
     pub uipi_blocked: u64,
     pub error_present: bool,
 }

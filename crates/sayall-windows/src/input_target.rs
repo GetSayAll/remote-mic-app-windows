@@ -15,10 +15,12 @@
 //! - 前台线程的键盘布局（按物理键位理解注入键时，布局决定扫描码翻译）；
 //! - 注入前钩子累计看到过多少键（与注入回声放在一起，可判"物理键还看得见吗"）。
 //!
+//! 采样时机（2026-11-27）：注入热路径只 `capture_target()`（句柄 + pid，两个微秒级
+//! 调用）；完整探测与 `map_target` 日志只在**没有注入回声**时做。正常按键不承担令牌
+//! 查询与额外日志写入。
+//!
 //! 隐私边界：只落**类名哈希**（FNV-1a 64 高位，8 位十六进制，与 `ime` 侧同一算法）、
 //! 进程号、完整性级别和十六进制布局值；不落窗口标题、可执行文件路径或用户名。
-
-use crate::key_gate;
 
 /// 三态布尔：读不到时如实落 `unknown`，不猜。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +56,17 @@ pub(crate) fn class_token(class: &str) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{:08x}", (hash >> 32) as u32)
+}
+
+/// 注入前在热路径上唯一要做的事：记下目标窗口句柄与 pid。
+///
+/// 不查令牌、不做类名哈希、不写日志——完整探测留给"没有回声"的分支，
+/// 但句柄和 pid 必须在注入前拿到，否则回声等待期间切前台会把失败归因到别处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapturedTarget {
+    /// 原生窗口句柄；没有前台窗口或非 Windows 为 0。
+    pub window: usize,
+    pub pid: u32,
 }
 
 /// 一次映射注入前的前台/焦点快照（只读）。
@@ -98,6 +111,7 @@ pub struct InputEnv {
 ///
 /// 语义边界：这些字段只描述"注入时前台是谁、焦点在哪、对方什么权限"，
 /// **不证明按键投递结果**；投递结果仍看紧随其后的 `map_inject echo_delta`。
+/// 该行只在没有回声时落（正常注入不写）。
 pub fn format_map_target(probe: &TargetProbe, hook_calls_total: u64) -> String {
     format!(
         "map_target fg_pid={} fg_class={} fg_hkl=0x{:08X} fg_focus={} fg_focus_pid={} \
@@ -132,11 +146,6 @@ pub fn format_input_env(env: &InputEnv) -> String {
         env.diag_no_hooks,
         env.hook_host_pid,
     )
-}
-
-/// 采集前台/焦点快照并格式化为 `map_target` 行。任何一项读不到都落 `unknown`/`none`。
-pub fn map_target_note() -> String {
-    format_map_target(&probe_foreground(), key_gate::hook_calls_total())
 }
 
 /// 采集本进程输入环境并格式化为 `input_env` 行。
@@ -177,7 +186,8 @@ pub fn uipi_blocks_injection(target: &TargetProbe) -> bool {
     uipi_blocks(own_integrity(), target.integrity)
 }
 
-/// 累计被 UIPI 拦下的映射注入次数（诊断摘要用；进程生命周期内累加）。
+/// 当前连续被 UIPI 拦下的映射注入次数（成功一次即清零）。
+/// 提示只表达"最近一次映射注入被拦"，不是"本次运行曾发生过"。
 static UIPI_BLOCKED_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn uipi_blocked_total() -> u64 {
@@ -187,6 +197,11 @@ pub fn uipi_blocked_total() -> u64 {
 /// 记录一次 UIPI 拦下的映射注入。
 pub(crate) fn record_uipi_blocked() {
     UIPI_BLOCKED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 映射注入成功一次后清零（提示随下一次成功消失）。
+pub(crate) fn clear_uipi_blocked() {
+    UIPI_BLOCKED_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// `SAYALL_DIAG_NO_HOOKS` 的稳定标记：只接受已知取值，其余一律 `set`。
@@ -314,23 +329,36 @@ mod windows_impl {
         Some(elevation.TokenIsElevated != 0)
     }
 
-    pub fn probe_foreground() -> TargetProbe {
+    pub fn capture_target() -> CapturedTarget {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            if foreground.0.is_null() {
+                return CapturedTarget::default();
+            }
+            let mut pid = 0u32;
+            let _ = GetWindowThreadProcessId(foreground, Some(&mut pid));
+            CapturedTarget {
+                window: foreground.0 as usize,
+                pid,
+            }
+        }
+    }
+
+    pub fn probe_captured(target: CapturedTarget) -> TargetProbe {
         let mut probe = TargetProbe {
             fg_class: "none".to_owned(),
             focus_class: "none".to_owned(),
             integrity: "unknown",
             ..Default::default()
         };
+        if target.window == 0 {
+            return probe;
+        }
+        let foreground = HWND(target.window as *mut c_void);
+        probe.fg_pid = target.pid;
+        probe.self_foreground = target.pid != 0 && target.pid == std::process::id();
+        probe.fg_class = class_or_none(foreground);
         unsafe {
-            let foreground = GetForegroundWindow();
-            if foreground.0.is_null() {
-                return probe;
-            }
-            let mut pid = 0u32;
-            let thread_id = GetWindowThreadProcessId(foreground, Some(&mut pid));
-            probe.fg_pid = pid;
-            probe.fg_class = class_or_none(foreground);
-            probe.self_foreground = pid != 0 && pid == std::process::id();
             probe.visible = if IsWindowVisible(foreground).as_bool() {
                 Tri::True
             } else {
@@ -341,6 +369,7 @@ mod windows_impl {
             } else {
                 Tri::False
             };
+            let thread_id = GetWindowThreadProcessId(foreground, None);
             if thread_id != 0 {
                 probe.fg_hkl = GetKeyboardLayout(thread_id).0 as u32;
                 let mut info = GUITHREADINFO {
@@ -403,10 +432,15 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub use windows_impl::{probe_foreground, probe_input_env};
+pub use windows_impl::{capture_target, probe_captured, probe_input_env};
 
 #[cfg(not(windows))]
-pub fn probe_foreground() -> TargetProbe {
+pub fn capture_target() -> CapturedTarget {
+    CapturedTarget::default()
+}
+
+#[cfg(not(windows))]
+pub fn probe_captured(_target: CapturedTarget) -> TargetProbe {
     TargetProbe {
         fg_class: "none".to_owned(),
         focus_class: "none".to_owned(),
@@ -553,5 +587,17 @@ mod tests {
             uipi_blocks_injection(&high),
             uipi_blocks(own_integrity(), "high")
         );
+    }
+
+    #[test]
+    fn uipi_blocked_counter_clears_after_a_successful_delivery() {
+        // 提示的语义是"最近一次映射注入被拦"：成功一次即清零。
+        // 该原子只在本测试里读写，互不干扰。
+        clear_uipi_blocked();
+        record_uipi_blocked();
+        record_uipi_blocked();
+        assert_eq!(uipi_blocked_total(), 2);
+        clear_uipi_blocked();
+        assert_eq!(uipi_blocked_total(), 0);
     }
 }
