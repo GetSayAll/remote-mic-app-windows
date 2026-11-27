@@ -138,27 +138,29 @@ RC003 提权助手的日志**与主程序写进同一个文件**，报障收集�
 现场（`Bugs/2026-11-26-pinduoduo-injected-keys-dropped.md`）：遥控器映射的方向键/回车/字母在
 拼多多商家版里全部无效，同一发音量键却有效；日志里只有 `map_fire` + `map_inject
 echo_delta=0`，无法回答"注入了几个事件、什么形态、打给了哪个进程、对方什么权限"。本次补三
-类**只读**日志（不改注入行为）：
+类**只读**日志（不改注入行为）。2026-11-27 起改为按需落盘：正常注入不查令牌、不写
+`map_target`；只有**没有回声**或**提交异常**时才记，避免热路径上的令牌查询与额外同步写。
 
 - `map_target fg_pid=… fg_class=<hash> fg_hkl=0x… fg_focus=<hash> fg_focus_pid=… fg_integrity=low|medium|high|system|protected|unknown fg_elevated=true|false|unknown fg_visible=… fg_iconic=… fg_self=… hook_calls_total=<n>`
-  每次快捷键动作注入前一行。回答：前台是谁、焦点在哪个进程（`fg_focus_pid` ≠ `fg_pid`
-  即焦点被托管到另一个进程）、目标是否提权（UIPI 只向同/低完整性窗口投递）、窗口是否
-  可见/最小化、前台线程键盘布局，以及注入前钩子累计看到过多少键（该数在目标窗口前台
-  期间仍增长，说明物理键还能被钩子看到，可与 `echo_delta=0` 一起把"目标按注入标记过滤"
-  和"钩子整条链都没了"分开）。
+  快捷键注入**没有回声**时一行（注入前只记句柄与 pid，探测发生在失败后）。回答：前台是谁、
+  焦点在哪个进程（`fg_focus_pid` ≠ `fg_pid` 即焦点被托管到另一个进程）、目标是否提权（UIPI
+  只向同/低完整性窗口投递）、窗口是否可见/最小化、前台线程键盘布局，以及注入前钩子累计
+  看到过多少键（该数在目标窗口前台期间仍增长，说明物理键还能被钩子看到，可与
+  `echo_delta=0` 一起把"目标按注入标记过滤"和"钩子整条链都没了"分开）。
 - `send_input action=tap chord=<keys> form=scancode|virtual|mixed expected=<2×键数> sent=<提交数> result=ok|partial|failed win32_error=<n> elapsed_ms=<n>`
-  每次 `tap` 一行。回答：这次到底是扫描码注入（`wVk=0` + `KEYEVENTF_SCANCODE`，字母/方向/
-  回车）还是虚拟键注入（`wVk` + `wScan=0`，媒体键），以及 `SendInput` 是否拒收/部分提交。
-  `sent` 只证明提交进输入流，**不证明目标收到了**；`win32_error=5`（拒绝访问）是 UIPI 拦截
-  的常见指纹。
+  只在 `SendInput` 拒收/部分提交时一行（完整提交不落盘）。回答：这次是扫描码注入
+  （`wVk=0` + `KEYEVENTF_SCANCODE`，字母/方向/回车）还是虚拟键注入（`wVk` + `wScan=0`，
+  媒体键），以及 `SendInput` 是否拒收/部分提交。`sent` 只证明提交进输入流，**不证明目标
+  收到了**；`win32_error=5`（拒绝访问）是 UIPI 拦截的常见指纹。
 - `input_env own_integrity=… own_elevated=… low_level_hooks_timeout_ms=<n|unset> diag_no_hooks=none|1|both|gate|all|set hook_host_pid=<n>`
   按键宿主安装成功后一行（每次进程只落一次）。回答：本进程权限、系统允许 LL 钩子执行多久
   （超时会被系统静默摘除）、钩子是否被诊断开关关掉——这三项都会让注入回声整片为 0，却与
   目标 App 无关。
 
-判读顺序：`send_input result=ok` + `map_inject echo_delta>0` = 进了系统输入流且本钩子看到了；
-`result=ok` + `echo_delta=0` = 事件在到达本钩子前就消失（更早的钩子/内核过滤，或目标窗口
-高完整性）；`result=partial|failed` 或 `win32_error≠0` = 提交侧问题，先看 `sent/expected`。
+判读顺序：`map_inject echo_delta>0` = 进了系统输入流且本钩子看到了；`echo_delta=0` = 事件在
+到达本钩子前就消失（更早的钩子/内核过滤，或目标窗口高完整性），此时看同一次注入的
+`map_target`；`send_input result=partial|failed` 或 `win32_error≠0` = 提交侧问题，先看
+`sent/expected`。
 
 **2026-11-27 现场修正（UIPI）**：目标窗口完整性高于本进程时，`SendInput` 仍会返回满数、
 `GetLastError=0`，但事件在投递前被系统丢弃——`result=ok` **不能**当成功判据。判据是
@@ -167,6 +169,7 @@ echo_delta=0`，无法回答"注入了几个事件、什么形态、打给了哪
 - `fg_integrity` 高于 `own_integrity` 且 `echo_delta=0` → 落
   `map_inject result=dropped echo_delta=0 reason=uipi_target_elevated`，计入
   `buttonMapping.uipiBlocked`（诊断报告 schema v5），按键页给一句"目标以管理员身份运行"的提示。
+  `uipiBlocked` 是**当前连续被拦次数**：映射注入成功一次即清零，提示随下一次成功消失。
 - 该场景下改鼠标/滚动动作同样无效（同一 UIPI 路径）；唯一零改动解法是让目标 App 取消
   「以管理员身份运行」。
 

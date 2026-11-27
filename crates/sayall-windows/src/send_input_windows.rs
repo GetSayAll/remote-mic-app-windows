@@ -301,13 +301,18 @@ impl SendInputRuntime {
         LAST_SEND_INPUT_ERROR.with(|cell| cell.set(None));
         let result = send_key_tap_with(&chord, real_send_input_batch);
         let win32_error = LAST_SEND_INPUT_ERROR.with(Cell::get).unwrap_or(0);
-        crate::ble::gatt_note(crate::send_input::tap_injection_note(
-            &chord,
-            chord.keys.len().saturating_mul(2),
-            &result,
-            win32_error,
-            started.elapsed().as_millis(),
-        ));
+        let expected = chord.keys.len().saturating_mul(2);
+        // 2026-11-27：完整提交不落盘——每次映射键一次同步打开/写入会占用注入路径。
+        // 只有拒收/部分提交才记一行；完整提交是否被目标收到由 `map_inject echo_delta` 判。
+        if !matches!(&result, Ok(sent) if *sent == expected) {
+            crate::ble::gatt_note(crate::send_input::tap_injection_note(
+                &chord,
+                expected,
+                &result,
+                win32_error,
+                started.elapsed().as_millis(),
+            ));
+        }
         self.record(result, "SendInput")
     }
 

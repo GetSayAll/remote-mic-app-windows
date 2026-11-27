@@ -533,7 +533,7 @@ export interface ButtonMappingSnapshot {
   swallowedEdges: number;
   leakedDowns: number;
   firedGestures: number;
-  /** 目标以更高完整性运行（UIPI）而没送达的映射注入次数（schema v5）。 */
+  /** 目标以更高完整性运行（UIPI）而没送达的映射注入次数（schema v5；成功一次即清零）。 */
   uipiBlocked: number;
   lastFired: FiredGesture | null;
   lastError: string | null;
@@ -991,7 +991,7 @@ export async function getUsageProfile(): Promise<UsageProfile> {
 export async function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (!isTauriRuntime()) {
     return {
-      schemaVersion: 4,
+      schemaVersion: 5,
       appVersion: browserSnapshot.appVersion,
       appBuild: "unknown",
       sourceRevision: "unknown",

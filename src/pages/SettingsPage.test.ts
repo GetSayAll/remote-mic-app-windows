@@ -412,7 +412,7 @@ describe("settings page", () => {
     await flushPromises();
 
     const report = wrapper.get(".diagnostic-output").text();
-    expect(report).toContain('"schemaVersion": 4');
+    expect(report).toContain('"schemaVersion": 5');
     expect(report).toContain('"windowsVersion"');
     expect(report).toContain('"sourceRevision"');
     // 开机上下文（2026-10-20）：报障时无需另拉日志。
