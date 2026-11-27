@@ -83,7 +83,7 @@ const fakeHandle = (name) => ({
 });
 
 /** NtDeviceIoControlFile 的 10 个参数（0 与 5..9 被 agent 用到）。 */
-function fakeArgs(outPtr, source = 'h0', iosb = num(0), inBuf = null) {
+function fakeArgs(outPtr, source = 'h0', iosb = num(0), inBuf = null, outLen = 9) {
   const a = new Array(10).fill(null).map(() => num(0));
   a[0] = fakeHandle(source);                                // FileHandle = 报告来源
   a[4] = iosb;                                              // IoStatusBlock（来源画像读长度）
@@ -95,7 +95,7 @@ function fakeArgs(outPtr, source = 'h0', iosb = num(0), inBuf = null) {
   };
   a[7] = num(8);                                            // InputBufferLength
   a[8] = outPtr;                                            // OutputBuffer
-  a[9] = num(9);                                            // OutputBufferLength
+  a[9] = num(outLen);                                       // OutputBufferLength = 报告长度
   return a;
 }
 
@@ -820,6 +820,41 @@ if (typeof ctx.sourceKeyOf === 'function') {
   check('画像：句柄关闭后释放槽位', ctx.DIAG.sources['diag-b'] === undefined);
   check('画像：关闭落一行汇总',
     sentLines.some((l) => l.includes('diag:src_closed') && l.includes('h=diag-b')));
+}
+
+/* ------------- 17. 报告长度门（2026-11-27：BLE 手柄共宿） -------------------- */
+{
+  ctx.handleCommand('{"type":"renew"}');
+  ctx.handleCommand(JSON.stringify({
+    type: 'targets', generation: 120,
+    report: [0x0066, 0x00f1, 0x0080, 0x0081],
+    clear: [0x0066, 0x00f1, 0x0080, 0x0081],
+  }));
+  ctx.activeSource = null;
+  ctx.pressed = {};
+
+  /* 手柄：17 字节缓冲区，内容含 0x0066 —— 必须整类忽略。 */
+  const beforeRej = ctx.stat.len_rejected || 0;
+  const padPtr = fakePtr(report(0x0066));
+  const padSelf = {};
+  handlers.onEnter.call(padSelf, fakeArgs(padPtr, 'pad', fakeIosb(0), null, 17));
+  handlers.onLeave.call(padSelf, 0);
+  check('长度门：17 字节报告不被清键',
+    padPtr.buf[3] === 0x66 && padPtr.buf[4] === 0,
+    `buf3=0x${padPtr.buf[3].toString(16)}`);
+  check('长度门：17 字节报告不产生边沿', padSelf.hit === false);
+  check('长度门：17 字节报告不抢来源归属', ctx.activeSource === null);
+  check('长度门：len_rejected +1', (ctx.stat.len_rejected || 0) === beforeRej + 1,
+    `len_rejected=${ctx.stat.len_rejected}`);
+
+  /* 同样内容、9 字节缓冲区 = 遥控器报告：照常清键 + 边沿。
+     注意：`onLeave` 会把报告恢复成原样（restoreOnLeave），所以断言放在 onLeave 之前。 */
+  const okPtr = fakePtr(report(0x0066));
+  const okSelf = {};
+  handlers.onEnter.call(okSelf, fakeArgs(okPtr, 'remote', fakeIosb(0), null, 9));
+  check('长度门：9 字节报告照常清键', okPtr.buf[3] === 0 && okSelf.cleared === true,
+    `buf3=0x${okPtr.buf[3].toString(16)} cleared=${okSelf.cleared}`);
+  handlers.onLeave.call(okSelf, 0);
 }
 
 const failed = results.filter((r) => !r.ok);
