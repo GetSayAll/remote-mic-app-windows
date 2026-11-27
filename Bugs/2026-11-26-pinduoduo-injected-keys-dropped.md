@@ -1,7 +1,7 @@
 # 拼多多商家版里映射的方向键/回车/字母无效（目标以管理员运行，UIPI 丢弃注入）
 
 - 发现日期：2026-11-26；根因确认 2026-11-27
-- 状态：已确认根因（UIPI）；诊断终态与界面提示已补，现场解法待用户验证
+- 状态：已确认根因（UIPI）；诊断终态与界面提示已补；2026-11-27 决定不提供提权注入路径（不支持）
 - 影响范围：用户现场 1.9.7（`source_revision=98fd2a2…`）与 1.9.9（`6d24ee3…`）、
   Windows 11 build 22631、RC003（报告层接管 + 注入）、第三方 App「拼多多商家版」
   （窗口类名哈希 `4aafa526`，以管理员身份运行）；RC001 未涉及
@@ -50,15 +50,27 @@
 - `LOGGING.md` 补判读口径与"result=ok 不代表送达"的实测边界。
 - 不改注入行为；不把 `SendInput` 换成鼠标/滚动（同样被 UIPI 拦）。
 
+## 产品边界（2026-11-27 用户决定）
+
+- 目标进程以高完整性（管理员）运行时，`SendInput`、`PostMessage`、UIA 都会被 UIPI 拦，
+  改鼠标/滚动动作同样无效。
+- **不通过已提权的助手代发按键，也不新增其它提权注入路径。** 这是明确的“不支持”边界，
+  不是待办：遥控器按键只投递给普通权限的目标窗口。
+- 用户侧做法是让目标应用以普通权限启动；取消「以管理员身份运行」后必须完全退出
+  （含托盘/更新器进程）再启动才生效。若该应用的清单强制管理员，则无线麦无法向它发送按键。
+
 ## 验证
 
 - `cargo fmt --all -- --check` passed。
 - `cargo test --workspace` passed（含新增的 `uipi_only_blocks_targets_strictly_above_own_integrity`、
-  `uipi_injection_check_uses_target_probe_integrity`、`shortcut_injection_note` 的 UIPI 分支）。
+  `uipi_injection_check_reads_the_target_probe`、`shortcut_injection_note` 的 UIPI 分支）。
 - `cargo check -p sayall-windows-app --features runtime-simulation` passed。
 - 前端：`vitest run` + `vue-tsc --noEmit` + `vite build`（含按键页提示的“出现/不出现”两例）。
-- **现场解法 deferred**：需要用户取消拼多多商家版的「以管理员身份运行」后复测；
-  届时日志应为 `map_target fg_integrity=medium`、`map_inject result=queued echo_delta>0`。
+- **现场解法 deferred**：2026-11-27 用户反馈“已去掉管理员权限”，但复验日志
+  （06:48–06:57 片段）仍是 43/43 `fg_integrity=high fg_elevated=true`、`echo_delta=0`，
+  说明实际运行的进程还是提权态（未完全退出 / 其它启动入口 / 清单强制）。
+  按「产品边界」一节确认启动方式；若清单强制管理员，则不支持。
+  解除提权后日志应为 `map_target fg_integrity=medium`、`map_inject result=queued echo_delta>0`。
 
 ## 隐私检查
 
