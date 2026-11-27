@@ -160,6 +160,16 @@ echo_delta=0`，无法回答"注入了几个事件、什么形态、打给了哪
 `result=ok` + `echo_delta=0` = 事件在到达本钩子前就消失（更早的钩子/内核过滤，或目标窗口
 高完整性）；`result=partial|failed` 或 `win32_error≠0` = 提交侧问题，先看 `sent/expected`。
 
+**2026-11-27 现场修正（UIPI）**：目标窗口完整性高于本进程时，`SendInput` 仍会返回满数、
+`GetLastError=0`，但事件在投递前被系统丢弃——`result=ok` **不能**当成功判据。判据是
+`map_target` 的 `fg_integrity` 与 `input_env` 的 `own_integrity` 的相对高低 + `echo_delta`：
+
+- `fg_integrity` 高于 `own_integrity` 且 `echo_delta=0` → 落
+  `map_inject result=dropped echo_delta=0 reason=uipi_target_elevated`，计入
+  `buttonMapping.uipiBlocked`（诊断报告 schema v5），按键页给一句"目标以管理员身份运行"的提示。
+- 该场景下改鼠标/滚动动作同样无效（同一 UIPI 路径）；唯一零改动解法是让目标 App 取消
+  「以管理员身份运行」。
+
 隐私：只落进程号、类名哈希、完整性级别、布局与错误码；不含窗口标题、可执行文件路径、
 用户名、输入文字或设备身份。
 

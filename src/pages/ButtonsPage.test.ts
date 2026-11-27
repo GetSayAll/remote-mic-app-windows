@@ -44,6 +44,7 @@ vi.mock("../lib/bridge", async (importOriginal) => {
       swallowedEdges: 3,
       leakedDowns: 0,
       firedGestures: 1,
+      uipiBlocked: 0,
       lastFired: null,
       lastError: null,
     })),
@@ -283,6 +284,7 @@ const runtime: RuntimeSnapshot = {
       swallowedEdges: 3,
       leakedDowns: 0,
       firedGestures: 1,
+      uipiBlocked: 0,
       lastFired: null,
       lastError: null,
     },
@@ -2028,6 +2030,7 @@ describe("buttons mapping page", () => {
       swallowedEdges: 0,
       leakedDowns: 0,
       firedGestures: 0,
+      uipiBlocked: 0,
       lastFired: null,
       lastError: null,
       lastFocus: { focused: false, reason: "no_candidate" },
@@ -4322,5 +4325,30 @@ describe("全按键支持在本机不可用（issue #206）", () => {
     expect(wrapper.find(".action-filter-chip.selected").text()).toBe("按键速度");
     expect(wrapper.find(".mapping-speed-panel").exists()).toBe(true);
     expect(wrapper.findAll(".mapping-speed-panel input[type='range']")).toHaveLength(2);
+  });
+});
+
+describe("目标以管理员身份运行时的按键提示（2026-11-27）", () => {
+  it("counts UIPI drops into a user-facing hint", async () => {
+    vi.mocked(getButtonMappingSnapshot).mockResolvedValueOnce({
+      enabled: true,
+      gateActive: true,
+      listenerActive: true,
+      swallowedEdges: 0,
+      leakedDowns: 0,
+      firedGestures: 0,
+      uipiBlocked: 2,
+      lastFired: null,
+      lastError: null,
+    } as never);
+    const wrapper = await mountPage();
+    await flushPromises();
+    expect(wrapper.text()).toContain("以管理员身份运行");
+  });
+
+  it("stays silent when nothing was dropped", async () => {
+    const wrapper = await mountPage();
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("以管理员身份运行");
   });
 });

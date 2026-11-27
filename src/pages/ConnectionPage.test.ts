@@ -101,6 +101,7 @@ const runtime: RuntimeSnapshot = {
       swallowedEdges: 0,
       leakedDowns: 0,
       firedGestures: 0,
+      uipiBlocked: 0,
       lastFired: null,
       lastError: null,
     },

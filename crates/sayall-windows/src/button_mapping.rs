@@ -822,6 +822,10 @@ pub struct ButtonMappingSnapshot {
     pub swallowed_edges: u64,
     pub leaked_downs: u64,
     pub fired_gestures: u64,
+    /// 因目标窗口完整性高于本进程（UIPI）而没能送达的映射注入次数
+    /// （2026-11-27 现场：拼多多商家版以管理员运行）。
+    #[serde(default)]
+    pub uipi_blocked: u64,
     pub last_fired: Option<FiredGesture>,
     pub last_error: Option<String>,
     /// 最近一次「聚焦输入框」的结果（未使用过该功能时为 `None`）。
@@ -1174,6 +1178,7 @@ impl ButtonMappingRuntime {
             swallowed_edges: key_gate::swallowed_edge_count(),
             leaked_downs: key_gate::leaked_down_count(),
             fired_gestures: state.fired_gestures,
+            uipi_blocked: crate::input_target::uipi_blocked_total(),
             last_fired: state.last_fired,
             last_error: state.last_error.clone(),
             last_focus: self.injector.focus_report(),
@@ -2929,7 +2934,11 @@ fn fire_gesture(
             // 2026-11-26：再补第三层——注入前的目标快照（前台/焦点/完整性/
             // 可见性）。现场"只有一个 App 收不到、音量键却有效"只能靠它判
             // "打在谁身上、对方什么权限"，注入侧本身不改行为。
-            crate::ble::gatt_note(crate::input_target::map_target_note());
+            let target = crate::input_target::probe_foreground();
+            crate::ble::gatt_note(crate::input_target::format_map_target(
+                &target,
+                crate::key_gate::hook_calls_total(),
+            ));
             let echo_before = crate::key_gate::injected_event_count();
             match injector.tap(&chord) {
                 Ok(()) => {
@@ -2939,7 +2948,17 @@ fn fire_gesture(
                         crate::ble::gatt_note(LOCK_WORKSTATION_INJECT_NOTE.to_owned());
                     } else {
                         let echo = observe_injection_echo(echo_before);
-                        crate::ble::gatt_note(shortcut_injection_note(echo));
+                        // 2026-11-27 现场（拼多多商家版）：目标以管理员身份运行
+                        // （high IL）时，SendInput 仍返回满数、GetLastError=0，
+                        // 但事件在投递前被 UIPI 丢弃（echo_delta=0）。这里把
+                        // "没回声 + 目标更高完整性"落成确定的终态，而不是让
+                        // 读者从两行日志里自己推。
+                        let uipi_blocked =
+                            echo.count == 0 && crate::input_target::uipi_blocks_injection(&target);
+                        if uipi_blocked {
+                            crate::input_target::record_uipi_blocked();
+                        }
+                        crate::ble::gatt_note(shortcut_injection_note(echo, uipi_blocked));
                     }
                     return terminal_action;
                 }
@@ -3148,10 +3167,20 @@ fn observe_injection_echo(before: u64) -> crate::key_gate::InjectedEcho {
 ///   最后一条的 vk/扫描码/flags，可当场核对目标键与扫描码）；
 /// - `echo_delta=0`：这次注入没有被宿主钩子看到——要么宿主/钩子不在，
 ///   要么事件在到达本进程钩子之前就被别的钩子丢掉了。前台是否可见都不能
-///   由本行推出，仍需真机验收。
-fn shortcut_injection_note(echo: crate::key_gate::InjectedEcho) -> String {
+///   由本行推出，仍需真机验收；
+/// - `result=dropped reason=uipi_target_elevated`：目标窗口完整性高于本进程
+///   （UIPI）。2026-11-27 实测：这种拦截下 `SendInput` 仍返回满数、
+///   `GetLastError=0`，只有回声能证明事件被丢；本行把判据落成确定终态。
+fn shortcut_injection_note(echo: crate::key_gate::InjectedEcho, uipi_blocked: bool) -> String {
     if echo.count == 0 {
-        "map_inject result=queued echo_delta=0 note=hook_did_not_observe_injected_key".to_owned()
+        if uipi_blocked {
+            "map_inject result=dropped echo_delta=0 reason=uipi_target_elevated \
+             note=hook_did_not_observe_injected_key"
+                .to_owned()
+        } else {
+            "map_inject result=queued echo_delta=0 note=hook_did_not_observe_injected_key"
+                .to_owned()
+        }
     } else {
         format!(
             "map_inject result=queued echo_delta={} last_vk=0x{:02X} last_scan=0x{:02X} last_flags=0x{:X}",
@@ -3772,12 +3801,15 @@ mod tests {
     /// 两种形态，且不得再出现「result=ok」这种只证明入队的措辞。
     #[test]
     fn shortcut_injection_note_reports_queue_and_hook_echo() {
-        let observed = shortcut_injection_note(crate::key_gate::InjectedEcho {
-            count: 2,
-            vk: 0x1B,
-            scan: 0x01,
-            flags: 0x90,
-        });
+        let observed = shortcut_injection_note(
+            crate::key_gate::InjectedEcho {
+                count: 2,
+                vk: 0x1B,
+                scan: 0x01,
+                flags: 0x90,
+            },
+            false,
+        );
         assert_eq!(
             observed,
             "map_inject result=queued echo_delta=2 last_vk=0x1B last_scan=0x01 last_flags=0x90"
@@ -3787,10 +3819,30 @@ mod tests {
             "不得再把入队当成功：{observed}"
         );
 
-        let missing = shortcut_injection_note(crate::key_gate::InjectedEcho::default());
+        let missing = shortcut_injection_note(crate::key_gate::InjectedEcho::default(), false);
         assert_eq!(
             missing,
             "map_inject result=queued echo_delta=0 note=hook_did_not_observe_injected_key"
+        );
+
+        // UIPI：目标更高完整性 + 没有回声 → 确定终态（2026-11-27 现场）。
+        let uipi = shortcut_injection_note(crate::key_gate::InjectedEcho::default(), true);
+        assert_eq!(
+            uipi,
+            "map_inject result=dropped echo_delta=0 reason=uipi_target_elevated \
+             note=hook_did_not_observe_injected_key"
+        );
+        // 有回声时不套用 UIPI 结论（例如目标提权但事件仍被看到）。
+        let echoed_with_uipi = shortcut_injection_note(
+            crate::key_gate::InjectedEcho {
+                count: 2,
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(
+            echoed_with_uipi.contains("result=queued"),
+            "{echoed_with_uipi}"
         );
 
         // 锁屏动作没有 SendInput 回声，措辞必须自证"设计如此"。

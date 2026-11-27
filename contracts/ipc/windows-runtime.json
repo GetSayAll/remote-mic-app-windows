@@ -58,6 +58,7 @@
       "swallowedEdges": 4,
       "leakedDowns": 0,
       "firedGestures": 3,
+      "uipiBlocked": 0,
       "lastFired": {
         "button": "home",
         "trigger": "single"

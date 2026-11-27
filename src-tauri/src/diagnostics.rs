@@ -9,7 +9,7 @@ use serde::Serialize;
 /// 启动日志里的 `diagnostic_schema=` 与报告体里的 `schemaVersion` 都取它：
 /// 2026-10-20 之前两处各写一份（日志恒为 2、报告已到 3），改一处就会漂。
 /// 加字段/改字段语义都必须 +1，前端 `DiagnosticReport` 同步改。
-pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 4;
+pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +111,8 @@ pub struct ButtonMappingDiagnostic {
     pub swallowed_edges: u64,
     pub leaked_downs: u64,
     pub fired_gestures: u64,
+    /// 目标窗口完整性高于本进程（UIPI）而没送达的映射注入次数（schema v5）。
+    pub uipi_blocked: u64,
     pub error_present: bool,
 }
 
@@ -232,6 +234,7 @@ impl DiagnosticReport {
                 swallowed_edges: platform.button_mapping.swallowed_edges,
                 leaked_downs: platform.button_mapping.leaked_downs,
                 fired_gestures: platform.button_mapping.fired_gestures,
+                uipi_blocked: platform.button_mapping.uipi_blocked,
                 error_present: platform.button_mapping.last_error.is_some(),
             },
             ime: ImeDiagnostic::from_status(&ime),
@@ -288,6 +291,7 @@ mod tests {
                 swallowed_edges: 3,
                 leaked_downs: 1,
                 fired_gestures: 2,
+                uipi_blocked: 0,
                 last_fired: None,
                 last_error: Some("内部注入细节".to_owned()),
                 last_focus: None,
@@ -311,8 +315,8 @@ mod tests {
 
         assert_eq!(report.schema_version, DIAGNOSTIC_SCHEMA_VERSION);
         assert_eq!(
-            report.schema_version, 4,
-            "新增 bootType/fastStartupEnabled 后为 v4"
+            report.schema_version, 5,
+            "新增 buttonMapping.uipiBlocked 后为 v5"
         );
         assert_eq!(report.app_version, "0.1.0");
         // 引导类型（2026-10-20）：读的是本机真值（值因机器而异），这里断言的

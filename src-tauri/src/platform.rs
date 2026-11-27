@@ -1176,6 +1176,7 @@ mod simulation {
                 swallowed_edges: 0,
                 leaked_downs: 0,
                 fired_gestures: 0,
+                uipi_blocked: 0,
                 last_fired: None,
                 last_error: None,
                 last_focus: None,

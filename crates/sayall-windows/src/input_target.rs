@@ -146,6 +146,49 @@ pub fn input_env_note(hook_host_pid: u32) -> String {
     format_input_env(&env)
 }
 
+/// 完整性级别的偏序（UIPI：低完整性进程不能向更高完整性的窗口投递模拟输入）。
+fn integrity_rank(token: &str) -> u8 {
+    match token {
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "system" => 4,
+        "protected" => 5,
+        // `unknown` 不参与比较：读不到不等于"更高"或"更低"。
+        _ => 0,
+    }
+}
+
+/// 本进程完整性（进程生命周期内不变，缓存一次；读不到为 `unknown`）。
+pub fn own_integrity() -> &'static str {
+    static OWN: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| probe_input_env().integrity)
+}
+
+/// 目标完整性严格高于本进程 → 模拟输入会被 UIPI 丢弃（纯判据，单测覆盖）。
+fn uipi_blocks(own: &str, target: &str) -> bool {
+    let own_rank = integrity_rank(own);
+    let target_rank = integrity_rank(target);
+    own_rank > 0 && target_rank > 0 && target_rank > own_rank
+}
+
+/// 本次注入的目标是否会被 UIPI 拦下（目标窗口完整性高于本进程）。
+pub fn uipi_blocks_injection(target: &TargetProbe) -> bool {
+    uipi_blocks(own_integrity(), target.integrity)
+}
+
+/// 累计被 UIPI 拦下的映射注入次数（诊断摘要用；进程生命周期内累加）。
+static UIPI_BLOCKED_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn uipi_blocked_total() -> u64 {
+    UIPI_BLOCKED_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 记录一次 UIPI 拦下的映射注入。
+pub(crate) fn record_uipi_blocked() {
+    UIPI_BLOCKED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `SAYALL_DIAG_NO_HOOKS` 的稳定标记：只接受已知取值，其余一律 `set`。
 fn diag_no_hooks_token(value: Option<&str>) -> &'static str {
     match value.map(str::trim) {
@@ -476,5 +519,32 @@ mod tests {
         assert_eq!(integrity_token(0x3000), "high");
         assert_eq!(integrity_token(0x4000), "system");
         assert_eq!(integrity_token(0x5000), "protected");
+    }
+
+    #[test]
+    fn uipi_only_blocks_targets_strictly_above_own_integrity() {
+        // 现场（2026-11-27）：无线麦 medium、拼多多商家版 high → 注入被系统丢弃。
+        assert!(uipi_blocks("medium", "high"));
+        assert!(uipi_blocks("medium", "system"));
+        assert!(uipi_blocks("low", "medium"));
+        // 同级别与更低级别不受 UIPI 影响。
+        assert!(!uipi_blocks("medium", "medium"));
+        assert!(!uipi_blocks("medium", "low"));
+        assert!(!uipi_blocks("high", "medium"));
+        // unknown 不参与比较：读不到不得当成"会被拦"。
+        assert!(!uipi_blocks("unknown", "high"));
+        assert!(!uipi_blocks("medium", "unknown"));
+    }
+
+    #[test]
+    fn uipi_injection_check_uses_target_probe_integrity() {
+        let mut probe = TargetProbe {
+            integrity: "high",
+            ..Default::default()
+        };
+        // 本机测试进程是 medium；只有高完整性目标才判"会被拦"。
+        assert!(uipi_blocks_injection(&probe));
+        probe.integrity = "medium";
+        assert!(!uipi_blocks_injection(&probe));
     }
 }

@@ -533,6 +533,8 @@ export interface ButtonMappingSnapshot {
   swallowedEdges: number;
   leakedDowns: number;
   firedGestures: number;
+  /** 目标以更高完整性运行（UIPI）而没送达的映射注入次数（schema v5）。 */
+  uipiBlocked: number;
   lastFired: FiredGesture | null;
   lastError: string | null;
   lastFocus?: FocusReport;
@@ -688,6 +690,7 @@ export interface DiagnosticReport {
     swallowedEdges: number;
     leakedDowns: number;
     firedGestures: number;
+    uipiBlocked: number;
     errorPresent: boolean;
   };
   /** 输入法（2026-10-13 现场，schemaVersion 3）：诊断"语音没出字是不是没切输入法"。 */
@@ -850,6 +853,7 @@ const browserSnapshot: RuntimeSnapshot = {
       swallowedEdges: 0,
       leakedDowns: 0,
       firedGestures: 0,
+      uipiBlocked: 0,
       lastFired: null,
       lastError: null,
     },
@@ -1048,6 +1052,7 @@ export async function getDiagnosticReport(): Promise<DiagnosticReport> {
         swallowedEdges: 0,
         leakedDowns: 0,
         firedGestures: 0,
+        uipiBlocked: 0,
         errorPresent: false,
       },
       ime: {
@@ -1787,6 +1792,7 @@ export async function getButtonMappingSnapshot(): Promise<ButtonMappingSnapshot>
       swallowedEdges: 0,
       leakedDowns: 0,
       firedGestures: 0,
+      uipiBlocked: 0,
       lastFired: null,
       lastError: null,
     };
