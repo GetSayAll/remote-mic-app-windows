@@ -4,6 +4,7 @@
 - 日期：2026-11-27
 - 范围：`remote-mic-app-windows` 公开宿主 + `sayall-private-platform` 私有运行时/移动端接线
 - 目标分支：当前 iPhone 附近连接功能分支之后的独立工作项
+- 决策（2026-11-28）：最低 Windows 版本定为 **Windows 10 1903（18362）**；1809 不再进入该架构。Windows 10 19041 满足下限，仍需真机验证。当前应用声明暂不改，实施阶段再调整。
 
 ## 1. 目标
 
@@ -118,7 +119,8 @@ HKLM\SYSTEM\CurrentControlSet\Services\BthPort\Parameters
 - 部分系统/驱动会截断载荷，只保留 3 字节 ATT 头
 - 蓝牙适配器厂商、驱动版本、BLE 连接状态都会影响事件
 - RC003 在 Windows 11 有 Remote Buddy 真机验证；RC001 仍待验证；ARM64 未验证
-- 我们的最低系统是 Windows 10 1809，而 usbip-win2 要求 1903+；Windows 10 19041（2004/20H2）满足该版本下限，但需单独真机验证。需要决定是否把最低版本提到 1903/19041，或为 1809 保留旧系统回退
+- 最低系统定为 Windows 10 1903（18362），与 usbip-win2 的 1903+ 要求一致；Windows 10 1809 不再进入该架构
+- Windows 10 19041（2004/20H2）满足版本下限，但需单独真机验证
 
 ### 5.4 BLE/GATT 绑定
 
@@ -234,7 +236,7 @@ HKLM\SYSTEM\CurrentControlSet\Services\BthPort\Parameters
 - 产出：
   - Windows 10 19041/22H2、Windows 11 真机结果（19041 满足 usbip-win2 的 1903+ 下限）
   - RC003 结果；RC001 标记 deferred
-  - 是否接受 usbip-win2 最低版本 1903（19041 可直接支持）
+  - 最低版本已定：1903；19041 可直接支持，Phase 0 只验证实际目标机型
   - 是否接受 ETW 管理员/重启
 
 **退出条件**：两个 spike 都能在至少一台目标机完成 Doubao/三键端到端；否则不进入全面替换。
@@ -325,7 +327,7 @@ HKLM\SYSTEM\CurrentControlSet\Services\BthPort\Parameters
 
 | 维度 | 覆盖 |
 |---|---|
-| 系统 | Windows 10 1903/22H2、Windows 11 23H2/24H2；x64；ARM64 如可得 |
+| 系统 | Windows 10 1903/19041/22H2、Windows 11 23H2/24H2；x64；ARM64 如可得 |
 | 遥控器 | RC003、RC001；两只同型号同时在线 |
 | 豆包 | 物理遥控器语音、手机语音、冷启动、快速连按、连续会话、断连重连 |
 | 微信 | 回归 SendInput 路径 |
@@ -352,7 +354,7 @@ HKLM\SYSTEM\CurrentControlSet\Services\BthPort\Parameters
 | ETW 载荷截断/脱敏 | 三键不可用 | 检测并提示配置/重启；记录 `report=redacted`；ETW 不可用时禁用三键 |
 | ETW 需管理员/重启 | 普通用户门槛高 | 首次配置向导一次完成；解释原因；提供回退 |
 | RC001/ARM64 未验证 | 兼容性回归 | 分机型门禁；未验证机型保留 legacy 或禁用承诺 |
-| Windows 10 1809 不支持 usbip-win2 | 旧系统豆包不可用 | 提高最低版本或 1809 回退旧 Helper |
+| Windows 10 1809 不支持 usbip-win2 | 旧系统豆包不可用 | 已定最低版本 1903；1809 不进入新架构，旧版本发布/回退策略实施时确定 |
 | HIDMaestro 驱动安装失败/杀软 | 豆包不可用 | 明确状态；WeChat/其他工具不受影响；提供诊断 |
 | 虚拟键盘粘键 | 用户按键卡住 | watchdog、release on exit、最短 hold、HIDMaestro 限制说明 |
 | ETW 只读，普通键原生透传 | 双动作 | `key_gate`；管理员 UIPI 边界文档化；必要时保留 legacy |
@@ -383,11 +385,12 @@ HKLM\SYSTEM\CurrentControlSet\Services\BthPort\Parameters
 
 1. 是否接受 HIDMaestro + usbip-win2 的**签名驱动安装**和 UAC？
 2. 是否接受 ETW 的**管理员/注册表/重启**成本？
-3. 最低 Windows 版本是否从 1809 提到 1903/19041？19041 已满足 usbip-win2 的 1903+ 下限。
-4. RC001 未验证时：禁用三键、保留旧 Helper，还是标 beta？
-5. 是否接受 ETW 只读导致的管理员前台原生键边界？
-6. 是否保留一个版本的 legacy Helper 作为回退，之后再删除？
-7. HIDMaestro 以 sidecar 引入还是自研 UMDF（前者快、后者可控但更贵）？
+3. RC001 未验证时：禁用三键、保留旧 Helper，还是标 beta？
+4. 是否接受 ETW 只读导致的管理员前台原生键边界？
+5. 是否保留一个版本的 legacy Helper 作为回退，之后再删除？
+6. HIDMaestro 以 sidecar 引入还是自研 UMDF（前者快、后者可控但更贵）？
+
+已定（2026-11-28）：最低 Windows 版本为 **10 1903（18362）**；19041 受支持；1809 不再进入该架构。
 
 ## 13. 完成定义
 
