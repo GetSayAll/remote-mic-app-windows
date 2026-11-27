@@ -5,6 +5,7 @@ import settings from "./en/settings";
 import buttons from "./en/buttons";
 import macros from "./en/macros";
 import connection from "./en/connection";
+import phoneRemote from "./en/phone-remote";
 import onboarding from "./en/onboarding";
 import permissions from "./en/permissions";
 import reflections from "./en/reflections";
@@ -26,6 +27,7 @@ export const en: Record<string, string> = {
   ...buttons,
   ...macros,
   ...connection,
+  ...phoneRemote,
   ...onboarding,
   ...permissions,
   ...reflections,

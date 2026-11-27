@@ -24,13 +24,20 @@
 | `src-tauri/src/membership/hook.rs` | **注入点**。公开版本返回 `None`；私有构建用同名文件替换其内容 |
 | `src-tauri/src/membership/mod.rs` | `install(usage_statistics_path)`：拿到 `hook` 的运行时，拿不到就用空实现；路径是公开宿主的 `usage-statistics.json`，仅供私有上传器读取 |
 | `src-tauri/src/lib.rs` | 把运行时放进 `AppState`；生命周期接线：`get_membership_snapshot`、`refresh_membership`、`start_membership_email_login`、`verify_membership_email_login`、`logout_membership`、`get_membership_catalog`、`purchase_membership`、`refresh_membership_purchase`、`clear_membership_purchase`、`open_membership_checkout`、窗口获得焦点、`RunEvent::ExitRequested` |
+| `src-tauri/src/remote/runtime.rs` | `PhoneRemoteRuntime` 接口、`PhoneRemoteSnapshot` 与公开空实现 `UnavailablePhoneRemoteRuntime`；只暴露派生展示值，不暴露邀请/小程序 token |
+| `src-tauri/src/remote/hook.rs` | **注入点**。公开版本返回 `None`；私有构建用同名文件替换其内容 |
+| `src-tauri/src/remote/mod.rs` | `install()`：拿到 `hook` 的运行时，拿不到就用空实现；快照随 `get_runtime_snapshot` 每秒返回，公开构建 `availability=unavailable` |
+| `src-tauri/src/lib.rs` | 移动端命令接线：`start_phone_remote_ios`、`stop_phone_remote_ios`、`approve_phone_remote`、`deny_phone_remote`、`clear_phone_remote_trusted_devices`、`start_phone_remote_web`、`stop_phone_remote_web`；退出收尾调用 `phone_remote.shutdown()` |
 
 接口契约：
 
 - `snapshot()` 必须**非阻塞**（界面按秒轮询）。
 - 所有返回 `Result` 的操作失败时只回**稳定错误码**，不把服务端文案或不透明标识带到前端。
-- 登录相关方法都有默认实现（返回「不可用」），公开构建因此无需改动即可满足接口。
-- `on_foreground()` / `shutdown()` 成对存在；公开实现是 no-op。
+- `PhoneRemoteRuntime` 的非 `snapshot()` 操作返回 `Result`；公开空实现统一返回 `phone_remote_unavailable`。
+- `PhoneRemoteAccess` 只在私有构建的 `hook.rs` 中消费：携带 `PlatformRuntime`、`MembershipRuntime`、安装包版本、审批窗口前台回调，以及 Windows 上的音频、按键引擎和语音会话句柄。运行时都是应用已经在用的**同一份实例**，不是拷贝；公开实现忽略它们。
+- `PhoneRemoteSnapshot` 只含展示派生值；二维码/小程序码是 data URL，**邀请 token、join token、IP、端口、设备指纹一律不越过 Rust 边界**。
+- iOS 与小程序必须分别有开始/停止入口；审批用 `request_id` 拒绝迟到结果。
+- `shutdown()` 幂等；公开实现是 no-op。窗口隐藏/退出不得留下监听、连接、按住的快捷键或音频会话。
 - `MembershipSnapshot` 是隐私边界：只放展示所需的派生值（账号显示名、是否已开通、
   可用截止时刻）。**凭据、令牌、邮箱原文、安装标识、设备标识一律不越过 Rust 边界。**
 - `catalog()` / `purchase()` / `refresh_purchase()` 会走网络，宿主用

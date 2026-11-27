@@ -17,7 +17,7 @@ pub mod app_launcher;
 /// 产品行为对齐 macOS Command+Tab 会话，平台差异见模块文档。
 pub mod app_switcher;
 #[cfg(windows)]
-mod audio;
+pub mod audio;
 #[cfg(windows)]
 pub mod battery;
 #[cfg(windows)]
@@ -52,6 +52,8 @@ pub mod input_target;
 pub mod instance_signal;
 /// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。
 pub mod key_host;
+#[cfg(windows)]
+pub mod phone_voice;
 /// 回眸原始录音：WAV 写入、终态清理与 manifest。跨平台可单测，写入只在启用时发生。
 pub mod voice_recording;
 // 硬件信号脚本（仿真回放用；见模块注释）：解析模拟器导出的信号脚本。
@@ -1615,6 +1617,24 @@ impl WindowsPlatform {
     #[cfg(windows)]
     pub fn button_mapping_runtime(&self) -> Arc<ButtonMappingRuntime> {
         Arc::clone(&self.button_mapping)
+    }
+
+    /// 手机遥控用的音频渲染运行时：同一套，不是拷贝。
+    #[cfg(windows)]
+    pub fn audio_runtime(&self) -> Arc<audio::AudioRuntime> {
+        Arc::clone(&self.audio)
+    }
+
+    /// 手机遥控用的语音会话句柄：共享快捷键与输入工具句柄，用户中途改设置下一次按下即生效。
+    #[cfg(windows)]
+    pub fn phone_voice_access(&self) -> phone_voice::PhoneVoiceAccess {
+        phone_voice::PhoneVoiceAccess {
+            send_input: Arc::clone(&self.send_input),
+            audio: Arc::clone(&self.audio),
+            hotkey: Arc::clone(&self.voice_hold_hotkey),
+            tool: Arc::clone(&self.voice_input_tool),
+            virtual_hid: None,
+        }
     }
 
     /// UI「测试」按钮：聚焦当前前台应用输入框（异步受理，结果在快照的 `last_focus`）。
