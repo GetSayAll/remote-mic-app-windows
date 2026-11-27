@@ -6582,6 +6582,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///
     /// 不在这里 `exit`：卸载路径需要按结果选择退出码，覆盖升级路径需要清完
     /// 继续走正常的全新注入流程。
+    /// 升级清理的判定：只有“没有真实失败、且还有文件因被宿主映射而删不掉”时，
+    /// 才允许带旧运行时继续启动（Attach 旧 agent）。
+    ///
+    /// 反例必须继续 `exit(3)`：
+    /// - `failures > 0`：删除动作本身失败，运行时状态不可信；
+    /// - `files_pending_reboot == 0` 但目录仍在：说明还有未归类残留，不能假设可接管。
+    fn upgrade_cleanup_should_defer(failures: usize, files_pending_reboot: usize) -> bool {
+        failures == 0 && files_pending_reboot > 0
+    }
+
     fn perform_runtime_cleanup(args: &Args, logger: &Logger) -> CleanupReport {
         let mut report = cleanup_runtime_dir(&args.runtime_dir, logger);
         // 判据必须是**目录还在不在**，不能是 `report.is_clean()`：`is_clean` 只看 failures，
@@ -6788,8 +6798,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         // ---- 覆盖升级清理：只在正常捕获启动时消费，一次性 ----
         // 安装器 PREINSTALL 写标记；这里先释放旧宿主/设备环、删旧运行时目录，
-        // 再继续走全新注入。否则覆盖安装会保留上一代 Gadget，出现
-        // `[TAP] resident=1` → `no_authenticated_agent` 的永久循环。
+        // 再继续走全新注入。
+        //
+        // 2026-11-27 现场修正：旧实现要求“运行时目录整个消失”才算完成，否则
+        // `exit(3)` 等应用重试。共享宿主上 `release_injected_host` 按设计不结束
+        // 宿主，于是被映射的 `frida-gadget.dll` 永远删不掉——每次启动都 exit(3)，
+        // 应用无限重试 `helper_not_connected`（全按键支持整段时间不可用），
+        // 只能靠用户重启。清理**删不掉**不等于无法启动：保留令牌文件后，
+        // 宿主里的旧 agent 仍能用同一令牌接管（Attach），新代次在宿主下次
+        // 重启后自然落地；后续 attach 核验失败还有 `inject_new_generation`
+        // 兜底。因此只把“存在被占用文件 + 无真实失败”视为延期，不退出。
         if !args.dry_run {
             let upgrade_marker = upgrade_cleanup_signal_path();
             if upgrade_marker.exists() {
@@ -6802,6 +6820,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ],
                 );
                 if is_elevated() {
+                    // 令牌必须在清理中存活：共享宿主接管的唯一凭据就是它。
+                    // 删掉令牌 = 把旧 agent 变成“接不上的旧世代”，只能走结束宿主。
+                    let token_path = args.runtime_dir.join(TOKEN_FILE);
+                    let saved_token = fs::read(&token_path).ok();
                     let report = if args.runtime_dir.exists() {
                         perform_runtime_cleanup(&args, &logger)
                     } else {
@@ -6812,6 +6834,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             failures: Vec::new(),
                         }
                     };
+                    if let Some(bytes) = saved_token.as_ref() {
+                        if !token_path.exists() {
+                            let _ = fs::write(&token_path, bytes);
+                        }
+                    }
                     logger.kv(
                         "[CLEANUP]",
                         &[
@@ -6828,6 +6855,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     let complete = !args.runtime_dir.exists() && report.is_clean();
                     if complete {
                         let _ = fs::remove_file(&upgrade_marker);
+                    } else if upgrade_cleanup_should_defer(
+                        report.failures.len(),
+                        report.files_pending_reboot,
+                    ) {
+                        logger.kv(
+                            "[CLEANUP]",
+                            &[
+                                ("event", "upgrade_cleanup".into()),
+                                ("result", "deferred_in_use".into()),
+                                (
+                                    "files_pending_reboot",
+                                    report.files_pending_reboot.to_string(),
+                                ),
+                                (
+                                    "note",
+                                    "被宿主映射的 Gadget 删不掉（共享宿主不允许结束宿主）：\
+                                     保留标记与令牌，先按旧 agent 接管；新代次在宿主下次重启后生效"
+                                        .into(),
+                                ),
+                            ],
+                        );
                     } else {
                         logger.kv(
                             "[CLEANUP]",
@@ -6837,8 +6885,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 ("note", "保留标记，等待重启/下一轮重试".into()),
                             ],
                         );
-                        // 带着旧运行时继续注入必然回到 resident=1；让应用按桥接
-                        // 快照判失败并重试，而不是把“启动成功”报给用户。
+                        // 有真实失败（不是被占用）：带着不完整的运行时继续启动不安全。
                         std::process::exit(3);
                     }
                 } else {
@@ -11311,6 +11358,31 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn rotation_cap_is_ten_megabytes_and_keeps_five() {
             assert_eq!(SHARED_LOG_ROTATE_BYTES, 10 * 1024 * 1024);
             assert_eq!(SHARED_LOG_KEEP_ROTATED, 5);
+        }
+    }
+
+    /// 升级清理的延期判据（2026-11-27 现场）：共享宿主映射着 Gadget 时清理
+    /// 永远不可能“删干净”；只有“无真实失败 + 有被占用文件”才允许继续启动。
+    #[cfg(test)]
+    mod upgrade_cleanup_defer_tests {
+        use super::*;
+
+        #[test]
+        fn defers_only_when_the_only_blocker_is_an_in_use_file() {
+            assert!(upgrade_cleanup_should_defer(0, 1));
+            assert!(upgrade_cleanup_should_defer(0, 2));
+            assert!(
+                !upgrade_cleanup_should_defer(1, 1),
+                "真实失败必须继续 exit(3)"
+            );
+            assert!(
+                !upgrade_cleanup_should_defer(1, 0),
+                "真实失败必须继续 exit(3)"
+            );
+            assert!(
+                !upgrade_cleanup_should_defer(0, 0),
+                "无被占用文件说明还有未归类残留"
+            );
         }
     }
 
