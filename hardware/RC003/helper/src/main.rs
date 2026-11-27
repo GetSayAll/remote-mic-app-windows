@@ -2837,12 +2837,20 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// `allow_stale_recovery`：安全闸（宿主独占 RC003 + 运行时目录下确有我们的 gadget，
     /// 且未显式钉 `--token`，判据见 `auto_recover_stale_tap_gate`）满足时，允许把
     /// "令牌接不上"转为 `AttachStale`——第一轮即升级到干净首注，而不是退出等人工。
+    ///
+    /// `shared_host`：宿主不是独占 RC003（`members != 1 || rc003_members != 1`），
+    /// 按策略不能结束宿主。此时"令牌接不上"转 `Generation`：把 gadget 复制到新分代
+    /// 目录再注入，新 agent 用本轮令牌；旧 agent 续约被拒，2000 ms 租约到期后自行
+    /// 停清键（2026-11-27 现场：卸载/降级重装删掉了令牌，旧实现直接 exit 13，
+    /// 应用只能无限重试）。只有既不能结束宿主、又不是共享宿主（例如显式钉令牌或
+    /// 宿主里不是我们运行时目录的那份 gadget）才保留 `STALE-TAP` 人工路径。
     fn decide_plan(
         has_resident_tap: bool,
         token_assumed_reusable: bool,
         attach_only: bool,
         new_generation: bool,
         allow_stale_recovery: bool,
+        shared_host: bool,
     ) -> Result<DllPlan, String> {
         if has_resident_tap {
             if token_assumed_reusable {
@@ -2859,6 +2867,9 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             }
             if allow_stale_recovery {
                 return Ok(DllPlan::AttachStale);
+            }
+            if shared_host {
+                return Ok(DllPlan::Generation(String::new()));
             }
             return Err("STALE-TAP".to_string());
         }
@@ -6582,6 +6593,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     ///
     /// 不在这里 `exit`：卸载路径需要按结果选择退出码，覆盖升级路径需要清完
     /// 继续走正常的全新注入流程。
+    /// 升级清理的判定：只有“没有真实失败、且还有文件因被宿主映射而删不掉”时，
+    /// 才允许带旧运行时继续启动（Attach 旧 agent）。
+    ///
+    /// 反例必须继续 `exit(3)`：
+    /// - `failures > 0`：删除动作本身失败，运行时状态不可信；
+    /// - `files_pending_reboot == 0` 但目录仍在：说明还有未归类残留，不能假设可接管。
+    fn upgrade_cleanup_should_defer(failures: usize, files_pending_reboot: usize) -> bool {
+        failures == 0 && files_pending_reboot > 0
+    }
+
     fn perform_runtime_cleanup(args: &Args, logger: &Logger) -> CleanupReport {
         let mut report = cleanup_runtime_dir(&args.runtime_dir, logger);
         // 判据必须是**目录还在不在**，不能是 `report.is_clean()`：`is_clean` 只看 failures，
@@ -6788,8 +6809,16 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
 
         // ---- 覆盖升级清理：只在正常捕获启动时消费，一次性 ----
         // 安装器 PREINSTALL 写标记；这里先释放旧宿主/设备环、删旧运行时目录，
-        // 再继续走全新注入。否则覆盖安装会保留上一代 Gadget，出现
-        // `[TAP] resident=1` → `no_authenticated_agent` 的永久循环。
+        // 再继续走全新注入。
+        //
+        // 2026-11-27 现场修正：旧实现要求“运行时目录整个消失”才算完成，否则
+        // `exit(3)` 等应用重试。共享宿主上 `release_injected_host` 按设计不结束
+        // 宿主，于是被映射的 `frida-gadget.dll` 永远删不掉——每次启动都 exit(3)，
+        // 应用无限重试 `helper_not_connected`（全按键支持整段时间不可用），
+        // 只能靠用户重启。清理**删不掉**不等于无法启动：保留令牌文件后，
+        // 宿主里的旧 agent 仍能用同一令牌接管（Attach），新代次在宿主下次
+        // 重启后自然落地；后续 attach 核验失败还有 `inject_new_generation`
+        // 兜底。因此只把“存在被占用文件 + 无真实失败”视为延期，不退出。
         if !args.dry_run {
             let upgrade_marker = upgrade_cleanup_signal_path();
             if upgrade_marker.exists() {
@@ -6802,6 +6831,10 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     ],
                 );
                 if is_elevated() {
+                    // 令牌必须在清理中存活：共享宿主接管的唯一凭据就是它。
+                    // 删掉令牌 = 把旧 agent 变成“接不上的旧世代”，只能走结束宿主。
+                    let token_path = args.runtime_dir.join(TOKEN_FILE);
+                    let saved_token = fs::read(&token_path).ok();
                     let report = if args.runtime_dir.exists() {
                         perform_runtime_cleanup(&args, &logger)
                     } else {
@@ -6812,6 +6845,11 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                             failures: Vec::new(),
                         }
                     };
+                    if let Some(bytes) = saved_token.as_ref() {
+                        if !token_path.exists() {
+                            let _ = fs::write(&token_path, bytes);
+                        }
+                    }
                     logger.kv(
                         "[CLEANUP]",
                         &[
@@ -6828,6 +6866,27 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                     let complete = !args.runtime_dir.exists() && report.is_clean();
                     if complete {
                         let _ = fs::remove_file(&upgrade_marker);
+                    } else if upgrade_cleanup_should_defer(
+                        report.failures.len(),
+                        report.files_pending_reboot,
+                    ) {
+                        logger.kv(
+                            "[CLEANUP]",
+                            &[
+                                ("event", "upgrade_cleanup".into()),
+                                ("result", "deferred_in_use".into()),
+                                (
+                                    "files_pending_reboot",
+                                    report.files_pending_reboot.to_string(),
+                                ),
+                                (
+                                    "note",
+                                    "被宿主映射的 Gadget 删不掉（共享宿主不允许结束宿主）：\
+                                     保留标记与令牌，先按旧 agent 接管；新代次在宿主下次重启后生效"
+                                        .into(),
+                                ),
+                            ],
+                        );
                     } else {
                         logger.kv(
                             "[CLEANUP]",
@@ -6837,8 +6896,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
                                 ("note", "保留标记，等待重启/下一轮重试".into()),
                             ],
                         );
-                        // 带着旧运行时继续注入必然回到 resident=1；让应用按桥接
-                        // 快照判失败并重试，而不是把“启动成功”报给用户。
+                        // 有真实失败（不是被占用）：带着不完整的运行时继续启动不安全。
                         std::process::exit(3);
                     }
                 } else {
@@ -7145,7 +7203,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         // 旧世代 tap 的自动恢复门（2026-10-14 现场；判据即 `auto_recover_stale_tap_gate`）：
         // 宿主独占 RC003 + **运行时目录下**确有我们的 gadget 映射 + 未显式钉 `--token`。
         // 满足时"令牌接不上"转为 `AttachStale`：第一轮即结束宿主做干净首注，不再退出等人工；
-        // 不满足时保留原 `[STALE-TAP]` 人工路径。
+        // 共享宿主（不能结束宿主）时改为注入新分代（见 `decide_plan` 的 `shared_host`）。
         let members: Vec<&HostEntry> = entries.iter().filter(|e| e.pid == target_pid).collect();
         let rc003_members = members.iter().filter(|e| e.is_rc003).count();
         // 归属核对（2026-10-14 复核）：`resident_taps` 只按模块基名匹配，别人注入的
@@ -7162,12 +7220,14 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             runtime_owned_taps,
             explicit_pinned_token,
         );
+        let shared_host = members.len() != 1 || rc003_members != 1;
         let plan = match decide_plan(
             !taps.is_empty(),
             args.token_from_file,
             args.attach_only,
             args.new_generation,
             allow_stale_recovery,
+            shared_host,
         ) {
             Ok(p) => p,
             Err(e) if e == "STALE-TAP" => {
@@ -9638,7 +9698,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             ),
         ];
         for (label, tap, tok, att, gen, allow_recover, want) in plan_cases {
-            let got = decide_plan(tap, tok, att, gen, allow_recover);
+            let got = decide_plan(tap, tok, att, gen, allow_recover, false);
             let (ok, detail) = match (&got, &want) {
                 (Ok(DllPlan::Canonical), PlanExpect::Ok(PlanKind::Canonical)) => {
                     (true, "Canonical".to_string())
@@ -11314,6 +11374,31 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         }
     }
 
+    /// 升级清理的延期判据（2026-11-27 现场）：共享宿主映射着 Gadget 时清理
+    /// 永远不可能“删干净”；只有“无真实失败 + 有被占用文件”才允许继续启动。
+    #[cfg(test)]
+    mod upgrade_cleanup_defer_tests {
+        use super::*;
+
+        #[test]
+        fn defers_only_when_the_only_blocker_is_an_in_use_file() {
+            assert!(upgrade_cleanup_should_defer(0, 1));
+            assert!(upgrade_cleanup_should_defer(0, 2));
+            assert!(
+                !upgrade_cleanup_should_defer(1, 1),
+                "真实失败必须继续 exit(3)"
+            );
+            assert!(
+                !upgrade_cleanup_should_defer(1, 0),
+                "真实失败必须继续 exit(3)"
+            );
+            assert!(
+                !upgrade_cleanup_should_defer(0, 0),
+                "无被占用文件说明还有未归类残留"
+            );
+        }
+    }
+
     /// 卸载清理的两个纯判定（2026-10-08 方案 B 配套）：待删清单去重、RC003 设备判据。
     #[cfg(test)]
     mod uninstall_cleanup_tests {
@@ -11748,7 +11833,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         #[test]
         fn stale_tap_with_recovery_allowed_becomes_attach_stale() {
             assert_eq!(
-                decide_plan(true, false, false, false, true),
+                decide_plan(true, false, false, false, true, false),
                 Ok(DllPlan::AttachStale)
             );
         }
@@ -11756,8 +11841,18 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         #[test]
         fn stale_tap_without_recovery_stays_manual() {
             assert_eq!(
-                decide_plan(true, false, false, false, false),
+                decide_plan(true, false, false, false, false, false),
                 Err("STALE-TAP".to_string())
+            );
+        }
+
+        #[test]
+        fn stale_tap_on_a_shared_host_becomes_a_new_generation() {
+            // 2026-11-27 现场：共享宿主不能结束宿主，令牌又被旧版清理删掉——
+            // 旧实现 exit 13，应用只能无限重试。改为注入新分代（新令牌）。
+            assert_eq!(
+                decide_plan(true, false, false, false, false, true),
+                Ok(DllPlan::Generation(String::new()))
             );
         }
 
@@ -11765,17 +11860,17 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         fn reusable_token_and_explicit_flags_keep_priority() {
             // 令牌可复用：接管优先于旧世代自动恢复。
             assert_eq!(
-                decide_plan(true, true, false, false, true),
+                decide_plan(true, true, false, false, true, false),
                 Ok(DllPlan::Attach)
             );
             // --new-generation 是显式请求：优先于自动恢复。
             assert_eq!(
-                decide_plan(true, false, false, true, true),
+                decide_plan(true, false, false, true, true, false),
                 Ok(DllPlan::Generation(String::new()))
             );
             // --attach-only 禁止注入：令牌接不上时不得悄然改成"暂定接管"。
             assert!(matches!(
-                decide_plan(true, false, true, false, true),
+                decide_plan(true, false, true, false, true, false),
                 Err(e) if e.contains("--attach-only")
             ));
         }
@@ -11783,7 +11878,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
         #[test]
         fn no_tap_is_unaffected_by_recovery_flag() {
             assert_eq!(
-                decide_plan(false, false, false, false, true),
+                decide_plan(false, false, false, false, true, false),
                 Ok(DllPlan::Canonical)
             );
         }
