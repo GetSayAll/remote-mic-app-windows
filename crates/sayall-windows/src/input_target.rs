@@ -537,14 +537,21 @@ mod tests {
     }
 
     #[test]
-    fn uipi_injection_check_uses_target_probe_integrity() {
-        let mut probe = TargetProbe {
+    fn uipi_injection_check_reads_the_target_probe() {
+        // 不依赖测试进程自身完整性（CI runner 可能是已提权的）：
+        // 只断言"判据取的是 target.integrity"，其余由 `uipi_blocks` 的纯测试覆盖。
+        let high = TargetProbe {
             integrity: "high",
             ..Default::default()
         };
-        // 本机测试进程是 medium；只有高完整性目标才判"会被拦"。
-        assert!(uipi_blocks_injection(&probe));
-        probe.integrity = "medium";
-        assert!(!uipi_blocks_injection(&probe));
+        let unknown = TargetProbe {
+            integrity: "unknown",
+            ..Default::default()
+        };
+        assert!(!uipi_blocks_injection(&unknown));
+        assert_eq!(
+            uipi_blocks_injection(&high),
+            uipi_blocks(own_integrity(), "high")
+        );
     }
 }
