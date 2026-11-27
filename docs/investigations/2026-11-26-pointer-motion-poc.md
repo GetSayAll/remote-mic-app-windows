@@ -1,10 +1,11 @@
-# 鼠标连续移动 PoC（issue #407）
+# 鼠标连续移动（issue #407）
 
-- 日期：2026-11-26
+- 日期：2026-11-26；2026-11-27 产品化，默认启用（1.9.10 预览候选）
 - 来源：<https://github.com/GetSayAll/remote-mic-app-windows/issues/407>
-- 分支：`feat/pointer-motion-poc-20261126`
-- 范围：**PoC**。只接方向键的 `mouse_move` + 已开启「按住时连续执行」；
-  不改 UI、不改 schema、不改默认配置；默认关闭。
+- 分支：`feat/pointer-motion-poc-20261126`（已合入 main）；
+  默认启用由 `feat/pointer-motion-default-on-20261127` 承担
+- 范围：只接方向键的 `mouse_move` + 已开启「按住时连续执行」；
+  不改 UI、不改 schema、不改默认按键映射。用户无需设置环境变量。
 
 ## 结论
 
@@ -18,25 +19,28 @@ issue 的诊断成立：当前按住移动不是速度模型，而是「固定�
 因此典型手感是「按下先跳 20px → 停 350ms → 每 100ms 跳 20px」。调大
 `distance` 只会更跳，不会更顺。
 
-PoC 把按住过程改为**速度积分**：8ms 节拍、二次缓入曲线、亚像素余量、
+实现把按住过程改为**速度积分**：8ms 节拍、二次缓入曲线、亚像素余量、
 松手立即停止；会话期间成对 `timeBeginPeriod(1)`/`timeEndPeriod(1)`。
 
-## 启用方式
+## 使用与开关
+
+默认启用，用户不需要设置任何环境变量。只有诊断或回退时才显式关闭：
 
 ```powershell
-$env:SAYALL_POINTER_MOTION = "1"
+$env:SAYALL_POINTER_MOTION = "0"
 $env:SAYALL_GATT_LOG = "C:\path\to\gatt.log"
 & "$env:LOCALAPPDATA\无线麦 SayAll\sayall-windows-app.exe"
 ```
 
 - 必须是方向键（上/下/左/右）的 `mouse_move`。
 - 必须已开启「按住时连续执行」（重复单击动作或重复长按动作，视配置槽位）。
-- 关闭环境变量即完全回到旧行为；不写配置、不改 schema。
+- 普通方向键导航、滚动、快捷键，以及未开启连续执行的 `mouse_move` 不受影响。
+- 设置 `SAYALL_POINTER_MOTION=0` 才会回到旧行为；不写配置、不改 schema。
 - 引擎启动时落一行
-  `mouse_motion config source=poc enabled=... tick_ms=... ...`，日志里可直接确认
+  `mouse_motion config source=builtin enabled=... tick_ms=... ...`，日志里可直接确认
   本次是否启用。
 
-## 参数（固定常量，PoC 阶段只按真机调）
+## 参数（固定常量，按真机手感调）
 
 | 项 | 值 | 含义 |
 | --- | --- | --- |
@@ -134,9 +138,9 @@ cursor restored matches=true
 
 只落会话级日志，逐帧 tick 不写（`gatt_note` 每次重开文件，8ms 级会刷爆）：
 
-- `mouse_motion config source=poc enabled=...`：引擎启动一次，含 `fine_ms` /
+- `mouse_motion config source=builtin enabled=...`：引擎启动一次，含 `fine_ms` /
   `accel_ms`。
-- `mouse_motion phase=start source=poc button=... direction=... distance=...
+- `mouse_motion phase=start source=builtin button=... direction=... distance=...
   base_px_s=... max_px_s=... fine_ms=... accel_ms=... tick_ms=...`
 - `mouse_motion timer=begin period_ms=1 result=ok|failed ...`
 - `mouse_motion phase=progress ...`：每 1s 一行。
@@ -162,13 +166,13 @@ cargo run -p sayall-windows --example pointer_motion_probe -- move right 30 1300
 结果：
 
 - `cargo fmt --all -- --check` passed。
-- `cargo test --workspace` passed：`sayall-windows` 652 passed / 22 ignored，
-  `sayall-windows-app` 234 passed / 2 ignored，其余 crate 全绿。
+- `cargo test --workspace` passed：`sayall-windows` 671 passed / 22 ignored，
+  `sayall-windows-app` 235 passed / 2 ignored，其余 crate 全绿。
 - `cargo check -p sayall-windows-app --features runtime-simulation` passed。
 - 引擎接线用例 `button_mapping::tests::direction_mouse_move_ticks_until_release`
   passed：按住产生多帧 `mouse_move_by`、释放后停止、旧单步 `mouse_move` 未被调用。
-- 单元测试覆盖：两段速度曲线、精细窗口、亚像素余量、短按、释放补位移、
-  重复拍幂等、注入错误抑制、15s 超时、全部收口、计时器只提升一次并配对恢复。
+- 单元测试覆盖：默认开启/显式关闭、两段速度曲线、精细窗口、亚像素余量、短按、
+  释放补位移、重复拍幂等、注入错误抑制、15s 超时、全部收口、计时器只提升一次并配对恢复。
 - 真实光标探针 passed（见上）；光标位置已恢复。
 - 用户试按数据已记录；两段曲线仍需 RC001 / RC003 真机复测。
 - **RC001 / RC003 真机手感验收 deferred**：需要分别用实体方向键测试短按、
@@ -176,9 +180,9 @@ cargo run -p sayall-windows --example pointer_motion_probe -- move right 30 1300
 
 ## 未覆盖 / 待拍板
 
-- **开关语义**：PoC 用现有「按住时连续执行」作闸门，不改变产品文档的三态；
+- **开关语义**：功能用现有「按住时连续执行」作闸门，不改变产品文档的三态；
   是否让 `mouse_move` 默认「按住即动」需要产品决定。
-- **`distance` 语义**：PoC 继续表示「轻推一档」，100ms 短按约等于旧行为一次
+- **`distance` 语义**：功能继续表示「轻推一档」，100ms 短按约等于旧行为一次
   台阶；精细窗口、加速时长和倍率未暴露给用户，仍由固定常量决定。
 - **两段曲线调参**：500ms 精细窗口和 700ms 加速是首版折中；若真机仍觉得
   长按过快，可继续延后加速或降低最大倍率，不改变用户配置。
@@ -189,6 +193,6 @@ cargo run -p sayall-windows --example pointer_motion_probe -- move right 30 1300
 - **斜向/双方向**：每个按键独立会话，同时按住两个方向会得到两轴合成；未做
   归一化，也未做专门的斜向手感调参。
 - **原生泄漏**：基础路径的方向键首按可能漏进 OS（既有泄漏对冲边界），
-  PoC 未改变该行为。
+  功能未改变该行为。
 - **计时器影响**：`timeBeginPeriod(1)` 会在按住期间提高系统计时器精度，
   增加少量功耗；已按会话成对恢复，异常路径由 `Drop` 兜底。
