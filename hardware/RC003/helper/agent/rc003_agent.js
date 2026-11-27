@@ -88,7 +88,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-25.source-diagnostics';
+var AGENT_BUILD = '2026-11-27.report-length-gate';
 
 var TARGET_IOCTL = 0x80018483;
 /* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
@@ -117,6 +117,12 @@ var TARGET_NAMES = {
   0x0080: 'volume_up', 0x0081: 'volume_down'
 };
 var REPORT_ID = 0x01;
+/* 遥控器 HID 报告长度（含 report_id）。RC001/RC003 共用同一 BLE HID 硬件串与描述符，
+   2026-11-27 现场实测：遥控器缓冲区长度恒为 9（`ob=9`），同宿的 BLE 手柄恒为 17。
+   报告层原先只要求 `outLen >= 9`，于是手柄 17 字节缓冲区里的数据字节会被当成遥控器
+   usage（单帧命中 0x0066 → 触发「电源 → 打开抖音」宏）。
+   这里按“报告长度 = 遥控器描述符长度”做设备类判别：不牺牲任何按键，也不需要宿主级取舍。 */
+var REMOTE_REPORT_LEN = 9;
 
 var LEASE_MS = 2000;          /* 超过此时间未收到续约就停止清键 */
 var HB_MS = 500;              /* 所有权心跳周期；须显著短于 2s 租约 */
@@ -211,6 +217,9 @@ var stat = {
   /* 形状匹配（IOCTL + 8/9 字节 + report_id=0x01）的 HID 报告总数。
      不计 usage/来源，专门用于报告流活性（2026-11-15 现场）。 */
   reports_seen: 0,
+  /* 形状匹配但**缓冲区长度不是遥控器报告长度**的报告数（2026-11-27：BLE 手柄 17 字节）。
+     这些报告整类忽略：不清键、不报边沿，也不参与来源归属。 */
+  len_rejected: 0,
   target_hits: 0,
   /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。
      语音键 0x003E 是产品路径的 clear-only 目标，不算哨兵键。 */
@@ -1137,6 +1146,19 @@ function installHook() {
         } catch (e) {
           stat.diag_errors++;
         }
+        /* 2026-11-27 现场（RC001 + BLE 手柄共宿）：手柄以 ~124 份/秒持续上报，17 字节
+           缓冲区里的数据字节被当成遥控器 usage，单帧命中 0x0066 → 触发「电源 → 宏」。
+           遥控器的报告固定 9 字节（同一硬件串/描述符）。这里按报告长度做设备类判别：
+           非遥控器长度的报告整类忽略——不清键、不报边沿、不抢来源归属。
+           这是“按设备类排除”，不是“按宿主让出按键”，所以不牺牲任何按键、无 60ms 窗口代价。 */
+        if (outLen !== REMOTE_REPORT_LEN) {
+          stat.len_rejected++;
+          if (stat.len_rejected === 1 || stat.len_rejected % 1000 === 0) {
+            logLine('len_reject out_len=' + outLen + ' expected=' + REMOTE_REPORT_LEN
+              + ' n=' + stat.len_rejected);
+          }
+          return;
+        }
         if (activeSource !== null && source !== activeSource) {
           stat.foreign_reports++;
           if (stat.foreign_reports <= 5 || stat.foreign_reports % 100 === 0) {
@@ -1434,6 +1456,8 @@ function heartbeat() {
     stat: {
       ioctl_calls: stat.ioctl_calls,
       reports_seen: stat.reports_seen,
+      len_rejected: stat.len_rejected,
+      remote_report_len: REMOTE_REPORT_LEN,
       target_hits: stat.target_hits,
       canary_hits: stat.canary_hits,
       voice_clear_hits: stat.voice_clear_hits,

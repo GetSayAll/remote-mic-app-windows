@@ -10153,6 +10153,19 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
             "diag:src_new/diag:src/diag:edge/diag:src_closed + IOSB + inBuf".to_owned(),
         );
 
+        // 23e) 报告长度门（2026-11-27）：BLE 手柄共宿时，17 字节缓冲区里的字节曾被
+        //      当成遥控器 usage 触发「电源 → 宏」。判据必须按“遥控器报告长度”整类排除，
+        //      而不是把按键让给宿主级回退。
+        check(
+            "内嵌 agent：报告长度门与拒绝计数在位",
+            AGENT_JS.contains("var REMOTE_REPORT_LEN = 9;")
+                && AGENT_JS.contains("if (outLen !== REMOTE_REPORT_LEN)")
+                && AGENT_JS.contains("stat.len_rejected++")
+                && AGENT_JS.contains("len_reject out_len=")
+                && AGENT_JS.contains("len_rejected: stat.len_rejected"),
+            "REMOTE_REPORT_LEN=9 + len_rejected".to_owned(),
+        );
+
         // 24) 桥接描述文件解析（捕获链第 ② 段）。解析错一处，现象是
         //     "主程序在跑、助手也在跑，但三键就是不动"——日志上只有 APP-BRIDGE unavailable，
         //     而那是一条折叠日志，本身不会告诉你是哪一项不匹配。逐项钉住。
@@ -10817,7 +10830,7 @@ Raw Input 与键盘钩子同样拿不到它们（那正是 kbdhid 丢弃的直�
     /// 注意：**不要**因此自动 disarm 旧实例——产品路径下"宿主里是上一代脚本"是常态
     /// （升级应用后宿主往往还活着），旧脚本照样能正确清三键，自动解除反而会把
     /// 升级后的捕获打断成"必须重启才恢复"。
-    const AGENT_BUILD: &str = "2026-11-25.source-diagnostics";
+    const AGENT_BUILD: &str = "2026-11-27.report-length-gate";
     /// 锁定文件在编译期内联。三重作用：
     /// 1) **缺失即编译失败**：锁定文件被删/路径写错，构建直接报错，不会产出"看起来正常、
     ///    实际没登记完整性"的二进制（本常量写错路径时已实测触发编译错误）；
