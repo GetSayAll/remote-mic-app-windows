@@ -88,7 +88,7 @@
    [AGENT-STALE]。没有它，"改了 agent 但宿主里跑的还是上一代"是完全静默的——
    握手正常、命令照发、日志漂亮，只有按键行为是旧的（2026-09-26 哨兵键那次
    就是这样白跑了一轮：以为在验新逻辑，其实接管的是旧实例）。 */
-var AGENT_BUILD = '2026-11-27.report-length-gate';
+var AGENT_BUILD = '2026-11-27.source-whitelist';
 
 var TARGET_IOCTL = 0x80018483;
 /* 仅 report 白名单（会产生映射边沿）；语音键 0x003E 只作为 clear-only
@@ -220,6 +220,8 @@ var stat = {
   /* 形状匹配但**缓冲区长度不是遥控器报告长度**的报告数（2026-11-27：BLE 手柄 17 字节）。
      这些报告整类忽略：不清键、不报边沿，也不参与来源归属。 */
   len_rejected: 0,
+  /* 来源白名单生效后，被忽略的异源报告数（键盘/鼠标/手柄等）。 */
+  foreign_source_ignored: 0,
   target_hits: 0,
   /* 只含额外清空键（clearUsages 里不属于 reportUsages）的报告数。
      语音键 0x003E 是产品路径的 clear-only 目标，不算哨兵键。 */
@@ -282,6 +284,38 @@ var activeSource = null;
 var sourceKeys = {};           /* 句柄字符串 → 设备对象名（或句柄字符串） */
 var ntQueryObject = null;      /* NativeFunction；测试桩/不可用时为 null */
 var inCloseHook = false;       /* NtClose 内部重入 guards（发送路径也可能关闭句柄） */
+
+/* -------------------------------------------------- 来源白名单（2026-11-27） */
+/* 键盘宿主现场：同一宿主里 `src=1` 键盘 17 万份报告、`src=2` 遥控器（4 次语音键锚定）、
+   `src=3` 另一设备，三者 9 字节同形但 `h/nm` 不同。于是“按使用频率让出按键”可以退役：
+   用**语音键**给遥控器来源打标签，之后只接受该来源的目标用途边沿；其它来源整类忽略
+   （不清键、不上报、不抢来源归属），保持它们的原生行为。
+   未学到来源 / 来源关闭 / 宿主把成员塌陷成同一来源名时，行为回到原路径
+   （长度门 + 助手下发的宿主策略），fail-open。
+   语音键每按一次都会更新标签：若标签被别的设备偶然的 0x003E 带偏，用户下一次按语音键
+   即自愈（现场 369k 份异源报告里 0 次 0x003E）。 */
+var remoteSource = null;
+
+function hasVoiceKey(bytes) {
+  for (var i = 0; i < 3; i++) {
+    var o = 3 + i * 2;
+    if ((bytes[o] | (bytes[o + 1] << 8)) === VOICE_KEY_HID_USAGE) return true;
+  }
+  return false;
+}
+
+function noteVoiceSource(source) {
+  if (source === remoteSource) return;
+  var had = remoteSource !== null;
+  remoteSource = source;
+  logLine((had ? 'whitelist:switch' : 'whitelist:learn') + ' source_nm=' + diagHash(String(source)));
+}
+
+function noteSourceClosed(source) {
+  if (remoteSource === null || source !== remoteSource) return;
+  remoteSource = null;
+  logLine('whitelist:clear reason=source_closed');
+}
 
 /* ---------------------------------------------------- 来源画像（只诊断） */
 /* 2026-11-25 现场（RC001 在共享宿主里被另一台 8 ms 设备的字节触发「电源 → 宏」）：
@@ -1159,6 +1193,24 @@ function installHook() {
           }
           return;
         }
+        /* 来源白名单：先只读判断这一帧是否含语音键（不改内容），用它给遥控器来源打标签；
+           已学到来源后，其它来源整类忽略——不清键、不上报、不抢来源归属。 */
+        var probe = null;
+        try {
+          probe = new Uint8Array(outPtr.readByteArray(9));
+        } catch (e) {
+          probe = null;
+        }
+        if (probe !== null && hasVoiceKey(probe)) {
+          noteVoiceSource(source);
+        }
+        if (remoteSource !== null && source !== remoteSource) {
+          stat.foreign_source_ignored++;
+          if (stat.foreign_source_ignored === 1 || stat.foreign_source_ignored % 1000 === 0) {
+            logLine('source_ignored n=' + stat.foreign_source_ignored);
+          }
+          return;
+        }
         if (activeSource !== null && source !== activeSource) {
           stat.foreign_reports++;
           if (stat.foreign_reports <= 5 || stat.foreign_reports % 100 === 0) {
@@ -1173,7 +1225,7 @@ function installHook() {
         this.cleared = false;
         this.restored = false;
 
-        var bytes = new Uint8Array(outPtr.readByteArray(9));
+        var bytes = probe !== null ? probe : new Uint8Array(outPtr.readByteArray(9));
         var found = targetSetIn(bytes);      /* 主程序动态上报集合 */
         var toClear = clearSetIn(bytes);     /* 上报集合 + 哨兵键（如有） */
         var synthSeen = synthSetIn(bytes);
@@ -1358,14 +1410,15 @@ function installHook() {
           if (!Object.prototype.hasOwnProperty.call(sourceKeys, raw)) return;
           var key = sourceKeys[raw];
           delete sourceKeys[raw];
-          if (activeSource !== null && key === activeSource) {
-            /* 同一设备对象可能有多个句柄（不同 TLC/重复句柄）。只有最后一个
-               句柄关闭才算设备离开；关掉其中一个不能提前发 UP。 */
-            var stillOpen = false;
-            for (var h in sourceKeys) {
-              if (sourceKeys[h] === key) { stillOpen = true; break; }
-            }
-            if (!stillOpen) {
+          /* 同一设备对象可能有多个句柄（不同 TLC/重复句柄）。只有最后一个
+             句柄关闭才算设备离开；关掉其中一个不能提前发 UP，也不能提前清白名单。 */
+          var stillOpen = false;
+          for (var h in sourceKeys) {
+            if (sourceKeys[h] === key) { stillOpen = true; break; }
+          }
+          if (!stillOpen) {
+            noteSourceClosed(key);
+            if (activeSource !== null && key === activeSource) {
               inCloseHook = true;
               try { releaseEdges('source_closed'); } catch (e) { /* fail-open */ }
               inCloseHook = false;
@@ -1458,6 +1511,8 @@ function heartbeat() {
       reports_seen: stat.reports_seen,
       len_rejected: stat.len_rejected,
       remote_report_len: REMOTE_REPORT_LEN,
+      foreign_source_ignored: stat.foreign_source_ignored,
+      remote_source_nm: remoteSource === null ? '-' : diagHash(String(remoteSource)),
       target_hits: stat.target_hits,
       canary_hits: stat.canary_hits,
       voice_clear_hits: stat.voice_clear_hits,
