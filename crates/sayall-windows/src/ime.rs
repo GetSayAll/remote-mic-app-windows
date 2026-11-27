@@ -342,14 +342,9 @@ pub(crate) fn foreground_probe() -> ForegroundProbe {
 }
 
 /// 窗口类名的稳定哈希（FNV-1a 64 → 高 32 位，8 位十六进制；输入先转小写）。
-pub(crate) fn class_token(class: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in class.to_ascii_lowercase().bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{:08x}", (hash >> 32) as u32)
-}
+///
+/// 实现迁到 `input_target`（注入目标探针也用它），此处 re-export 保持既有调用点不变。
+pub(crate) use crate::input_target::class_token;
 
 /// 有界等待"前台不再是我们自己"的预算与步进（2026-10-09 预对齐竞态修复）。
 ///

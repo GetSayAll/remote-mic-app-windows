@@ -4,10 +4,11 @@ use crate::send_input::{
     ScrollDirection, SendInputError, SendInputSnapshot, HOLD_CHORD_EVENT_GAP,
 };
 use crate::PlatformError;
+use std::cell::Cell;
 use std::mem::size_of;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
-use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{GetLastError, SetLastError, POINT, WIN32_ERROR};
 use windows::Win32::System::Shutdown::LockWorkStation;
 use windows::Win32::UI::HiDpi::{
     GetThreadDpiAwarenessContext, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT,
@@ -25,6 +26,15 @@ use windows::Win32::UI::WindowsAndMessaging::{GetPhysicalCursorPos, SetPhysicalC
 #[derive(Debug)]
 pub struct SendInputRuntime {
     snapshot: Mutex<SendInputSnapshot>,
+}
+
+thread_local! {
+    /// 最近一次 `SendInput` 调用后的 `GetLastError`（`None` = 本次注入还没调用）。
+    ///
+    /// 2026-11-26：现场需要区分"事件提交失败"与"提交成功但目标侧收不到"，
+    /// 而 `SendInput` 的返回值只说提交了几个事件、不说明被谁拦下。错误码
+    /// 按指纹保留：UIPI 拦截常见 `5`（拒绝访问）、`87`（参数无效）、`0`（无错误）。
+    static LAST_SEND_INPUT_ERROR: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 /// 只读 OS 键态（`GetAsyncKeyState`，不改变状态）。
@@ -287,7 +297,17 @@ impl SendInputRuntime {
             });
             return self.record(result, "LockWorkStation");
         }
+        let started = Instant::now();
+        LAST_SEND_INPUT_ERROR.with(|cell| cell.set(None));
         let result = send_key_tap_with(&chord, real_send_input_batch);
+        let win32_error = LAST_SEND_INPUT_ERROR.with(Cell::get).unwrap_or(0);
+        crate::ble::gatt_note(crate::send_input::tap_injection_note(
+            &chord,
+            chord.keys.len().saturating_mul(2),
+            &result,
+            win32_error,
+            started.elapsed().as_millis(),
+        ));
         self.record(result, "SendInput")
     }
 
@@ -401,7 +421,10 @@ fn with_physical_cursor_context<T>(
 
 fn real_send_input_batch(events: &[PlannedKeyEvent]) -> Result<usize, String> {
     let inputs: Vec<_> = events.iter().copied().map(build_input).collect();
+    unsafe { SetLastError(WIN32_ERROR(0)) };
     let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize;
+    let error = unsafe { GetLastError().0 };
+    LAST_SEND_INPUT_ERROR.with(|cell| cell.set(Some(error)));
     Ok(sent)
 }
 

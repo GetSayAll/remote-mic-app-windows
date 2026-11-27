@@ -2056,6 +2056,65 @@ pub fn send_key_tap_with(
     })
 }
 
+/// 注入形态（纯函数）：本次 chord 走的是扫描码注入还是虚拟键注入。
+///
+/// 现场判据用（2026-11-26 拼多多商家版）：带 PS/2 扫描码的键以
+/// `KEYEVENTF_SCANCODE` + `wVk=0` 提交，媒体键等没有 Set-1 扫描码的键以
+/// `wVk` + `wScan=0` 提交。同一发 `SendInput`、两种形态，日志必须能区分，
+/// 否则"为什么音量键能进、字母键进不去"只能靠猜。
+pub fn injection_form(chord: &KeyChord) -> &'static str {
+    let mut scanned = 0usize;
+    let mut virtual_keys = 0usize;
+    for key in &chord.keys {
+        if key.physical_scan_code().is_some() {
+            scanned += 1;
+        } else {
+            virtual_keys += 1;
+        }
+    }
+    match (scanned, virtual_keys) {
+        (0, 0) => "none",
+        (0, _) => "virtual",
+        (_, 0) => "scancode",
+        _ => "mixed",
+    }
+}
+
+/// `send_input action=tap` 诊断行（纯函数，单测覆盖）。
+///
+/// 语义边界：`sent` 是 `SendInput` 报告的**提交事件数**，不是"目标收到了"；
+/// `win32_error` 是最后一次 `SendInput` 调用后的 `GetLastError`（部分提交时
+/// 回滚调用会覆盖它，届时以 `sent/expected` 为准）。目标侧是否收到仍看
+/// 紧随其后的 `map_inject echo_delta`。
+pub fn tap_injection_note(
+    chord: &KeyChord,
+    expected: usize,
+    result: &Result<usize, SendInputError>,
+    win32_error: u32,
+    elapsed_ms: u128,
+) -> String {
+    let chord_label = if chord.keys.is_empty() {
+        "-".to_owned()
+    } else {
+        chord
+            .keys
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    let (outcome, sent) = match result {
+        Ok(sent) => ("ok", sent.to_string()),
+        Err(SendInputError::PartialDelivery { sent, .. }) => ("partial", sent.to_string()),
+        Err(_) => ("failed", "unknown".to_owned()),
+    };
+    format!(
+        "send_input action=tap chord={chord_label} form={} expected={expected} sent={sent} \
+         result={outcome} win32_error={win32_error} elapsed_ms={elapsed_ms}",
+        injection_form(chord)
+    )
+}
+
 fn best_effort_release(
     keys: impl Iterator<Item = KeyCode>,
     sender: &mut impl FnMut(&[PlannedKeyEvent]) -> Result<usize, String>,
@@ -2319,6 +2378,70 @@ mod tests {
         KeyChord {
             keys: keys.to_vec(),
         }
+    }
+
+    #[test]
+    fn tap_note_reports_scancode_form_and_submitted_events() {
+        let chord = chord(&[KeyCode::Enter]);
+        let note = tap_injection_note(&chord, 2, &Ok(2), 0, 3);
+        assert_eq!(
+            note,
+            "send_input action=tap chord=Enter form=scancode expected=2 sent=2 result=ok \
+             win32_error=0 elapsed_ms=3"
+        );
+    }
+
+    #[test]
+    fn tap_note_reports_virtual_form_for_media_keys() {
+        let note = tap_injection_note(&chord(&[KeyCode::VolumeUp]), 2, &Ok(2), 0, 1);
+        assert!(note.contains("form=virtual"), "{note}");
+        assert!(note.contains("chord=VolumeUp"), "{note}");
+    }
+
+    #[test]
+    fn tap_note_reports_mixed_form_for_chords_with_media_keys() {
+        let note = tap_injection_note(
+            &chord(&[KeyCode::RightControl, KeyCode::VolumeUp]),
+            4,
+            &Ok(4),
+            0,
+            1,
+        );
+        assert!(note.contains("form=mixed"), "{note}");
+        assert!(note.contains("chord=RightControl+VolumeUp"), "{note}");
+    }
+
+    #[test]
+    fn tap_note_keeps_partial_delivery_count() {
+        let note = tap_injection_note(
+            &chord(&[KeyCode::LeftWindows, KeyCode::D]),
+            4,
+            &Err(SendInputError::PartialDelivery {
+                sent: 1,
+                expected: 4,
+            }),
+            5,
+            9,
+        );
+        assert!(note.contains("result=partial"), "{note}");
+        assert!(note.contains("sent=1"), "{note}");
+        assert!(note.contains("win32_error=5"), "{note}");
+    }
+
+    #[test]
+    fn tap_note_marks_backend_failure_with_unknown_sent() {
+        let note = tap_injection_note(
+            &chord(&[KeyCode::Enter]),
+            2,
+            &Err(SendInputError::Backend("boom".to_owned())),
+            87,
+            2,
+        );
+        assert!(note.contains("result=failed"), "{note}");
+        assert!(note.contains("sent=unknown"), "{note}");
+        assert!(note.contains("win32_error=87"), "{note}");
+        // 后端错误文本可能含路径/身份，诊断行不带它。
+        assert!(!note.contains("boom"), "{note}");
     }
 
     #[test]

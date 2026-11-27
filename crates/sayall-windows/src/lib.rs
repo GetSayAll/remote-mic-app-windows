@@ -45,6 +45,9 @@ pub mod focus_windows;
 pub mod foreground;
 #[cfg(windows)]
 pub mod graceful_exit;
+/// 注入目标诊断探针（2026-11-26）：注入前只读采样前台/焦点/完整性/可见性，
+/// 回答"键打给了谁、对方什么权限、焦点在不在同一个进程"。纯诊断，不改行为。
+pub mod input_target;
 #[cfg(windows)]
 pub mod instance_signal;
 /// 按键宿主进程（LL 钩子迁出主进程；见 Bugs/2026-10-04-ll-hooks-break-in-app-ime-voice.md）。

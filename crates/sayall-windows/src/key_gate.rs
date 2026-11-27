@@ -1149,6 +1149,13 @@ mod windows_impl {
         HOOK_CALLS_INJECTED.load(Ordering::Relaxed)
     }
 
+    /// 钩子累计看到的键盘事件数（含注入）。与 `map_target` 一起落盘：
+    /// 目标窗口前台期间这个数还在涨，说明"物理键仍能被钩子看到"，可把
+    /// "目标按注入标记过滤"与"钩子整条链都没了"分开。
+    pub fn hook_calls_total() -> u64 {
+        HOOK_CALLS_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// 相对快照 `before` 的注入事件读数（见 [`super::InjectedEcho`]）。
     pub fn injected_echo_since(before: u64) -> super::InjectedEcho {
         super::InjectedEcho {
@@ -1274,13 +1281,13 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     app_switcher_mask, arm_button, begin_key_observation, capture_diagnostics_summary, configure,
-    decide, end_key_observation, enhanced_owned_mask, injected_echo_since, injected_event_count,
-    is_gate_thread_alive, leaked_down_count, listener_active, observed_keys, observed_last_vk,
-    persistent_swallow_total, phrase_panel_mask, set_app_switcher_mask, set_edge_sink,
-    set_enhanced_owned_mask, set_listener_active, set_persistent_mask, set_phrase_panel_mask,
-    set_remote_connected, set_shortcut_capture_active, set_shortcut_capture_sink,
-    set_voice_synth_active, swallowed_edge_count, voice_synth_active, KeyGate, HOLD_LEAKED,
-    HOLD_NONE, HOLD_SWALLOWED_ALL,
+    decide, end_key_observation, enhanced_owned_mask, hook_calls_total, injected_echo_since,
+    injected_event_count, is_gate_thread_alive, leaked_down_count, listener_active, observed_keys,
+    observed_last_vk, persistent_swallow_total, phrase_panel_mask, set_app_switcher_mask,
+    set_edge_sink, set_enhanced_owned_mask, set_listener_active, set_persistent_mask,
+    set_phrase_panel_mask, set_remote_connected, set_shortcut_capture_active,
+    set_shortcut_capture_sink, set_voice_synth_active, swallowed_edge_count, voice_synth_active,
+    KeyGate, HOLD_LEAKED, HOLD_NONE, HOLD_SWALLOWED_ALL,
 };
 
 /// 宿主消息路径（key_host 读线程调用；仅 crate 内可见）。
@@ -1355,6 +1362,9 @@ mod fallback {
         0
     }
     pub fn injected_event_count() -> u64 {
+        0
+    }
+    pub fn hook_calls_total() -> u64 {
         0
     }
     pub fn injected_echo_since(_before: u64) -> super::InjectedEcho {

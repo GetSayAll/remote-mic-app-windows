@@ -1124,6 +1124,8 @@ static START_LOCK: Mutex<()> = Mutex::new(());
 static RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
 static RETRY_PENDING: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// `input_env` 只落一次（重试安装宿主时不再重复同一行）。
+static INPUT_ENV_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn host_read() -> std::sync::RwLockReadGuard<'static, Option<Arc<KeyHostHandle>>> {
     KEY_HOST
@@ -1233,6 +1235,12 @@ fn install_global_handle(handle: KeyHostHandle, attempt: u32) -> bool {
         crate::ble::gatt_note(format!(
             "key_host action=start result=passed pid={child_id} port={port} attempt={attempt}"
         ));
+    }
+    // 输入环境快照（2026-11-26）：现场需要回答"本进程什么权限、系统允许 LL
+    // 钩子执行多久、钩子是否被诊断开关关掉"——这三项都会让注入回声整片为 0，
+    // 却与目标 App 无关。每次进程只落一次（首次安装宿主之后）。
+    if !INPUT_ENV_LOGGED.swap(true, Ordering::SeqCst) {
+        crate::ble::gatt_note(crate::input_target::input_env_note(child_id));
     }
     let reader = Arc::clone(&handle);
     std::thread::Builder::new()
