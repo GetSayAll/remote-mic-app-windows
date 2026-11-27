@@ -2924,6 +2924,11 @@ fn fire_gesture(
             // 0.5.0 现场就是 `map_inject result=ok` 与"测试页一个键都没有"同时
             // 成立。这里补上第二层：本进程键钩子宿主看到的注入事件回声
             // （`echo_delta`/`last_*`，见 key_gate::InjectedEcho）。
+            //
+            // 2026-11-26：再补第三层——注入前的目标快照（前台/焦点/完整性/
+            // 可见性）。现场"只有一个 App 收不到、音量键却有效"只能靠它判
+            // "打在谁身上、对方什么权限"，注入侧本身不改行为。
+            crate::ble::gatt_note(crate::input_target::map_target_note());
             let echo_before = crate::key_gate::injected_event_count();
             match injector.tap(&chord) {
                 Ok(()) => {
