@@ -149,12 +149,8 @@ export default {
   "解锁键位方案": "Unlock button profiles",
   "解锁常用语": "Unlock Common Phrases",
   "解锁 iOS App": "Unlock iOS App",
-  "解锁 Apple Watch App": "Unlock Apple Watch App",
   "解锁微信小程序 SayAll": "Unlock WeChat Mini Program SayAll",
-  "解锁 Siri Remote 语音": "Unlock Siri Remote voice",
   "在 iPhone 上继续使用无线麦 SayAll App": "Keep using SayAll App on iPhone",
-  "从手表快速开始和结束操作": "Start and stop quickly from your watch",
-  "使用苹果遥控器的麦克风输入": "Use your Apple Remote microphone for voice input",
   "一次购买，长期有效，不自动续费": "One-time purchase, long-term access, no auto-renewal",
   "让语音输入更方便更快捷": "Make voice input easier and faster",
   "该兑换码已被使用或已过期。":
