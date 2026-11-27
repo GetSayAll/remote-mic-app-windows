@@ -299,6 +299,8 @@ nav { display: grid; gap: 4px; }
   scrollbar-width: none;
 }
 .content::-webkit-scrollbar { display: none; }
+/* 按键页自己管理内部滚动；外层再滚会把固定页头推出视口并留下底部空白。 */
+.content:has(.buttons-page.mapping-page) { overflow: hidden; }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 /* 全应用隐藏滚动条（仍可滚动）：WebView2 的经典滚动条在卡片里很显眼。 */
 * { scrollbar-width: none; }
@@ -899,7 +901,7 @@ html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); co
 .buttons-page.mapping-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: calc(100% - var(--update-banner-offset, 0px));
   min-height: 0;
   overflow: hidden;
 }

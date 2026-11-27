@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Component } from "vue";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import WindowTitleBar from "./components/WindowTitleBar.vue";
 import UpdateCompletedDialog from "./components/UpdateCompletedDialog.vue";
@@ -41,6 +41,19 @@ import ReflectionsPage from "./pages/ReflectionsPage.vue";
 import ProfilePage from "./pages/ProfilePage.vue";
 
 const activePage = ref<string>(loadPersistedPage() ?? "buttons");
+const contentEl = ref<HTMLElement | null>(null);
+
+function keepWindowAtTop(): void {
+  if (window.scrollX !== 0 || window.scrollY !== 0) {
+    window.scrollTo(0, 0);
+  }
+}
+
+watch(activePage, async () => {
+  await nextTick();
+  contentEl.value?.scrollTo({ top: 0 });
+  keepWindowAtTop();
+});
 /** 页面间带参数的导航（APP 适配 ↔ 按键页）；侧栏切换会清空。 */
 const pendingNavigation = ref<NavigationRequest | null>(null);
 function selectPage(page: string): void {
@@ -200,11 +213,18 @@ const updateBannerVisible = computed(
     activePage.value !== "recommendations",
 );
 
+watch(updateBannerVisible, async () => {
+  await nextTick();
+  contentEl.value?.scrollTo({ top: 0 });
+  keepWindowAtTop();
+});
+
 function showUpdatePage(): void {
   activePage.value = "settings";
 }
 
 onMounted(async () => {
+  window.addEventListener("scroll", keepWindowAtTop, { passive: true });
   const refreshRuntime = async () => {
     try {
       runtime.value = await getRuntimeSnapshot();
@@ -296,6 +316,7 @@ onUnmounted(() => {
   if (profileLabelTimer) clearInterval(profileLabelTimer);
   window.removeEventListener("keydown", handleWindowKeydown, true);
   window.removeEventListener(APP_ICON_CHANGED_EVENT, onAppIconChanged);
+  window.removeEventListener("scroll", keepWindowAtTop);
 });
 </script>
 
@@ -316,7 +337,11 @@ onUnmounted(() => {
         :app-version="runtime?.appVersion ?? ''"
         @select="selectPage"
       />
-      <main class="content">
+      <main
+        ref="contentEl"
+        class="content"
+        :style="{ '--update-banner-offset': updateBannerVisible ? '68px' : '0px' }"
+      >
         <div v-if="loadError" class="error-banner">{{ t(loadError) }}</div>
         <div v-if="updateBannerVisible" class="update-banner">
           <span>{{ t("发现新版本 {version}", { version: updateInfo?.version ?? "" }) }}</span>
