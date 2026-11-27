@@ -1,17 +1,17 @@
-//! 鼠标连续移动 PoC（issue #407）。
+//! 鼠标连续移动（issue #407）。
 //!
 //! 背景：现有 `mouse_move` 是「每次触发固定跳 N 像素」，按住连续执行时也只有
 //! 10Hz 台阶（见 `raw_input::RemoteButton::repeat_interval`）。本模块把方向键的
 //! `mouse_move` 按住过程改为**速度积分**：按下后按固定节拍累加位移，速度随按住
 //! 时长先慢后快，松手立即停止。
 //!
-//! PoC 边界（2026-11-26）：
+//! 行为边界（2026-11-26，2026-11-27 起默认启用）：
 //! - 只对四个方向键生效；其他按键即使配置了 `mouse_move` 也继续走旧行为。
 //! - 只替换「按住时连续执行」已开启且该触发槽位可连续执行的路径；关闭时仍是
 //!   原来的单步移动。
-//! - 默认关闭，必须显式设置环境变量 `SAYALL_POINTER_MOTION=1` 才启用，便于
-//!   真机 A/B；不写入配置、不改 schema、不改 UI。
-//! - 曲线参数是固定常量，PoC 阶段只按真机手感调整，不新增用户可调项。
+//! - 默认启用；仅诊断或回退时显式设置 `SAYALL_POINTER_MOTION=0|false|off|no`
+//!   才关闭。不写入配置、不改 schema、不改 UI。
+//! - 曲线参数是固定常量，按真机手感调整，不新增用户可调项。
 //!
 //! 纯状态机：不持锁、不做键鼠注入；唯一系统副作用是运动会话期间成对提升/恢复
 //! 计时器精度（`timeBeginPeriod`/`timeEndPeriod`）。时间由调用方注入，位移通过
@@ -44,15 +44,24 @@ pub const MAX_SESSION: Duration = Duration::from_secs(15);
 /// 长按期间进度日志的间隔。
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(1_000);
 
-/// PoC 开关：`SAYALL_POINTER_MOTION=1|true|on|yes`。
-pub fn poc_enabled_from_env() -> bool {
-    std::env::var_os("SAYALL_POINTER_MOTION")
-        .and_then(|value| value.to_str().map(str::to_owned))
-        .map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "on" | "yes"))
+/// 是否启用连续移动：默认启用。只有显式设置
+/// `SAYALL_POINTER_MOTION=0|false|off|no` 时才关闭，用于诊断和回退。
+pub fn enabled_from_env() -> bool {
+    enabled_from_value(
+        std::env::var_os("SAYALL_POINTER_MOTION")
+            .and_then(|value| value.to_str().map(str::to_owned))
+            .as_deref(),
+    )
 }
 
-/// PoC 只接管四个方向键。
+fn enabled_from_value(value: Option<&str>) -> bool {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) => !matches!(value.as_str(), "0" | "false" | "off" | "no"),
+        None => true,
+    }
+}
+
+/// 连续移动只接管四个方向键。
 pub fn is_direction_button(button: RemoteButton) -> bool {
     matches!(
         button,
@@ -176,7 +185,7 @@ pub enum MotionBegin {
     AlreadyActive,
     /// 本键上一轮注入失败/超时，等释放后再允许新会话。
     Suppressed,
-    /// PoC 未启用或距离为 0；调用方回退旧行为。
+    /// 连续移动未启用或距离为 0；调用方回退旧行为。
     Disabled,
 }
 
@@ -590,6 +599,18 @@ mod tests {
         for index in 1..=count {
             pointer.tick(start + TICK * index, |dx, dy| sink.move_by(dx, dy));
         }
+    }
+
+    #[test]
+    fn pointer_motion_is_enabled_by_default_and_explicitly_disableable() {
+        assert!(enabled_from_value(None));
+        assert!(enabled_from_value(Some("1")));
+        assert!(enabled_from_value(Some("true")));
+        assert!(!enabled_from_value(Some("0")));
+        assert!(!enabled_from_value(Some("false")));
+        assert!(!enabled_from_value(Some("off")));
+        assert!(!enabled_from_value(Some("no")));
+        assert!(!enabled_from_value(Some(" OFF ")));
     }
 
     #[test]

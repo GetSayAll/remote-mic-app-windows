@@ -960,8 +960,8 @@ impl ButtonMappingRuntime {
         Self::new_inner(injector, usage, snapshot, macro_runtime, None)
     }
 
-    /// 测试专用：显式开启/关闭指针连续移动 PoC，绕过环境变量与 `cfg(test)`
-    /// 的默认关闭（否则无法验证「按住 → 多帧移动 → 松手停止」的引擎接线）。
+    /// 测试专用：显式开启/关闭指针连续移动，绕过环境变量与 `cfg(test)`
+    /// 的测试默认关闭（生产默认开启；否则无法验证「按住 → 多帧移动 → 松手停止」的引擎接线）。
     #[cfg(test)]
     fn new_with_pointer_motion(
         injector: Arc<dyn MappingInjector>,
@@ -1352,11 +1352,11 @@ fn finish_all_repeat_runs(repeat_runs: &mut RepeatRuns, reason: &str) {
     }
 }
 
-/// 连续移动 PoC 的会话日志。逐帧 tick 不写日志，只落开始/结束/每秒进度/错误，
+/// 连续移动的会话日志。逐帧 tick 不写日志，只落开始/结束/每秒进度/错误，
 /// 避免 8ms 级调用把诊断文件刷爆（`gatt_note` 每次重开文件）。
 fn note_motion_start(start: &MotionStart) {
     crate::ble::gatt_note(format!(
-        "mouse_motion phase=start source=poc button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} fine_ms={} accel_ms={} tick_ms={}",
+        "mouse_motion phase=start source=builtin button={:?} direction={:?} distance={} base_px_s={:.1} max_px_s={:.1} fine_ms={} accel_ms={} tick_ms={}",
         start.button,
         start.direction,
         start.distance,
@@ -1385,7 +1385,7 @@ fn note_motion_end(end: &MotionEnd) {
         .map(|error| format!(" error_domain=send_input error={error}"))
         .unwrap_or_default();
     crate::ble::gatt_note(format!(
-        "mouse_motion phase=end source=poc button={:?} direction={:?} reason={} duration_ms={} ticks={} requested_px={:.1} observed_px={:.1} peak_px_s={:.1} dropped_ms={} errors={} moved={}{}",
+        "mouse_motion phase=end source=builtin button={:?} direction={:?} reason={} duration_ms={} ticks={} requested_px={:.1} observed_px={:.1} peak_px_s={:.1} dropped_ms={} errors={} moved={}{}",
         end.button,
         end.direction,
         end.reason,
@@ -1406,7 +1406,7 @@ fn note_motion_end(end: &MotionEnd) {
 
 fn note_motion_progress(progress: &MotionProgress) {
     crate::ble::gatt_note(format!(
-        "mouse_motion phase=progress source=poc button={:?} direction={:?} duration_ms={} ticks={} speed_px_s={:.1} requested_px={:.1} observed_px={:.1}",
+        "mouse_motion phase=progress source=builtin button={:?} direction={:?} duration_ms={} ticks={} speed_px_s={:.1} requested_px={:.1} observed_px={:.1}",
         progress.button,
         progress.direction,
         progress.elapsed.as_millis(),
@@ -1577,14 +1577,15 @@ fn engine_worker(
     // 方向键按住：按下/释放/长按阈值都由本表配对，配置变化与设备移除统一补释放。
     let mut directional_holds = DirectionalHolds::default();
     directional_holds.set_long_press(initial_timing.long_press_threshold());
-    // 鼠标连续移动 PoC（issue #407）：默认关闭，SAYALL_POINTER_MOTION=1 启用。
+    // 鼠标连续移动（issue #407）：默认启用；仅诊断/回退可用
+    // SAYALL_POINTER_MOTION=0 显式关闭。
     // 只接管方向键的 mouse_move + 已开启连续执行的路径；其余行为不变。
     // 单测里强制关闭：避免开发者环境变量让引擎用例走真实计时/注入分支。
     let pointer_motion_enabled = pointer_motion_override
-        .unwrap_or_else(|| !cfg!(test) && pointer_motion::poc_enabled_from_env());
+        .unwrap_or_else(|| !cfg!(test) && pointer_motion::enabled_from_env());
     let mut pointer_motion = PointerMotion::new(pointer_motion_enabled);
     crate::ble::gatt_note(format!(
-        "mouse_motion config source=poc enabled={} tick_ms={} base_px_s_per_unit={:.1} max_multiplier={:.1} max_px_s={:.1} fine_ms={} accel_ms={} max_session_ms={}",
+        "mouse_motion config source=builtin enabled={} tick_ms={} base_px_s_per_unit={:.1} max_multiplier={:.1} max_px_s={:.1} fine_ms={} accel_ms={} max_session_ms={}",
         pointer_motion.enabled(),
         pointer_motion::TICK.as_millis(),
         pointer_motion::BASE_SPEED_PER_UNIT,
@@ -2519,7 +2520,7 @@ fn handle_edges(
                 }
             }
         } else {
-            // PoC：释放沿先停连续移动，且必须在任何 continue 之前配对，
+            // 连续移动：释放沿先停连续移动，且必须在任何 continue 之前配对，
             // 避免被切换器/方向键按住/常用语面板消费后留下移动会话。
             if let Some(end) = pointer_motion.release(
                 edge.button,
@@ -2871,7 +2872,7 @@ fn fire_gesture(
             direction,
             distance,
         } => {
-            // PoC：方向键 + 已开启连续执行时，按住过程交给速度积分管理器；
+            // 连续移动：方向键 + 已开启连续执行时，按住过程交给速度积分管理器；
             // 首次触发建立会话，后续重复拍直接忽略（会话自己的 8ms ticker 在跑）。
             if continuous && pointer_motion::is_direction_button(button) {
                 match pointer_motion.begin(button, direction, distance, now) {
@@ -2880,7 +2881,7 @@ fn fire_gesture(
                         return false;
                     }
                     MotionBegin::AlreadyActive | MotionBegin::Suppressed => return false,
-                    // PoC 未启用：回退旧行为（下面照常落 map_fire + 单步移动）。
+                    // 连续移动未启用：回退旧行为（下面照常落 map_fire + 单步移动）。
                     MotionBegin::Disabled => {}
                 }
             }
@@ -5445,7 +5446,7 @@ mod tests {
         assert!(total_x > 0, "向右移动的 dx 必须为正，实际 {:?}", moved());
         assert!(
             injector.moves.lock().unwrap().is_empty(),
-            "PoC 路径不应再走旧的单步 mouse_move"
+            "连续移动路径不应再走旧的单步 mouse_move"
         );
 
         sender
