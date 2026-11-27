@@ -387,6 +387,7 @@ describe("diagnostic report presentation", () => {
         swallowedEdges: 0,
         leakedDowns: 0,
         firedGestures: 0,
+        uipiBlocked: 0,
         errorPresent: false,
       },
   ime: {

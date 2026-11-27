@@ -4008,6 +4008,9 @@ onUnmounted(() => {
 
     <p v-if="statusMessage" class="operation-message mapping-status">{{ statusMessage }}</p>
     <p v-if="mappingSnapshot?.lastError" class="error-text">{{ t("按键监听遇到问题，请到连接页重新连接遥控器后再试。") }}</p>
+    <p v-if="(mappingSnapshot?.uipiBlocked ?? 0) > 0" class="operation-message mapping-status">
+      {{ t("有按键没能送达：当前窗口的应用以管理员身份运行时，Windows 会拦截无线麦发送的按键。请取消它的“以管理员身份运行”后再试。") }}
+    </p>
     <RegisteredAppsDialog v-if="appPickerOpen" :known-apps="mappings.applications ?? []" :saving="busy" :save-error="appPickerError" @close="appPickerOpen = false; unsupportedReplaceArmed = false" @select="selectApp" />
     <EnhancedCaptureConfirmDialog v-if="showCaptureConfirm" @confirm="confirmCaptureDialog" @close="closeCaptureDialog" />
   </section>

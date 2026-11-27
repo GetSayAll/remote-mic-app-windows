@@ -303,4 +303,6 @@ export default {
   "导入配置…": "Import Configuration…",
   "导出配置…": "Export Configuration…",
   "按键监听遇到问题，请到连接页重新连接遥控器后再试。": "Button monitoring ran into a problem. Reconnect the remote on the Connection page, then try again.",
+  "有按键没能送达：当前窗口的应用以管理员身份运行时，Windows 会拦截无线麦发送的按键。请取消它的“以管理员身份运行”后再试。":
+    "Some button presses could not be delivered: when the app in the current window runs as administrator, Windows blocks the keys SayAll sends. Turn off \u201cRun as administrator\u201d for that app and try again.",
 } as Record<string, string>;

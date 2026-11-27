@@ -70,6 +70,7 @@ fn rust_serialization_matches_the_shared_windows_runtime_contract() {
                 swallowed_edges: 4,
                 leaked_downs: 0,
                 fired_gestures: 3,
+                uipi_blocked: 0,
                 last_fired: Some(FiredGesture {
                     button: RemoteButton::Home,
                     trigger: ButtonTrigger::Single,

@@ -190,6 +190,7 @@ describe("Rust and TypeScript IPC contract", () => {
       "swallowedEdges",
       "leakedDowns",
       "firedGestures",
+      "uipiBlocked",
       "lastFired",
       "lastError",
     ]);
