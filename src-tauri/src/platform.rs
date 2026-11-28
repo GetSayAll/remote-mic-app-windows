@@ -112,6 +112,21 @@ pub trait PlatformRuntime: Debug + Send + Sync {
     }
     fn button_mappings(&self) -> sayall_windows::send_input::ButtonMappings;
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings);
+    /// 手机遥控使用的音频/按键/语音句柄；默认无（仿真与无手机遥控的平台）。
+    #[cfg(windows)]
+    fn phone_remote_audio(&self) -> Option<Arc<sayall_windows::audio::AudioRuntime>> {
+        None
+    }
+    #[cfg(windows)]
+    fn phone_remote_button_mapping(
+        &self,
+    ) -> Option<Arc<sayall_windows::button_mapping::ButtonMappingRuntime>> {
+        None
+    }
+    #[cfg(windows)]
+    fn phone_remote_voice(&self) -> Option<sayall_windows::phone_voice::PhoneVoiceAccess> {
+        None
+    }
     /// 键位方案覆盖层（私有组件注入后调用；公开构建永不调用）。
     /// 默认 no-op：仿真与不支持方案覆盖的平台保持基础映射。
     fn set_button_profile_overlay(
@@ -390,6 +405,20 @@ impl PlatformRuntime for WindowsPlatform {
 
     fn set_button_mappings(&self, mappings: sayall_windows::send_input::ButtonMappings) {
         WindowsPlatform::set_button_mappings(self, mappings)
+    }
+
+    fn phone_remote_audio(&self) -> Option<Arc<sayall_windows::audio::AudioRuntime>> {
+        Some(WindowsPlatform::audio_runtime(self))
+    }
+
+    fn phone_remote_button_mapping(
+        &self,
+    ) -> Option<Arc<sayall_windows::button_mapping::ButtonMappingRuntime>> {
+        Some(WindowsPlatform::button_mapping_runtime(self))
+    }
+
+    fn phone_remote_voice(&self) -> Option<sayall_windows::phone_voice::PhoneVoiceAccess> {
+        Some(WindowsPlatform::phone_voice_access(self))
     }
 
     fn set_button_profile_overlay(

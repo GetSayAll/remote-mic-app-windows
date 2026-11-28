@@ -23,6 +23,10 @@
 | 语音功能 | 按住说话 / 遥控器语音键 | 连接页 |
 | 增强按键能力（按键页） | 全按键支持 | `ButtonsPage.vue` |
 | 同一设置在连接页的入口 | 支持更多输入工具 | `ConnectionPage.vue` |
+| 移动端连接分区（2026-11-27） | 标题「无线麦 SayAll 移动端」；两行「无线麦 SayAll iOS App」「无线麦 SayAll 微信小程序」；Apple Watch 本版本不显示。iOS 说明「开启连接后，打开无线麦 SayAll 会优先自动连接，无需扫码。」；小程序说明「微信扫码即可连接，手机和电脑可使用不同网络。」 | `MobileRemoteSection.vue` |
+| 移动端连接状态（2026-11-27） | 「尚未开启 / 连接」「正在等待手机 / 取消等待」「等待确认 / 取消等待」「已连接 / 取消连接」「等待扫码 / 显示二维码」「手机遥控已连接 / 显示二维码」「点击开通会员功能」；小程序断开只在弹窗内写「断开手机遥控」 | 同上 |
+| 受信任设备（2026-11-27） | 「{N} 台受信任设备」「清除受信任设备」「清除所有受信任设备？」；说明「当前连接不会中断。下次连接时，需要在电脑上重新允许。」 | 同上 |
+| iOS App Store 入口（2026-11-27） | 「打开 App Store」「复制链接」；链接与 Mac `AppLinks.iOSAppStore(for:)` 一致，不新造商店地址 | `src/lib/bridge.ts`（`IOS_APP_STORE_URL_ZH` / `IOS_APP_STORE_URL_EN`） |
 | 按键配置 | 自定义按键功能 / 按键映射 | `ButtonsPage.vue` |
 | 更高版本写入的未知按键动作（2026-11-11） | 动作摘要显示「不支持的动作（来自更新版本）」；当前版本只保留、不执行；编辑时第一次选择只解除保护，再次选择才替换。配置结构版本不降级，未知字段随文件 round-trip | `src/lib/bridge.ts`（`actionSummary` / `isKnownButtonAction`）、`ButtonsPage.vue` |
 | Windows 应用切换器（按键页「系统与媒体」） | 「切换应用」；卡片显示 `Alt + Tab`；悬停提示「切换应用：用左、右键选择，按“确定”确认，返回取消」。会话内方向键 / 确定 / 返回只操作系统切换器，15 秒无操作自动取消（对齐 Mac `Command+Tab` 临时会话，平台动作换成 Alt+Tab）；旧的一次性 `Alt+Tab` 绑定保留可执行。按键页、组合动作页与键位方案的预设芯片统一只显示按键组合，功能描述只作悬停提示；`Win + D`/`Win + L`/`Win + S`/`Win + Shift + S` 保存后摘要也显示 `Win`，不显示「左 Win」或「右 Win」。组合动作里的 `Alt + Tab` 也启动应用切换器会话（运行时按 Alt+Tab 识别）；键位方案复用共享清单的 `app_switcher` 动作。组合动作步骤在会话启动后立即完成，建议把 `Alt + Tab` 放在最后一步，避免后续步骤在切换器打开时继续发送按键 | `src/lib/shortcut-presets.ts`、`ButtonsPage.vue`、`MacrosPage.vue`、`src/lib/bridge.ts`（`actionSummary`）、`sayall-windows::app_switcher` |
@@ -55,6 +59,9 @@
 | 按键 | Buttons | 页面与侧栏 |
 | 组合动作 | Routine / Routines | 内容与动作单数；侧栏、页面标题、库标题用 Routines |
 | 连接 | Connection / Connect | 侧栏用 Connection；页面标题按 Mac `connection.page.title` 用 Connection & Voice；按钮动作「连接」用 Connect |
+| 移动端连接（2026-11-27） | SayAll Mobile / SayAll iOS App / SayAll WeChat Mini Program | 分区标题、两行标题；Apple Watch 本版本不显示 |
+| 受信任设备（2026-11-27） | Trusted Devices / Clear Trusted Devices | `{count} trusted devices`；不写 iPhone 专属 |
+| 小程序码（2026-11-27） | Mini Program Code / Show QR Code | 行内按钮 `Show QR Code`；弹窗内 `Disconnect Phone Remote` |
 | 推荐 | Picks / Recommended | 页面/侧栏用 Picks；设备徽标用 Recommended |
 | 权限 | Permissions | 设置页分组标题用 Permissions（2026-10-31 起不再是独立侧栏页） |
 | 诊断与日志 | Diagnostics & Logs | 设置页分组标题；诊断摘要、日志目录与问题反馈都在此分组 |

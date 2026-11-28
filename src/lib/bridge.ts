@@ -6,6 +6,25 @@ import { effectiveLanguage, type EffectiveLanguage } from "./language-state";
 
 export const VB_CABLE_DOWNLOAD_URL = "https://vb-audio.com/Cable/";
 
+/** iOS App Store 入口；与 Mac `AppLinks.iOSAppStore(for:)` 同一条链接。 */
+export const IOS_APP_STORE_URL_ZH =
+  "https://apps.apple.com/app/%E6%97%A0%E7%BA%BF%E9%BA%A6/id6797208067";
+export const IOS_APP_STORE_URL_EN =
+  "https://apps.apple.com/app/sayall/id6797208067";
+
+export function iosAppStoreUrl(): string {
+  return effectiveLanguage.value === "en" ? IOS_APP_STORE_URL_EN : IOS_APP_STORE_URL_ZH;
+}
+
+export async function openIOSAppStore(): Promise<void> {
+  const url = iosAppStoreUrl();
+  if (!isTauriRuntime()) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await openUrl(url);
+}
+
 /**
  * 设置页“问题反馈”的外部入口（2026-10-01 用户指定，2026-10-02 官网地址改为
  * 带 `?from=win` 的来源标记，便于官网区分 Windows 版来客）：官网首页与 Windows
@@ -610,9 +629,57 @@ export interface PlatformSnapshot {
   voicePriority?: VoicePrioritySnapshot;
 }
 
+export type PhoneRemoteAvailability = "available" | "unavailable";
+export type PhoneRemoteMembershipState = "active" | "sign_in_required" | "plus_required";
+export type NearbyRemoteState =
+  | "idle"
+  | "waiting"
+  | "waiting_for_approval"
+  | "connected"
+  | "failed";
+export type WebRemoteState =
+  | "idle"
+  | "unavailable"
+  | "waiting_for_scan"
+  | "waiting_for_approval"
+  | "connected"
+  | "expired"
+  | "failed";
+
+export interface NearbyRemoteSnapshot {
+  state: NearbyRemoteState;
+  expiresAt: number | null;
+  deviceName: string | null;
+  qrCode: string | null;
+}
+
+export interface WebRemoteSnapshot {
+  state: WebRemoteState;
+  expiresAt: number | null;
+  deviceName: string | null;
+  miniProgramCode: string | null;
+}
+
+export interface PhoneRemoteApproval {
+  requestId: string;
+  deviceName: string;
+  pairingCode: string;
+}
+
+export interface PhoneRemoteSnapshot {
+  availability: PhoneRemoteAvailability;
+  membership: PhoneRemoteMembershipState;
+  ios: NearbyRemoteSnapshot;
+  web: WebRemoteSnapshot;
+  trustedDeviceCount: number;
+  approval: PhoneRemoteApproval | null;
+}
+
 export interface RuntimeSnapshot {
   appVersion: string;
   platform: PlatformSnapshot;
+  /** 移动端连接；旧快照或公开构建可能没有该字段。 */
+  phoneRemote?: PhoneRemoteSnapshot;
 }
 
 export interface DiagnosticReport {
@@ -858,6 +925,24 @@ const browserSnapshot: RuntimeSnapshot = {
       lastError: null,
     },
   },
+  phoneRemote: {
+    availability: "available",
+    membership: "active",
+    ios: {
+      state: "idle",
+      expiresAt: null,
+      deviceName: null,
+      qrCode: null,
+    },
+    web: {
+      state: "idle",
+      expiresAt: null,
+      deviceName: null,
+      miniProgramCode: null,
+    },
+    trustedDeviceCount: 2,
+    approval: null,
+  },
 };
 
 export function isTauriRuntime(): boolean {
@@ -869,6 +954,117 @@ export async function getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
     return browserSnapshot;
   }
   return invoke<RuntimeSnapshot>("get_runtime_snapshot");
+}
+
+function browserPhoneRemoteSnapshot(): PhoneRemoteSnapshot {
+  return JSON.parse(JSON.stringify(browserSnapshot.phoneRemote!)) as PhoneRemoteSnapshot;
+}
+
+/** 只把用户自定义过的单次动作标题发给手机；未配置的键沿用 App 内置名称。 */
+export function phoneRemoteButtonTitles(mappings: ButtonMappings): Record<string, string> {
+  const titles: Record<string, string> = {};
+  for (const [button, actions] of Object.entries(mappings.actions)) {
+    const action = [actions?.single, actions?.long, actions?.double].find(
+      (candidate) => candidate && candidate.type !== "disabled",
+    );
+    if (!action) continue;
+    titles[button] = actionSummary(action).slice(0, 10);
+  }
+  return titles;
+}
+
+async function syncPhoneRemoteButtonTitles(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const mappings = await getButtonMappings();
+  await invoke("set_phone_remote_button_titles", { titles: phoneRemoteButtonTitles(mappings) });
+}
+
+export async function startPhoneRemoteIos(): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.ios = { ...snapshot.ios, state: "waiting" };
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  try {
+    await syncPhoneRemoteButtonTitles();
+  } catch (error) {
+    console.error("[phone-remote] button titles", error);
+  }
+  return invoke<PhoneRemoteSnapshot>("start_phone_remote_ios");
+}
+
+export async function stopPhoneRemoteIos(): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.ios = {
+      state: "idle",
+      expiresAt: null,
+      deviceName: null,
+      qrCode: null,
+    };
+    snapshot.approval = null;
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  return invoke<PhoneRemoteSnapshot>("stop_phone_remote_ios");
+}
+
+export async function approvePhoneRemote(requestId: string): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.approval = null;
+    snapshot.ios = { ...snapshot.ios, state: "connected", deviceName: "Andy 的 iPhone" };
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  return invoke<PhoneRemoteSnapshot>("approve_phone_remote", { requestId });
+}
+
+export async function denyPhoneRemote(requestId: string): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.approval = null;
+    snapshot.ios = { ...snapshot.ios, state: "waiting" };
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  return invoke<PhoneRemoteSnapshot>("deny_phone_remote", { requestId });
+}
+
+export async function clearPhoneRemoteTrustedDevices(): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.trustedDeviceCount = 0;
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  return invoke<PhoneRemoteSnapshot>("clear_phone_remote_trusted_devices");
+}
+
+export async function startPhoneRemoteWeb(): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.web = { ...snapshot.web, state: "waiting_for_scan" };
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  return invoke<PhoneRemoteSnapshot>("start_phone_remote_web");
+}
+
+export async function stopPhoneRemoteWeb(): Promise<PhoneRemoteSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = browserPhoneRemoteSnapshot();
+    snapshot.web = {
+      state: "idle",
+      expiresAt: null,
+      deviceName: null,
+      miniProgramCode: null,
+    };
+    browserSnapshot.phoneRemote = snapshot;
+    return browserPhoneRemoteSnapshot();
+  }
+  return invoke<PhoneRemoteSnapshot>("stop_phone_remote_web");
 }
 
 /** 设置页账号区只需要的会员摘要；不携带令牌、租约或设备标识。 */
@@ -1594,7 +1790,13 @@ export async function saveButtonMappings(mappings: ButtonMappings): Promise<Butt
   if (!isTauriRuntime()) {
     throw new Error("当前是浏览器预览，无法保存按键映射");
   }
-  return invoke<ButtonMappings>("save_button_mappings", { mappings });
+  const saved = await invoke<ButtonMappings>("save_button_mappings", { mappings });
+  try {
+    await syncPhoneRemoteButtonTitles();
+  } catch (error) {
+    console.error("[phone-remote] button titles", error);
+  }
+  return saved;
 }
 
 export async function resetButtonMappings(): Promise<ButtonMappings> {

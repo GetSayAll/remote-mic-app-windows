@@ -32,6 +32,7 @@ mod onboarding;
 mod platform;
 mod rc003_task;
 mod recommendations;
+mod remote;
 mod settings;
 mod shortcut_icons;
 mod startup;
@@ -822,6 +823,8 @@ struct RuntimeSnapshot {
     /// 应用版本（package_info 同源；String 而非 &'static str——不再依赖编译期常量）。
     app_version: String,
     platform: PlatformSnapshot,
+    /// 移动端连接（iOS / 微信小程序）；公开构建为 unavailable，前端不渲染分区。
+    phone_remote: remote::PhoneRemoteSnapshot,
 }
 
 struct AppState {
@@ -835,6 +838,8 @@ struct AppState {
     capture_unavailable: Arc<std::sync::atomic::AtomicU8>,
     /// 会员组件（2026-10-15）：公开构建是空实现，私有构建注入真实运行时。
     membership: Arc<dyn MembershipRuntime>,
+    /// 移动端连接（iOS / 微信小程序）：公开构建返回 unavailable，私有构建注入。
+    phone_remote: Arc<dyn remote::PhoneRemoteRuntime>,
     /// 启动对账**主动关掉**开关的原因（2026-10-15，issue #264 附加观察甲）：只用于
     /// 界面说明与诊断块，判据只此一处（见 `CaptureRevoke`）。
     capture_revoked: Arc<std::sync::atomic::AtomicU8>,
@@ -1217,7 +1222,67 @@ fn get_runtime_snapshot(
         // 安装 0.2.0 构建而关于页显示 0.1.0）。
         app_version: app.package_info().version.to_string(),
         platform: state.platform.snapshot(),
+        phone_remote: state.phone_remote.snapshot(),
     }
+}
+
+#[tauri::command]
+fn start_phone_remote_ios(
+    state: tauri::State<'_, AppState>,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.start_ios()
+}
+
+#[tauri::command]
+fn stop_phone_remote_ios(
+    state: tauri::State<'_, AppState>,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.stop_ios()
+}
+
+#[tauri::command]
+fn set_phone_remote_button_titles(
+    state: tauri::State<'_, AppState>,
+    titles: std::collections::BTreeMap<String, String>,
+) {
+    state.phone_remote.set_button_titles(titles);
+}
+
+#[tauri::command]
+fn approve_phone_remote(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.approve(&request_id)
+}
+
+#[tauri::command]
+fn deny_phone_remote(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.deny(&request_id)
+}
+
+#[tauri::command]
+fn clear_phone_remote_trusted_devices(
+    state: tauri::State<'_, AppState>,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.clear_trusted_devices()
+}
+
+#[tauri::command]
+fn start_phone_remote_web(
+    state: tauri::State<'_, AppState>,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.start_web()
+}
+
+#[tauri::command]
+fn stop_phone_remote_web(
+    state: tauri::State<'_, AppState>,
+) -> Result<remote::PhoneRemoteSnapshot, String> {
+    state.phone_remote.stop_web()
 }
 
 #[tauri::command]
@@ -5770,6 +5835,8 @@ fn shutdown_platform_for_exit(app: &tauri::AppHandle) {
     // 会员组件收尾（2026-10-15）：私有实现在这里释放网络与凭据刷新任务，
     // 公开实现是 no-op。
     app.state::<AppState>().membership.shutdown();
+    // 移动端连接收尾（幂等；公开实现 no-op）：停 TCP/BLE、审批和二维码。
+    app.state::<AppState>().phone_remote.shutdown();
     // 常用语收尾（幂等；未接入组件时空操作）：关面板并**等待**在途插入事务
     // 完成（含剪贴板恢复窗口）。退出是 process::exit，不执行析构——必须在这里
     // 显式等待，否则用户剪贴板可能停在常用语文本上。
@@ -6742,6 +6809,28 @@ pub fn run() {
             );
 
             let membership_runtime = membership::install(usage_statistics_path.clone());
+            // 移动端连接私有组件（可选）：公开构建返回 unavailable，分区不渲染。
+            #[cfg(windows)]
+            let phone_remote_attention: Option<Arc<dyn Fn() + Send + Sync>> = {
+                let attention_app = app.handle().clone();
+                Some(Arc::new(move || {
+                    show_main_window(&attention_app, "phone_remote_approval");
+                }))
+            };
+            #[cfg(not(windows))]
+            let phone_remote_attention: Option<Arc<dyn Fn() + Send + Sync>> = None;
+            let phone_remote_runtime = remote::install(remote::PhoneRemoteAccess {
+                platform: Arc::clone(&platform),
+                membership: Arc::clone(&membership_runtime),
+                app_version: app.package_info().version.to_string(),
+                on_approval: phone_remote_attention,
+                #[cfg(windows)]
+                audio: platform.phone_remote_audio(),
+                #[cfg(windows)]
+                button_mapping: platform.phone_remote_button_mapping(),
+                #[cfg(windows)]
+                voice: platform.phone_remote_voice(),
+            });
             // 键位方案私有组件（可选）：未注入时空壳返回 false，入口不出现。
             button_profiles::install(
                 app.handle(),
@@ -6756,6 +6845,7 @@ pub fn run() {
                 capture_health,
                 capture_unavailable,
                 membership: membership_runtime,
+                phone_remote: phone_remote_runtime,
                 capture_revoked,
                 pending_update: std::sync::Mutex::new(None),
                 update_completed_version: std::sync::Mutex::new(
@@ -6908,6 +6998,14 @@ pub fn run() {
         get_runtime_snapshot,
         get_usage_profile,
         get_membership_snapshot,
+        start_phone_remote_ios,
+        stop_phone_remote_ios,
+        set_phone_remote_button_titles,
+        approve_phone_remote,
+        deny_phone_remote,
+        clear_phone_remote_trusted_devices,
+        start_phone_remote_web,
+        stop_phone_remote_web,
         refresh_membership,
         start_membership_email_login,
         verify_membership_email_login,
@@ -7057,6 +7155,14 @@ pub fn run() {
         get_runtime_snapshot,
         get_usage_profile,
         get_membership_snapshot,
+        start_phone_remote_ios,
+        stop_phone_remote_ios,
+        set_phone_remote_button_titles,
+        approve_phone_remote,
+        deny_phone_remote,
+        clear_phone_remote_trusted_devices,
+        start_phone_remote_web,
+        stop_phone_remote_web,
         refresh_membership,
         start_membership_email_login,
         verify_membership_email_login,

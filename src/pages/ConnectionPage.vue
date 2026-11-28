@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import BatteryIndicator from "../components/BatteryIndicator.vue";
 import EnhancedCaptureConfirmDialog from "../components/EnhancedCaptureConfirmDialog.vue";
+import MobileRemoteSection from "../components/MobileRemoteSection.vue";
 import { VOICE_HOTKEY_CUSTOM_CAPTURE_ENABLED } from "../lib/feature-flags";
 import { reasonToken, reportFrontendEvent } from "../lib/frontend-diagnostics";
 import { t, tPage } from "../lib/i18n";
@@ -80,6 +81,7 @@ import {
 } from "../lib/bridge";
 
 const props = defineProps<{ runtime: RuntimeSnapshot | null }>();
+const emit = defineEmits<{ navigate: [page: string] }>();
 
 const emptyConnection = (): ConnectionSnapshot => ({
   phase: "idle",
@@ -1779,6 +1781,11 @@ onUnmounted(() => {
         </section>
       </div>
     </article>
+
+    <MobileRemoteSection
+      :snapshot="runtime?.phoneRemote ?? null"
+      @navigate="emit('navigate', $event)"
+    />
 
     <details class="usage-hint-details faq">
       <summary>{{ t("常见问题（点开查看）") }}</summary>
