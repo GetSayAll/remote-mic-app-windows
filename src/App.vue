@@ -22,7 +22,7 @@ import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
 import { t } from "./lib/i18n";
-import { privatePageComponents } from "./private/feature-pages";
+import { privateFeaturePages, privatePageComponents } from "./private/feature-pages";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
@@ -238,6 +238,10 @@ function showUpdatePage(): void {
   activePage.value = "settings";
 }
 
+const buttonProfilesAvailable = privateFeaturePages.some(
+  (page) => page.id === "keyProfiles",
+);
+
 function openButtonProfileFile(path: string): void {
   if (!path) return;
   showOnboarding.value = false;
@@ -320,6 +324,7 @@ onMounted(async () => {
   void refreshProfileLabel();
   void refreshAppIcon();
   void (async () => {
+    if (!buttonProfilesAvailable) return;
     try {
       unlistenButtonProfileOpen = await subscribeButtonProfileOpenFile(
         openButtonProfileFile,
