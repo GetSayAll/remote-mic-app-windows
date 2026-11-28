@@ -147,6 +147,11 @@ export default {
   "继续支付": "Continue payment",
   "获取支持": "Get support",
   "解锁键位方案": "Unlock button profiles",
+  "解锁常用语": "Unlock Common Phrases",
+  "解锁 iOS App": "Unlock iOS App",
+  "解锁微信小程序 SayAll": "Unlock WeChat Mini Program SayAll",
+  "在 iPhone 上继续使用无线麦 SayAll App": "Keep using SayAll App on iPhone",
+  "一次购买，长期有效，不自动续费": "One-time purchase, long-term access, no auto-renewal",
   "让语音输入更方便更快捷": "Make voice input easier and faster",
   "该兑换码已被使用或已过期。":
     "This redemption code has been used or has expired.",
