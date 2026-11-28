@@ -5938,6 +5938,12 @@ fn spawn_second_instance_listener(app: tauri::AppHandle) {
                         .to_owned(),
                 );
                 show_main_window(&app, "second_instance");
+                if let Some(path) = sayall_windows::button_profile_open::take() {
+                    let _ = app.emit(
+                        "sayall-open-button-profile",
+                        path.to_string_lossy().into_owned(),
+                    );
+                }
             }
         });
     if let Err(error) = spawned {
@@ -6027,7 +6033,11 @@ pub fn run() {
             Ok(handle) => {
                 // CreateMutexW 对"已存在"返回有效句柄 + GetLastError=
                 // ERROR_ALREADY_EXISTS（不是失败）；其余残留错误值无意义。
-                if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+                if already_running {
+                    if let Some(path) = sayall_windows::button_profile_open::path_from_args() {
+                        let _ = sayall_windows::button_profile_open::stash(&path);
+                    }
                     // 请求已运行实例把主窗口显示出来（命名事件由对端的
                     // `spawn_second_instance_listener` 等待；对端是未带此功能的
                     // 旧版本时请求失败，如实记录但按原样退出）。
@@ -6049,6 +6059,9 @@ pub fn run() {
                 }
                 // 故意持有互斥体句柄不关闭：进程存活期间保持占有，退出时由系统释放。
                 std::mem::forget(handle);
+                if let Some(path) = sayall_windows::button_profile_open::path_from_args() {
+                    let _ = sayall_windows::button_profile_open::stash(&path);
+                }
                 sayall_windows::gatt_note(
                     "app_lifecycle event=single_instance phase=completed terminal_result=passed"
                         .to_owned(),
@@ -7063,6 +7076,7 @@ pub fn run() {
         button_profiles::button_profiles_access,
         button_profiles::button_profiles_pick_import_file,
         button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_take_open_file,
         button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,
@@ -7220,6 +7234,7 @@ pub fn run() {
         button_profiles::button_profiles_access,
         button_profiles::button_profiles_pick_import_file,
         button_profiles::button_profiles_pick_export_file,
+        button_profiles::button_profiles_take_open_file,
         button_profiles::button_profiles_dispatch,
         get_combined_actions,
         save_macro,

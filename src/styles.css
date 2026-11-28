@@ -281,8 +281,8 @@ nav { display: grid; gap: 4px; }
 .sidebar-footer { margin-top: auto; padding: 10px 4px; color: var(--muted); font-size: 12px; text-align: center; }
 
 /* 2026-11-22 Andy：所有侧边栏页面共用 .content 的左右留白，统一为左 22px / 右 13.5px。
-   此前按物理 48 / 52 取逻辑值 32 / 35.5（2026-10-04）；本次收敛为一组全局值，
-   不再按页面单独调整。 */
+   右上「键位方案市场」右边缘与右栏卡片右边缘对齐；此前按物理 48 / 52 取逻辑值
+   32 / 35.5（2026-10-04），本次收敛为一组全局值，不再按页面单独调整。 */
 .content {
   min-width: 0;
   /* 与微信一致：主内容是一块浮在侧栏底色上的圆角面板，底部/右侧留 8px
@@ -500,7 +500,7 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .update-banner .link-button:hover { background: var(--accent-hover); }
 
 /* ---- 按键映射页（Mac RemoteMappingCanvas 对标） ---- */
-/* 头部对齐 Mac mappingPage：标题 + 启用开关居左同行，遥控器状态最右。 */
+/* 头部对齐 Mac mappingPage：标题、副标题、自定义按键开关纵向排列，遥控器状态最右。 */
 .mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .buttons-page .page-header h1 { font-size: 24px; margin: 0; }
 .mapping-header-controls { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
@@ -518,6 +518,124 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .remote-info-status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 /* 按钮文案在「重新连接 / 连接中… / 立即连接」之间切换，锁个最小宽度避免卡片左右抖。 */
 .remote-info-card button { min-width: 84px; }
+/* 键位方案作用域条：固定在页头下，方案多时只滚动胶囊。 */
+.profile-scope-bar {
+  position: static;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  margin-top: 4px;
+  padding: 2px 0 0;
+  background: transparent;
+  box-shadow: none;
+  min-width: 0;
+}
+.scope-chips {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-height: 60px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 2px 2px 2px 0;
+  scrollbar-width: thin;
+}
+.scope-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.scope-chip.selected {
+  border-color: var(--accent);
+  background: var(--accent-surface);
+  color: var(--accent);
+  font-weight: 600;
+}
+.profile-scope-bar > .secondary-button {
+  flex: none;
+  align-self: center;
+  min-height: 24px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+.scope-membership-hint {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.profile-scope-hint {
+  margin: 0;
+  padding: 0 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.profile-save-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.32);
+}
+.profile-save-dialog {
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 24px 60px var(--shadow-card);
+}
+.profile-save-dialog h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+.profile-save-dialog p { margin: 0 0 12px; font-size: 12px; }
+.profile-save-note { margin-top: 12px !important; }
+.profile-save-scope { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.profile-save-scope-chip {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--pending-surface);
+  color: var(--text-control);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.profile-save-field { display: grid; gap: 5px; font-size: 12px; }
+.profile-save-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font: inherit;
+}
+.profile-save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+@media (max-width: 900px) {
+  .profile-scope-bar { flex-wrap: wrap; }
+}
 .device-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-raised); font-size: 13px; white-space: nowrap; }
 /* 不可用说明（ARM64 上的「全按键支持」，2026-10-07 issue #206）：
    紧跟在开关标签之后，与标题行同一行（空间不足时由 flex-wrap 换行）。
@@ -536,7 +654,7 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
   width: 100%;
   min-width: 800px;
   height: 570px;
-  margin-bottom: calc(-570px * (1 - var(--map-scale)));
+  margin-bottom: calc(-570px * (1 - var(--map-scale)) + 5px);
   flex: 0 0 auto;
   --map-scale: min(1, (100vw - 152px) / 800px, 100vh / 640px);
   transform: scale(var(--map-scale));
@@ -565,29 +683,85 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
    卡上出现两种时序。 */
 .anchor-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--pressed); opacity: 0; pointer-events: none; }
 .anchor-dot.visible { opacity: 1; }
-.mapping-card { position: absolute; height: 72px; padding: 6px 9px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--mapping-neutral); cursor: pointer; }
+.mapping-card { position: absolute; display: flex; flex-direction: column; justify-content: flex-start; height: 78px; padding: 4px 8px 8px; border-radius: 10px; border: 1px solid var(--border-strong); background: #fff; cursor: pointer; }
+html[data-theme="dark"] .mapping-card { background: var(--card); }
 .mapping-card.left { left: 0; }
 .mapping-card.right { right: 0; }
 .mapping-card:hover { background: var(--surface-hover); border-color: var(--accent-border); box-shadow: 0 3px 12px var(--shadow-control); }
 .mapping-card.selected { background: var(--accent-surface); border-color: var(--accent-border); }
 .mapping-card.active { background: var(--pressed-surface); border-color: var(--pressed-border); }
 .mapping-card.flashed { box-shadow: 0 0 0 2px var(--pressed-ring); }
-.mapping-card-title { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-.mapping-card-title strong { font-size: 13px; font-weight: 600; }
+.mapping-card-title { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; min-width: 0; }
+.mapping-card-title strong { flex: none; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.mapping-hold-chip {
+  display: -webkit-box;
+  min-width: 0;
+  max-width: 66%;
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--mapping-neutral);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  text-align: right;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  cursor: pointer;
+}
+.mapping-hold-chip:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-primary); }
+.mapping-hold-chip:disabled { cursor: default; opacity: 0.5; }
+/* 英文比中文长：卡片宽度锁定 270–300px，三列动作名用 12px 会省略成「Scroll to Bot…」。
+   只在英文界面收紧字号并允许两行（默认中文继续保持 Mac 的单行省略）。 */
+html[lang="en"] .mapping-card { padding: 4px 7px; }
+html[lang="en"] .mapping-card-title { gap: 4px; margin-bottom: 2px; }
+html[lang="en"] .mapping-card-title strong { font-size: 12px; }
+html[lang="en"] .mapping-hold-chip {
+  display: -webkit-box;
+  max-width: 66%;
+  font-size: 10px;
+  line-height: 1.1;
+  white-space: normal;
+  text-align: right;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+html[lang="en"] .mapping-cell { padding: 2px 3px; }
+html[lang="en"] .mapping-cell small { font-size: 10px; line-height: 1.1; }
+html[lang="en"] .mapping-cell span {
+  display: -webkit-box;
+  font-size: 10px;
+  line-height: 1.1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  text-overflow: clip;
+}
 .mapping-icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--accent-text); }
-.mapping-cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
-.mapping-cell { min-width: 0; padding: 4px 5px; border: 0; border-radius: 6px; background: var(--mapping-neutral); text-align: center; cursor: pointer; transition: background-color 0.15s ease, box-shadow 0.15s ease; }
+.mapping-cells { display: grid; flex: 1; min-height: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.mapping-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; min-width: 0; padding: 2px 3px; border: 0; border-radius: 6px; background: var(--mapping-neutral); text-align: center; cursor: pointer; transition: background-color 0.15s ease, box-shadow 0.15s ease; }
 .mapping-cell:hover { background: var(--accent-surface); box-shadow: inset 0 0 0 1px var(--accent-surface-strong); }
-.mapping-cell small { display: block; font-size: 12px; font-weight: 500; color: var(--muted); line-height: 1.2; }
-/* 单行省略（完整文字放 title 悬停提示，Mac 同款 lineLimit(1)+help）。 */
+.mapping-cell small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); line-height: 1.1; }
+/* 动作名完整显示（2026-11-21 用户要求不再截断）：两行内换行，中文和英文同一规则；
+   长到两行仍放不下时才省略，完整文字仍在 title 悬停提示里。 */
 .mapping-cell span {
-  display: block;
-  font-size: 12px;
-  line-height: 1.2;
+  display: -webkit-box;
+  font-size: 10.5px;
+  line-height: 1.15;
   color: var(--muted);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
 }
 /* 映射内容（格子里的动作文字：打开记事本 / Enter / 滚轮向上 …）三列统一加粗：
    曾只给「单击」列加粗（`.mapping-cell:first-child span` 600），双击/长按是常规
@@ -615,7 +789,10 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .mapping-card.is-locked { opacity: 0.55; cursor: default; }
 .mapping-card.is-locked:hover { background: var(--mapping-neutral); border-color: var(--border-strong); box-shadow: none; }
 .mapping-card.is-locked .mapping-cell { opacity: 1; pointer-events: none; }
-.voice-card { cursor: default; }
+/* 键位方案只覆盖 10 个普通按键；其他卡整卡置灰，仍保留基础映射执行。 */
+.mapping-card.is-profile-disabled { opacity: 0.4; cursor: default; }
+.mapping-card.is-profile-disabled:hover { background: var(--mapping-neutral); border-color: var(--border-strong); box-shadow: none; }
+.voice-card { cursor: default; justify-content: center; }
 .voice-card .mapping-card-title { margin-bottom: 3px; }
 .voice-badge { margin-left: auto; font-size: 12px; font-weight: 600; min-height: 20px; padding: 2px 6px; }
 .voice-badge.active { color: var(--pressed-text); background: var(--pressed-surface); }
@@ -656,7 +833,8 @@ html[data-theme="dark"] .member-badge { background: rgba(244, 114, 182, 0.2); co
 .safe-capture-toggle { margin-top: 10px; white-space: normal; }
 .safe-capture-hint { margin-left: 2px; font-size: 12.5px; }
 .editor-note { margin-top: 10px; font-size: 12.5px; }
-.mapping-footer { margin-top: 10px; display: flex; align-items: center; gap: 12px; padding: 11px 16px; flex-wrap: wrap; }
+.mapping-footer { margin-top: 6px; margin-bottom: 6px; display: flex; align-items: center; gap: 12px; padding: 11px 16px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+html[data-theme="dark"] .mapping-footer { background: var(--card); }
 .mapping-footer-status { display: flex; align-items: center; gap: 7px; font-size: 13px; flex-wrap: wrap; }
 .mapping-footer-status small { color: var(--muted); font-size: 12.5px; }
 .lock-hint { font-size: 12.5px; }

@@ -39,6 +39,12 @@ export const OFFICIAL_WEBSITE_URL = "https://sayall.app/?from=win";
 export const GITHUB_REPOSITORY_URL = "https://github.com/GetSayAll/remote-mic-app-windows";
 
 /**
+ * 键位方案市场（对齐 Mac 会员页与键位方案页的「键位方案市场」入口）。
+ * 当前市场是公开内容仓库，不内置目录，也不在客户端下载或执行内容。
+ */
+export const BUTTON_PROFILES_MARKET_URL = "https://github.com/GetSayAll/sayall-market";
+
+/**
  * 分享面板的官网链接（对齐 Mac `AppSharing` 的 `from=mac_share`，Windows 用
  * `from=win_share`）。二维码是同一链接在本机生成的静态资产，不请求二维码服务。
  * 修改此值必须重新生成 `public/app-share-qr.png`：
@@ -1274,8 +1280,8 @@ export function formatDiagnosticReport(
  * 打开诊断日志目录（关于页入口）。返回实际打开的目录供界面显示。
  *
  * 目录由 Rust 侧从日志初始化的落盘路径推导，前端不拼接、也不传路径——
- * 保留 capabilities 的最小权限边界（opener 只放行 VB-CABLE 官网、产品官网与
- * 源码仓库三个固定 URL）。
+ * 保留 capabilities 的最小权限边界（opener 只放行 VB-CABLE 官网、产品官网、
+ * 源码仓库、键位方案市场与 Vokie 官网五个固定 URL）。
  */
 export async function openLogDirectory(): Promise<string> {
   if (!isTauriRuntime()) throw new Error("当前是浏览器预览，无法打开日志目录");
@@ -1423,6 +1429,11 @@ export async function openOfficialWebsite(): Promise<void> {
 /** 设置页“问题反馈”里的“GitHub”入口。 */
 export async function openGitHubRepository(): Promise<void> {
   await openExternalUrl(GITHUB_REPOSITORY_URL);
+}
+
+/** 键位方案页右上角的「键位方案市场」入口。 */
+export async function openButtonProfilesMarket(): Promise<void> {
+  await openExternalUrl(BUTTON_PROFILES_MARKET_URL);
 }
 
 /** 连接页“Vokie 未安装”提示里的官网入口（2026-10-01）。 */
@@ -1856,12 +1867,40 @@ export async function pickButtonProfilesImportFile(): Promise<string | null> {
   return invoke<string | null>("button_profiles_pick_import_file");
 }
 
-/** 选择键位方案备份的导出位置；取消返回 null。 */
-export async function pickButtonProfilesExportFile(): Promise<string | null> {
+/** 取走双击 `.sayall` 时排队的路径；没有则返回 null。 */
+export async function takeButtonProfilesOpenFile(): Promise<string | null> {
   if (!isTauriRuntime()) {
     return null;
   }
-  return invoke<string | null>("button_profiles_pick_export_file");
+  return invoke<string | null>("button_profiles_take_open_file");
+}
+
+/** 订阅运行中双击 `.sayall` 的通知；浏览器预览下为空订阅。 */
+export async function subscribeButtonProfileOpenFile(
+  handler: (path: string) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<string>("sayall-open-button-profile", (event) =>
+    handler(event.payload),
+  );
+  return () => {
+    void unlisten();
+  };
+}
+
+/** 选择键位方案 `.sayall` 的导出位置；取消返回 null。 */
+export async function pickButtonProfilesExportFile(
+  suggestedName?: string,
+): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("button_profiles_pick_export_file", {
+    suggestedName: suggestedName ?? null,
+  });
 }
 
 /** 键位方案页面命令（命令名与 payload 由私有组件定义）。 */

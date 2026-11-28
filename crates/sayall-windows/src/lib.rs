@@ -26,6 +26,8 @@ mod ble;
 mod bluetooth_radio;
 mod button_gestures;
 pub mod button_mapping;
+/// `.sayall` ??????????????????????
+pub mod button_profile_open;
 /// 键位方案可选组件的公开接缝（私有实现由构建期注入）。
 pub mod button_profiles;
 /// 常用语（内置内容、用户副本、五键分配、面板期认领与插入事务；纯逻辑，跨平台可单测）：

@@ -31,6 +31,9 @@ export interface NavigationRequest {
     appTarget?: string;
     button?: RemoteButton;
     trigger?: ButtonTrigger;
+    profileId?: string;
+    /** 双击 .sayall 后要直接预览的导入文件。 */
+    importPath?: string;
   };
 }
 

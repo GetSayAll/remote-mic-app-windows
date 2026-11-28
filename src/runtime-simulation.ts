@@ -271,7 +271,7 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   // 权威状态落地前的过渡帧不是本步要验证的东西。
   const gatedBackCard = await waitFor(() => {
     const card = Array.from(document.querySelectorAll<HTMLElement>(".mapping-card")).find(
-      (candidate) => candidate.querySelector(".mapping-card-title strong")?.textContent === "返回键",
+      (candidate) => candidate.querySelector(".mapping-card-title strong")?.textContent?.includes("返回"),
     );
     return card?.classList.contains("is-locked") ? card : null;
   }, "关闭态返回卡片整卡置灰");
@@ -288,7 +288,9 @@ async function runJourney(steps: string[]): Promise<PlatformSnapshot> {
   // 打开编辑器仍走「确定 · 单击」格子——关闭态下三键不可点击，上一步已钉住。
   const focusCell = await waitFor(() => {
     const cell = Array.from(document.querySelectorAll<HTMLButtonElement>(".mapping-cell")).find(
-      (candidate) => candidate.title.startsWith("确定键 · 单击"),
+      (candidate) =>
+        candidate.title.startsWith("确定键 · 单击") ||
+        candidate.title.startsWith("确定 · 单击"),
     );
     return cell ?? null;
   }, "确定键「单击」映射格");

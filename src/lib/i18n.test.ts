@@ -111,7 +111,7 @@ describe("全 UI i18n 完整性", () => {
     expect(t("应用语言")).toBe("App Language");
     expect(tNav("设置")).toBe("Settings");
     expect(tNav("推荐")).toBe("Picks");
-    expect(tNav("键位方案")).toBe("Button Profiles");
+    expect(tNav("键位方案")).toBe("Profiles");
     expect(tPage("连接")).toBe("Connection & Voice");
     expect(tPage("权限")).toBe("Permissions & Privacy");
     expect(t("推荐")).toBe("Recommended");

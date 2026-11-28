@@ -11,6 +11,8 @@ import {
   getOnboardingState,
   getRuntimeSnapshot,
   hideMainWindow,
+  subscribeButtonProfileOpenFile,
+  takeButtonProfilesOpenFile,
   takeUpdateCompletedVersion,
   type AppIconIdentifier,
   type RuntimeSnapshot,
@@ -20,7 +22,7 @@ import { reportFrontendEvent } from "./lib/frontend-diagnostics";
 import { useAppUpdate } from "./lib/app-update";
 import { ONBOARDING_WIZARD_ENABLED } from "./lib/feature-flags";
 import { t } from "./lib/i18n";
-import { privatePageComponents } from "./private/feature-pages";
+import { privateFeaturePages, privatePageComponents } from "./private/feature-pages";
 import {
   detectReloadRecovery,
   isBrowserReloadAccelerator,
@@ -188,6 +190,19 @@ const activePageProps = computed(() => {
     return {
       runtime: runtime.value,
       initialEditor: { button: params.button, trigger: params.trigger },
+      initialProfileId: params?.profileId ?? null,
+    };
+  }
+  if (activePage.value === "buttons" && params?.profileId) {
+    return {
+      runtime: runtime.value,
+      initialProfileId: params.profileId,
+    };
+  }
+  if (activePage.value === "keyProfiles" && params?.importPath) {
+    return {
+      runtime: runtime.value,
+      initialImportPath: params.importPath,
     };
   }
   return { runtime: runtime.value };
@@ -222,6 +237,18 @@ watch(updateBannerVisible, async () => {
 function showUpdatePage(): void {
   activePage.value = "settings";
 }
+
+const buttonProfilesAvailable = privateFeaturePages.some(
+  (page) => page.id === "keyProfiles",
+);
+
+function openButtonProfileFile(path: string): void {
+  if (!path) return;
+  showOnboarding.value = false;
+  onNavigate({ page: "keyProfiles", params: { importPath: path } });
+}
+
+let unlistenButtonProfileOpen: (() => void) | undefined;
 
 onMounted(async () => {
   window.addEventListener("scroll", keepWindowAtTop, { passive: true });
@@ -296,6 +323,18 @@ onMounted(async () => {
   await refreshRuntime();
   void refreshProfileLabel();
   void refreshAppIcon();
+  void (async () => {
+    if (!buttonProfilesAvailable) return;
+    try {
+      unlistenButtonProfileOpen = await subscribeButtonProfileOpenFile(
+        openButtonProfileFile,
+      );
+      const pending = await takeButtonProfilesOpenFile();
+      if (pending) openButtonProfileFile(pending);
+    } catch {
+      // 文件关联不是主功能；订阅失败时仍保留手动导入。
+    }
+  })();
   runtimePollTimer = setInterval(() => {
     void refreshRuntime();
   }, 1_000);
@@ -311,6 +350,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  unlistenButtonProfileOpen?.();
   if (runtimePollTimer) clearInterval(runtimePollTimer);
   if (updateCheckTimer) clearTimeout(updateCheckTimer);
   if (profileLabelTimer) clearInterval(profileLabelTimer);
