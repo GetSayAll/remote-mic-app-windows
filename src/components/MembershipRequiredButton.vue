@@ -30,9 +30,9 @@ defineEmits<{ open: [] }>();
   min-height: 32px;
   padding: 5px 14px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--membership-pink, #f53f8f);
-  /* Keep the label white on the brand pink pill. */
+  /* Keep the label white on the brand pink button. */
   color: #fff;
   font-size: 13px;
   font-weight: 600;
@@ -45,7 +45,7 @@ defineEmits<{ open: [] }>();
 }
 
 .membership-required-icon {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 </style>

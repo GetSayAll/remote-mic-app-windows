@@ -500,54 +500,6 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
 .update-banner .link-button:hover { background: var(--accent-hover); }
 
 /* ---- 按键映射页（Mac RemoteMappingCanvas 对标） ---- */
-/* 顶部整块（标题、作用域、范围提示）固定；内容单独滚动，切页时始终能看到当前方案。 */
-.buttons-page.mapping-page {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-.mapping-fixed-top {
-  flex: 0 0 auto;
-  z-index: 5;
-  padding-bottom: 6px;
-  background: var(--surface-canvas);
-  box-shadow: 0 10px 10px -10px rgba(0, 0, 0, 0.18);
-}
-.mapping-scroll-area {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding-top: 6px;
-  padding-bottom: 0;
-}
-.mapping-header-copy {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 20px;
-  align-items: center;
-}
-.mapping-page .page-header { margin-bottom: 0; }
-.mapping-header-copy > h1 { grid-column: 1; grid-row: 1; }
-.mapping-header-copy > .page-subtitle { grid-column: 1 / -1; grid-row: 2; }
-.mapping-toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  grid-column: 2;
-  grid-row: 1;
-  margin-top: 0;
-}
-@media (max-width: 760px) {
-  .mapping-header-copy { display: block; }
-  .mapping-toggle-row { margin-top: 8px; }
-}
 /* 头部对齐 Mac mappingPage：标题、副标题、自定义按键开关纵向排列，遥控器状态最右。 */
 .mapping-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .buttons-page .page-header h1 { font-size: 24px; margin: 0; }
@@ -561,18 +513,8 @@ body.pointer-nav .theme-option:has(input:focus-visible) { outline: none; }
    型号 + 状态/电量 + 重新连接；三种连接态高度一致，不插行、不抖动画布。
    （2026-10-04 Andy：去掉左侧遥控器图标，卡片只留文字与操作。） */
 .remote-info-card { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: 0 8px 26px var(--shadow-card); }
-.remote-info-card.connected { border-color: var(--accent-border); background: var(--accent-surface); }
 .remote-info-main { min-width: 0; display: grid; gap: 3px; }
 .remote-info-main strong { font-size: 13.5px; white-space: nowrap; }
-.remote-info-subtitle {
-  max-width: 240px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .remote-info-status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 /* 按钮文案在「重新连接 / 连接中… / 立即连接」之间切换，锁个最小宽度避免卡片左右抖。 */
 .remote-info-card button { min-width: 84px; }

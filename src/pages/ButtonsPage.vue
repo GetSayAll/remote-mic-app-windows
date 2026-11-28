@@ -1273,6 +1273,7 @@ type ActionFilter =
   | "applications"
   | "mouse"
   | "combinations"
+  | "commonPhrases"
   | "hold"
   | "buttonSpeed";
 const activeActionFilter = ref<ActionFilter>("all");
@@ -1288,6 +1289,9 @@ const actionFilterItems = computed<Array<{ id: ActionFilter; label: string }>>((
   ];
   if (COMBINATION_ACTIONS_ENABLED) {
     items.push({ id: "combinations", label: t("组合动作") });
+  }
+  if (commonPhrasesAvailable.value) {
+    items.push({ id: "commonPhrases", label: t("常用语") });
   }
   items.push(
     { id: "hold", label: t("按住") },
@@ -1328,7 +1332,7 @@ const showMacroSection = computed(
   () => activeActionFilter.value === "all" || activeActionFilter.value === "combinations",
 );
 const showCommonPhrasesSection = computed(
-  () => activeActionFilter.value === "all" || activeActionFilter.value === "customActions",
+  () => activeActionFilter.value === "all" || activeActionFilter.value === "commonPhrases",
 );
 const showMouseSection = computed(
   () => activeActionFilter.value === "all" || activeActionFilter.value === "mouse",
@@ -1737,7 +1741,7 @@ function filterForAction(action: ButtonAction | null): ActionFilter {
     case "run_macro":
       return COMBINATION_ACTIONS_ENABLED ? "combinations" : "all";
     case "open_common_phrases":
-      return "customActions";
+      return commonPhrasesAvailable.value ? "commonPhrases" : "customActions";
     case "open_app":
       return "applications";
     default:
@@ -3490,15 +3494,12 @@ onUnmounted(() => {
       >
         {{ profileScopeMembershipHint }}
       </span>
-      <button
+      <MembershipRequiredButton
         v-if="profileScopeNeedsMembership"
-        type="button"
-        class="secondary-button"
-        :title="profileScopeMembershipHint"
-        @click="membershipRoute"
-      >
-        {{ t("开通会员") }}
-      </button>
+        class="scope-membership-cta"
+        label="开通会员"
+        @open="membershipRoute"
+      />
       <button
         v-else
         type="button"
@@ -4592,7 +4593,25 @@ onUnmounted(() => {
 /* 全局 .mapping-editor 自带 10px 上边距；分类行与编辑卡之间的实际间距
    只保留 host 的 8px gap，避免 8 + 10 变成 18px。 */
 .mapping-editor-host > .mapping-editor { margin-top: 0; }
+:deep(.scope-membership-cta.membership-required-button),
+:deep(.common-phrases-cta.membership-required-button) {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+}
+
+:deep(.scope-membership-cta .membership-required-icon),
+:deep(.common-phrases-cta .membership-required-icon) {
+  width: 16px;
+  height: 16px;
+}
+
 .mapping-action-filter {
+
   display: flex;
   gap: 6px;
   /* 2026-11-24 用户定稿：分类行不再使用灰色底板；上方留白 8px，
