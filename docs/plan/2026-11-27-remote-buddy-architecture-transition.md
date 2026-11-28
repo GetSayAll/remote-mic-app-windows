@@ -277,11 +277,13 @@ HKLM\SYSTEM\CurrentControlSet\Services\BthPort\Parameters
 
 ```text
 legacy_active
-  └─ ETW 已授权 + 已绑定 + 可派发 → etw_handoff
-                                      ├─ 成功 → etw_active
-                                      └─ 失败 → legacy_active（若旧路径仍可用）
+  ├─ ETW 已授权 + 已绑定 + 可派发 → etw_handoff
+  │                                  ├─ 成功 → etw_active
+  │                                  └─ 失败 → legacy_active（若旧路径仍可用）
+  └─ 全按键关闭 → disabled
 etw_active
-  └─ ETW 失效/用户关闭 → legacy_active（若旧路径仍可用）或 disabled
+  ├─ ETW 单路失效（全按键仍开）→ legacy_active（若旧路径仍可用）或 disabled
+  └─ 全按键关闭 → disabled
 disabled（全按键关闭）
   └─ legacy 和 ETW 都停止
 ```
